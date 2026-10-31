@@ -1,0 +1,19 @@
+[
+  {
+    "id": 1792971564000,
+    "userProfilePK": 84770281,
+    "calendarDate": "2026-10-26",
+    "sleepTimeSeconds": 25961,
+    "napTimeSeconds": 0,
+    "sleepWindowConfirmed": true,
+    "sleepWindowConfirmationType": "enhanced_confirmed_final",
+    "sleepStartTimestampGMT": 1792971564000,
+    "sleepEndTimestampGMT": 1792998005000,
+    "sleepScores": {
+      "overall": {
+        "value": 65,
+        "qualifierKey": "FAIR"
+      }
+    }
+  }
+]

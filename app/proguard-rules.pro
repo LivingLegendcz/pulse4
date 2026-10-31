@@ -1,0 +1,3 @@
+-keep class com.chaquo.python.** { *; }
+-keepclassmembers class * { @kotlinx.serialization.Serializable *; }
+-keep class net.zetetic.database.** { *; }

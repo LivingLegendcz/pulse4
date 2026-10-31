@@ -1,0 +1,11 @@
+{
+  "userProfileId": 10000001,
+  "calendarDate": "2025-01-15",
+  "uuid": "00000000-0000-4000-8000-000000000001",
+  "wellnessStartTimeGmt": "2025-01-14T23:00:00.0",
+  "wellnessEndTimeGmt": "2025-01-15T16:23:00.0",
+  "totalSteps": 5000,
+  "restingHeartRate": 60,
+  "averageStressLevel": 25,
+  "bodyBatteryMostRecentValue": 50
+}

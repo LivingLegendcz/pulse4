@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="cs">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex, nofollow">
+<title>Pulse4 – návrat z Withings</title>
+<style>body{font-family:system-ui,sans-serif;max-width:32rem;margin:3rem auto;padding:0 1rem;line-height:1.5}</style>
+</head>
+<body>
+<h1>Přihlášení k Withings</h1>
+<p id="msg">Pokud se aplikace Pulse4 neotevřela sama, vraťte se do ní a zkuste přihlášení znovu. Tato stránka kód nikam neodesílá.</p>
+<script>
+  // Kód a state jsou v adrese jen díky selhání App Linku. Okamžitě je odstraníme z adresního řádku a historie;
+  // stránka nemá analytiku, žádné cizí skripty, obrázky ani písma a nic neukládá ani neodesílá.
+  if (location.search) history.replaceState(null, "", location.pathname);
+</script>
+</body>
+</html>

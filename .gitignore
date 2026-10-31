@@ -1,0 +1,14 @@
+build/
+.gradle/
+.tools/
+local.properties
+*.iml
+.idea/
+.kotlin/
+*.jks
+*.keystore
+*.apk
+*.aab
+emulator_screen.png
+phone_live.png
+emu_group_*.png

@@ -4,7 +4,7 @@ Osobní Android aplikace pro čtyři lidi: data z Garminu v telefonu, dobrovoln�
 a plánování tréninků. **Žádný vlastní aplikační server** – úložiště, přihlášení, fronty i oprávnění žijí v telefonech.
 Implementace podle dokumentu *Architektonický návrh a technický posudek* (stav k 28. 10. 2026).
 
-> **Stav: jádro, Withings a logika UI jsou hotové a otestované (173 testů). Android aplikace je napsaná, ale nebyla sestavena ani spuštěna.**
+> **Stav: jádro, Withings a logika UI jsou hotové a otestované (173 testů). Android aplikace se sestavuje a běží na fyzickém telefonu (Xiaomi POCO X3 NFC, Android 16); Withings přímé API čeká na registraci aplikace a callback doménu.**
 > Prostředí, ve kterém vznikla, nemělo Android SDK ani přístup na `dl.google.com` a `chaquo.com`. Přesný rozpis je v
 > [`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md). Garmin Personal API endpointy zde **nejsou vymyšlené** – viz
 > [`docs/garmin-endpoints.md`](docs/garmin-endpoints.md).
@@ -43,7 +43,7 @@ JVM moduly se sestaví a otestují bez Android SDK (`app` se do buildu zahrne je
 
 ## Withings a UI
 
-- **Withings** (`docs/withings.md`): Health Connect jako doporučená cesta, přímé API jako volitelná, ve výchozím stavu **vypnutá** a neověřená cesta
+- **Withings** (`docs/withings.md`): přímé API jako hlavní cesta (jedna registrace autora, Secret v aplikaci, rotace v aplikaci), Health Connect opuštěn; adresy API je třeba ověřit
   (dokumentace Withings nebyla dostupná, adresy a parametry jsou z paměti a konfigurovatelné), CSV jako nouzová cesta. Stejné vážení přes víc cest
   je jeden bod trendu; nejednoznačné měření (jiná osoba) do trendu nevstupuje, dokud je uživatel nepotvrdí; chybné lze označit a přežije re-import.
   Statická callback stránka a `assetlinks.json` jsou v `docs/withings-applink/`.

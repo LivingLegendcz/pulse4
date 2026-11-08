@@ -56,12 +56,16 @@ internal object Wire {
 
     /** Mapování stavu Withings na chyby poskytovatele; nikdy se nelogují těla ani tokeny. */
     fun check(e: Envelope): JsonObject {
-        when (e.status) {
-            0 -> return e.body ?: JsonObject(emptyMap())
-            401, 403 -> throw ProviderError.Unauthorized()
-            601 -> throw ProviderError.RateLimited(null)
-            else -> throw ProviderError.Server(e.status)
+        if (e.status == 0) return e.body ?: JsonObject(emptyMap())
+        val err = e.error?.lowercase().orEmpty()
+        val isAuthError = when (e.status) {
+            401, 403, 102, 2553, 2554, 2555, 2556 -> true
+            100 -> err.contains("session") || err.contains("token") || err.contains("auth") || err.contains("cookie")
+            else -> err.contains("session") || err.contains("unauthorized") || err.contains("forbidden")
         }
+        if (isAuthError) throw ProviderError.Unauthorized()
+        if (e.status == 601) throw ProviderError.RateLimited(null)
+        throw ProviderError.Server(e.status)
     }
 }
 

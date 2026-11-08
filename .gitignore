@@ -9,6 +9,7 @@ local.properties
 *.keystore
 *.apk
 *.aab
-emulator_screen.png
-phone_live.png
-emu_group_*.png
+*.png
+*.zip
+attachments/
+

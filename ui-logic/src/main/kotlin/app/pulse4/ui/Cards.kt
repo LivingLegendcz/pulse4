@@ -13,7 +13,21 @@ enum class Agg { SUM, LAST, AVG }
 object Aggregation {
     fun of(t: MetricType): Agg = when (t) {
         MetricType.STEPS, MetricType.SLEEP_DURATION -> Agg.SUM
-        MetricType.BODY_BATTERY, MetricType.RESTING_HEART_RATE, MetricType.WEIGHT, MetricType.BODY_FAT, MetricType.SLEEP_SCORE -> Agg.LAST
+        MetricType.BODY_BATTERY,
+        MetricType.RESTING_HEART_RATE,
+        MetricType.WEIGHT,
+        MetricType.BODY_FAT,
+        MetricType.FAT_FREE_MASS,
+        MetricType.MUSCLE_MASS,
+        MetricType.BONE_MASS,
+        MetricType.BODY_WATER,
+        MetricType.VISCERAL_FAT,
+        MetricType.VASCULAR_AGE,
+        MetricType.PULSE_WAVE_VELOCITY,
+        MetricType.BMR,
+        MetricType.METABOLIC_AGE,
+        MetricType.SLEEP_SCORE,
+        MetricType.ECG -> Agg.LAST
         else -> Agg.AVG
     }
 

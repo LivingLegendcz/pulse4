@@ -25,9 +25,14 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 
-data class Measure(val type: Int, val value: Double)
+data class Measure(
+    val type: Int,
+    val value: Double,
+    val position: Int? = null,
+    val algo: Int? = null,
+)
 
-/** Skupina měření jednoho vážení. `grpId` + typ dává stabilní externí ID. */
+/** Skupina měření jednoho vážení. `grpId` + typ (+ pozice) dává stabilní externí ID. */
 data class MeasureGroup(
     val grpId: Long,
     val date: Long,
@@ -37,12 +42,41 @@ data class MeasureGroup(
     val deviceId: String?,
     val timezone: String?,
     val measures: List<Measure>,
+    val deleted: Boolean = false,
 )
 
 object WithingsTypes {
     const val WEIGHT = 1
+    const val HEIGHT = 4
+    const val FAT_FREE_MASS = 5
     const val FAT_RATIO = 6
-    val requested = listOf(WEIGHT, FAT_RATIO)
+    const val FAT_MASS_WEIGHT = 8
+    const val HEART_RATE = 11
+    const val MUSCLE_MASS = 76
+    const val HYDRATION = 77
+    const val BONE_MASS = 88
+    const val PWV = 91
+    const val VASCULAR_AGE = 155
+    const val VISCERAL_FAT = 170
+    const val BMR = 226
+    const val METABOLIC_AGE = 227
+
+    val fullBodyComposition = listOf(
+        WEIGHT,
+        FAT_FREE_MASS,
+        FAT_RATIO,
+        FAT_MASS_WEIGHT,
+        HEART_RATE,
+        MUSCLE_MASS,
+        HYDRATION,
+        BONE_MASS,
+        PWV,
+        VASCULAR_AGE,
+        VISCERAL_FAT,
+        BMR,
+        METABOLIC_AGE
+    )
+    val requested = fullBodyComposition
 }
 
 /** Čtení `getmeas` včetně stránkování. Při odmítnutí tokenu se jednou obnoví a zopakuje. */
@@ -90,23 +124,35 @@ class WithingsApi(
     }
 
     companion object {
-        fun parse(body: JsonObject): List<MeasureGroup> =
-            (body["measuregrps"] as? JsonArray).orEmpty().mapNotNull { g ->
+        fun parse(body: JsonObject): List<MeasureGroup> {
+            val defaultTz = body["timezone"]?.jsonPrimitive?.contentOrNull
+            return (body["measuregrps"] as? JsonArray).orEmpty().mapNotNull { g ->
                 val o = g.jsonObject
                 val grp = o["grpid"]?.jsonPrimitive?.longOrNull ?: return@mapNotNull null
                 val date = o["date"]?.jsonPrimitive?.longOrNull ?: return@mapNotNull null
+                val deleted = (o["deleted"]?.jsonPrimitive?.intOrNull ?: 0) != 0 ||
+                    (o["deleted"]?.jsonPrimitive?.contentOrNull?.toBooleanStrictOrNull() == true)
                 MeasureGroup(
-                    grp, date, o["modified"]?.jsonPrimitive?.longOrNull ?: date, o["attrib"]?.jsonPrimitive?.intOrNull ?: -1,
-                    o["category"]?.jsonPrimitive?.intOrNull ?: 1, o["deviceid"]?.jsonPrimitive?.contentOrNull, o["timezone"]?.jsonPrimitive?.contentOrNull,
-                    (o["measures"] as? JsonArray).orEmpty().mapNotNull { m ->
+                    grpId = grp,
+                    date = date,
+                    modified = o["modified"]?.jsonPrimitive?.longOrNull ?: date,
+                    attrib = o["attrib"]?.jsonPrimitive?.intOrNull ?: -1,
+                    category = o["category"]?.jsonPrimitive?.intOrNull ?: 1,
+                    deviceId = o["deviceid"]?.jsonPrimitive?.contentOrNull,
+                    timezone = o["timezone"]?.jsonPrimitive?.contentOrNull ?: defaultTz,
+                    measures = (o["measures"] as? JsonArray).orEmpty().mapNotNull { m ->
                         val mo = m.jsonObject
                         val v = mo["value"]?.jsonPrimitive?.doubleOrNull ?: return@mapNotNull null
                         val u = mo["unit"]?.jsonPrimitive?.intOrNull ?: return@mapNotNull null
                         val t = mo["type"]?.jsonPrimitive?.intOrNull ?: return@mapNotNull null
-                        Measure(t, v * 10.0.pow(u))
+                        val pos = mo["position"]?.jsonPrimitive?.intOrNull
+                        val algo = mo["algo"]?.jsonPrimitive?.intOrNull
+                        Measure(t, v * 10.0.pow(u), position = pos, algo = algo)
                     },
+                    deleted = deleted,
                 )
             }
+        }
     }
 }
 
@@ -121,13 +167,50 @@ object WithingsMapper {
         var skipped = 0
         val out = ArrayList<MetricObservation>()
         for (g in groups) {
-            if (g.category != 1) continue // cíle uživatele nejsou měření
+            if (g.category != 1 || g.deleted) continue // cíle uživatele a smazané záznamy nejsou platná měření
             val zone = g.timezone?.takeIf { runCatching { java.time.ZoneId.of(it) }.isSuccess } ?: defaultZone
             val quality = config.attribQuality[g.attrib] ?: Quality.SUSPECT
-            for (m in g.measures) {
-                val (type, ok) = when (m.type) {
-                    WithingsTypes.WEIGHT -> MetricType.WEIGHT to (m.value in 10.0..500.0)
-                    WithingsTypes.FAT_RATIO -> MetricType.BODY_FAT to (m.value in 1.0..80.0)
+            val weightInGroup = g.measures.firstOrNull { it.type == WithingsTypes.WEIGHT && (it.position == null || it.position == 7 || it.position == 0) }?.value
+            val wholeBodyMeasures = g.measures
+                .filter { it.position == null || it.position == 7 || it.position == 0 }
+                .groupBy { it.type }
+                .mapValues { (_, list) ->
+                    list.minByOrNull { m ->
+                        when (m.position) {
+                            null -> 0
+                            7 -> 1
+                            0 -> 2
+                            else -> 3
+                        }
+                    }!!
+                }
+                .values
+
+            for (m in wholeBodyMeasures) {
+                val (type, normValue, ok) = when (m.type) {
+                    WithingsTypes.WEIGHT -> Triple(MetricType.WEIGHT, m.value, m.value in 10.0..500.0)
+                    WithingsTypes.FAT_RATIO -> Triple(MetricType.BODY_FAT, m.value, m.value in 1.0..80.0)
+                    WithingsTypes.FAT_FREE_MASS -> Triple(MetricType.FAT_FREE_MASS, m.value, m.value in 5.0..250.0)
+                    WithingsTypes.MUSCLE_MASS -> Triple(MetricType.MUSCLE_MASS, m.value, m.value in 5.0..200.0)
+                    WithingsTypes.BONE_MASS -> Triple(MetricType.BONE_MASS, m.value, m.value in 0.5..15.0)
+                    WithingsTypes.HYDRATION -> {
+                        if (m.value in 35.0..85.0 && (weightInGroup == null || m.value > weightInGroup * 0.72)) {
+                            Triple(MetricType.BODY_WATER, m.value, true)
+                        } else if (weightInGroup != null && weightInGroup > 15.0 && m.value in 5.0..weightInGroup) {
+                            val pct = (m.value / weightInGroup) * 100.0
+                            Triple(MetricType.BODY_WATER, pct, pct in 25.0..85.0)
+                        } else if (m.value in 25.0..85.0) {
+                            Triple(MetricType.BODY_WATER, m.value, true)
+                        } else {
+                            Triple(MetricType.BODY_WATER, m.value, false)
+                        }
+                    }
+                    WithingsTypes.HEART_RATE -> Triple(MetricType.HEART_RATE, m.value, m.value in 30.0..240.0)
+                    WithingsTypes.PWV -> Triple(MetricType.PULSE_WAVE_VELOCITY, m.value, m.value in 2.0..25.0)
+                    WithingsTypes.VASCULAR_AGE -> Triple(MetricType.VASCULAR_AGE, m.value, m.value in 10.0..120.0)
+                    WithingsTypes.VISCERAL_FAT -> Triple(MetricType.VISCERAL_FAT, m.value, m.value in 0.1..50.0)
+                    WithingsTypes.BMR -> Triple(MetricType.BMR, m.value, m.value in 500.0..6000.0)
+                    WithingsTypes.METABOLIC_AGE -> Triple(MetricType.METABOLIC_AGE, m.value, m.value in 10.0..120.0)
                     else -> continue
                 }
                 if (!ok) { skipped++; continue }
@@ -136,7 +219,7 @@ object WithingsMapper {
                 out += MetricObservation(
                     id = ImportKey.of(Provider.WITHINGS_API, userId, ext, listOf(type.name, start.toString())),
                     provider = Provider.WITHINGS_API, accountId = userId, externalId = ext, type = type,
-                    startUtcMs = start, endUtcMs = null, value = m.value, zoneId = zone,
+                    startUtcMs = start, endUtcMs = null, value = normValue, zoneId = zone,
                     localDate = TimeRules.localDate(start, zone).toString(), quality = quality,
                     sourceVersion = 1, origin = g.deviceId?.let { "withings:$it" } ?: "withings",
                 )

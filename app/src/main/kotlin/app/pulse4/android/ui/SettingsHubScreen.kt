@@ -12,22 +12,33 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.Login
+import androidx.compose.material.icons.outlined.LinkOff
+import androidx.compose.material.icons.outlined.Sync
+import androidx.compose.material.icons.outlined.Warning
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -42,9 +53,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
@@ -93,18 +106,18 @@ import kotlinx.coroutines.withContext
 fun SettingsHubScreen(sl: ServiceLocator, initialTab: Int = 0) {
     var selectedTab by remember { mutableStateOf(initialTab) }
     val tabs = listOf(
-        "🎛️ Jednotky & Mapy" to 0,
-        "📤 Globální Sdílení" to 1,
-        "🔗 Garmin & Withings" to 2,
-        "📡 Reticulum P2P" to 3,
-        "🛡️ Soukromí & Záloha" to 4
+        "Jednotky & Mapy" to 0,
+        "Globální Sdílení" to 1,
+        "Garmin & Withings" to 2,
+        "Reticulum P2P" to 3,
+        "Soukromí & Záloha" to 4
     )
 
     Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.background)) {
         ScrollableTabRow(
             selectedTabIndex = selectedTab,
             edgePadding = 12.dp,
-            containerColor = Color(0xFF0E121B),
+            containerColor = app.pulse4.android.ui.theme.MineralBackgroundDark,
             modifier = Modifier.fillMaxWidth()
         ) {
             tabs.forEach { (label, index) ->
@@ -156,8 +169,8 @@ private fun GeneralAndUnitsSection(sl: ServiceLocator) {
         // Výběr Metrické vs Imperiální jednotky
         Card(
             shape = RoundedCornerShape(18.dp),
-            border = BorderStroke(1.dp, Color(0xFF232A3B)),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF131722)),
+            border = BorderStroke(1.dp, app.pulse4.android.ui.theme.MineralOutlineDark),
+            colors = CardDefaults.cardColors(containerColor = app.pulse4.android.ui.theme.MineralSurfaceDark),
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(Modifier.padding(16.dp)) {
@@ -182,11 +195,11 @@ private fun GeneralAndUnitsSection(sl: ServiceLocator) {
                             scope.launch(Dispatchers.IO) {
                                 sl.settings.unitSystem = UnitSystem.METRIC
                                 activeFmt = Fmt(ZoneId.of(sl.settings.zoneId), units = UnitSystem.METRIC)
-                                feedback = "✅ Nastaveny metrické jednotky (km, m, kg, min/km)."
+                                feedback = "Nastaveny metrické jednotky (km, m, kg, min/km)."
                                 tick++
                             }
                         },
-                        label = { Text("📏 Metrické (km, kg)", maxLines = 1) },
+                        label = { Text("Metrické (km, kg)", maxLines = 1) },
                         modifier = Modifier.weight(1f)
                     )
                     FilterChip(
@@ -195,11 +208,11 @@ private fun GeneralAndUnitsSection(sl: ServiceLocator) {
                             scope.launch(Dispatchers.IO) {
                                 sl.settings.unitSystem = UnitSystem.IMPERIAL
                                 activeFmt = Fmt(ZoneId.of(sl.settings.zoneId), units = UnitSystem.IMPERIAL)
-                                feedback = "✅ Nastaveny imperiální jednotky (mi, ft, lb, min/mi)."
+                                feedback = "Nastaveny imperiální jednotky (mi, ft, lb, min/mi)."
                                 tick++
                             }
                         },
-                        label = { Text("🗽 Imperiální (mi, lb)", maxLines = 1) },
+                        label = { Text("Imperiální (mi, lb)", maxLines = 1) },
                         modifier = Modifier.weight(1f)
                     )
                 }
@@ -216,13 +229,13 @@ private fun GeneralAndUnitsSection(sl: ServiceLocator) {
         // Výběr poskytovatele mapového podkladu (Map Provider)
         Card(
             shape = RoundedCornerShape(18.dp),
-            border = BorderStroke(1.dp, Color(0xFF232A3B)),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF131722)),
+            border = BorderStroke(1.dp, app.pulse4.android.ui.theme.MineralOutlineDark),
+            colors = CardDefaults.cardColors(containerColor = app.pulse4.android.ui.theme.MineralSurfaceDark),
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(Modifier.padding(16.dp)) {
                 Text(
-                    "🗺️ POSKYTOVATEL MAPOVÉHO PODKLADU AKTIVIT",
+                    "POSKYTOVATEL MAPOVÉHO PODKLADU AKTIVIT",
                     style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.Bold,
                     color = Color(0xFF94A3B8)
@@ -242,7 +255,7 @@ private fun GeneralAndUnitsSection(sl: ServiceLocator) {
                             onClick = {
                                 scope.launch(Dispatchers.IO) {
                                     sl.settings.mapProvider = mp
-                                    feedback = "✅ Mapový podklad změněn na: ${mp.title}"
+                                    feedback = "Mapový podklad změněn na: ${mp.title}"
                                     tick++
                                 }
                             },
@@ -284,7 +297,7 @@ private fun GeneralAndUnitsSection(sl: ServiceLocator) {
                         onClick = {
                             scope.launch(Dispatchers.IO) {
                                 sl.settings.mapStyleUrl = customMapUrl.trim()
-                                feedback = "✅ Vlastní URL mapového stylu uložena."
+                                feedback = "Vlastní URL mapového stylu uložena."
                                 tick++
                             }
                         },
@@ -301,18 +314,18 @@ private fun GeneralAndUnitsSection(sl: ServiceLocator) {
         var zoneSearch by remember { mutableStateOf("") }
         val pinnedZones = remember {
             listOf(
-                "Europe/Prague" to "🇨🇿 Praha / Střední Evropa (Europe/Prague)",
-                "Europe/Bratislava" to "🇸🇰 Bratislava (Europe/Bratislava)",
-                "Europe/Vienna" to "🇦🇹 Vídeň (Europe/Vienna)",
-                "Europe/Berlin" to "🇩🇪 Berlín (Europe/Berlin)",
-                "Europe/Warsaw" to "🇵🇱 Varšava (Europe/Warsaw)",
-                "Europe/London" to "🇬🇧 Londýn (Europe/London)",
-                "UTC" to "🌐 Světový čas (UTC)",
-                "America/New_York" to "🇺🇸 New York (America/New_York)",
-                "America/Chicago" to "🇺🇸 Chicago (America/Chicago)",
-                "America/Los_Angeles" to "🇺🇸 Los Angeles (America/Los_Angeles)",
-                "Asia/Tokyo" to "🇯🇵 Tokio (Asia/Tokyo)",
-                "Australia/Sydney" to "🇦🇺 Sydney (Australia/Sydney)"
+                "Europe/Prague" to "Praha / Střední Evropa (Europe/Prague)",
+                "Europe/Bratislava" to "Bratislava (Europe/Bratislava)",
+                "Europe/Vienna" to "Vídeň (Europe/Vienna)",
+                "Europe/Berlin" to "Berlín (Europe/Berlin)",
+                "Europe/Warsaw" to "Varšava (Europe/Warsaw)",
+                "Europe/London" to "Londýn (Europe/London)",
+                "UTC" to "Světový čas (UTC)",
+                "America/New_York" to "New York (America/New_York)",
+                "America/Chicago" to "Chicago (America/Chicago)",
+                "America/Los_Angeles" to "Los Angeles (America/Los_Angeles)",
+                "Asia/Tokyo" to "Tokio (Asia/Tokyo)",
+                "Australia/Sydney" to "Sydney (Australia/Sydney)"
             )
         }
         val allZones = remember {
@@ -320,7 +333,7 @@ private fun GeneralAndUnitsSection(sl: ServiceLocator) {
             pinnedZones + ZoneId.getAvailableZoneIds()
                 .filter { it !in pinnedIds && !it.startsWith("SystemV") && !it.startsWith("Etc/") }
                 .sorted()
-                .map { it to "🌍 $it" }
+                .map { it to it }
         }
         val filteredZones = remember(zoneSearch, allZones) {
             val q = zoneSearch.trim().lowercase()
@@ -330,8 +343,8 @@ private fun GeneralAndUnitsSection(sl: ServiceLocator) {
 
         Card(
             shape = RoundedCornerShape(18.dp),
-            border = BorderStroke(1.dp, Color(0xFF232A3B)),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF131722)),
+            border = BorderStroke(1.dp, app.pulse4.android.ui.theme.MineralOutlineDark),
+            colors = CardDefaults.cardColors(containerColor = app.pulse4.android.ui.theme.MineralSurfaceDark),
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(Modifier.padding(16.dp)) {
@@ -368,12 +381,12 @@ private fun GeneralAndUnitsSection(sl: ServiceLocator) {
                             scope.launch(Dispatchers.IO) {
                                 sl.settings.zoneId = sysZone
                                 activeFmt = Fmt(ZoneId.of(sysZone), units = sl.settings.unitSystem)
-                                feedback = "✅ Nastaveno pásmo podle telefonu: $sysZone"
+                                feedback = "Nastaveno pásmo podle telefonu: $sysZone"
                                 tick++
                             }
                         }
                     ) {
-                        Text("📍 Podle telefonu", style = MaterialTheme.typography.labelSmall, maxLines = 1, softWrap = false)
+                        Text("Podle telefonu", style = MaterialTheme.typography.labelSmall, maxLines = 1, softWrap = false)
                     }
                 }
 
@@ -392,7 +405,7 @@ private fun GeneralAndUnitsSection(sl: ServiceLocator) {
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            val currentLabel = allZones.firstOrNull { it.first == zoneId }?.second ?: "🌍 $zoneId"
+                            val currentLabel = allZones.firstOrNull { it.first == zoneId }?.second ?: zoneId
                             Text(
                                 currentLabel,
                                 style = MaterialTheme.typography.bodyMedium,
@@ -421,7 +434,7 @@ private fun GeneralAndUnitsSection(sl: ServiceLocator) {
                             OutlinedTextField(
                                 value = zoneSearch,
                                 onValueChange = { zoneSearch = it },
-                                label = { Text("🔍 Hledat město nebo zónu…") },
+                                label = { Text("Hledat město nebo zónu…") },
                                 singleLine = true,
                                 modifier = Modifier.fillMaxWidth()
                             )
@@ -443,7 +456,7 @@ private fun GeneralAndUnitsSection(sl: ServiceLocator) {
                                         if (validZone != null) {
                                             sl.settings.zoneId = validZone.id
                                             activeFmt = Fmt(validZone, units = sl.settings.unitSystem)
-                                            feedback = "✅ Časové pásmo změněno na: ${validZone.id}"
+                                            feedback = "Časové pásmo změněno na: ${validZone.id}"
                                             tick++
                                         }
                                     }
@@ -461,7 +474,7 @@ private fun GeneralAndUnitsSection(sl: ServiceLocator) {
                             sl.settings.displayName = displayName.trim().ifBlank { "Já" }
                             sl.settings.zoneId = validZone.id
                             activeFmt = Fmt(validZone, units = sl.settings.unitSystem)
-                            feedback = "✅ Jméno profilu ('${sl.settings.displayName}') a časové pásmo (${validZone.id}) uloženo."
+                            feedback = "Jméno profilu ('${sl.settings.displayName}') a časové pásmo (${validZone.id}) uloženo."
                             tick++
                         }
                     },
@@ -520,12 +533,12 @@ private fun GlobalSharingSection(sl: ServiceLocator) {
     var notice by remember { mutableStateOf<String?>(null) }
 
     val sectionDefs = listOf(
-        Triple(Category.SLEEP, "🛌 Spánek", "Délka spánku, skóre kvality a fáze spánku"),
-        Triple(Category.BODY_BATTERY, "⚡ Body Battery & Regenerace", "Aktuální stav energie, denní min/max a křivka"),
-        Triple(Category.HEART_RATE, "❤️ Kardio & Klidový tep", "Klidová tepová frekvence a denní průběh"),
-        Triple(Category.HRV, "💓 Variabilita tepu (HRV)", "Noční rMSSD průměr a průběh regenerace"),
-        Triple(Category.ACTIVITY, "🏃 Aktivity & Trasy", "Sportovní záznamy, souhrny, křivky a sanitizované GPS trasy"),
-        Triple(Category.BODY_COMPOSITION, "⚖️ Tělesné složení & Váha", "Tělesná hmotnost a procento tělesného tuku")
+        Triple(Category.SLEEP, "Spánek", "Délka spánku, skóre kvality a fáze spánku"),
+        Triple(Category.BODY_BATTERY, "Body Battery & Regenerace", "Aktuální stav energie, denní min/max a křivka"),
+        Triple(Category.HEART_RATE, "Kardio & Klidový tep", "Klidová tepová frekvence a denní průběh"),
+        Triple(Category.HRV, "Variabilita tepu (HRV)", "Noční rMSSD průměr a průběh regenerace"),
+        Triple(Category.ACTIVITY, "Aktivity & Trasy", "Sportovní záznamy, souhrny, křivky a sanitizované GPS trasy"),
+        Triple(Category.BODY_COMPOSITION, "Tělesné složení & Váha", "Tělesná hmotnost a procento tělesného tuku")
     )
 
     Column(
@@ -536,8 +549,8 @@ private fun GlobalSharingSection(sl: ServiceLocator) {
     ) {
         Card(
             shape = RoundedCornerShape(18.dp),
-            border = BorderStroke(1.dp, Color(0xFF232A3B)),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF131722)),
+            border = BorderStroke(1.dp, app.pulse4.android.ui.theme.MineralOutlineDark),
+            colors = CardDefaults.cardColors(containerColor = app.pulse4.android.ui.theme.MineralSurfaceDark),
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(Modifier.padding(16.dp)) {
@@ -560,11 +573,11 @@ private fun GlobalSharingSection(sl: ServiceLocator) {
                     Button(
                         onClick = { enabledCategories = Category.entries.toSet() },
                         modifier = Modifier.weight(1f)
-                    ) { Text("✨ Zapnout vše") }
+                    ) { Text("Zapnout vše") }
                     Button(
                         onClick = { enabledCategories = emptySet() },
                         modifier = Modifier.weight(1f)
-                    ) { Text("🧹 Vypnout vše") }
+                    ) { Text("Vypnout vše") }
                 }
 
                 Spacer(Modifier.height(10.dp))
@@ -608,7 +621,7 @@ private fun GlobalSharingSection(sl: ServiceLocator) {
                                 val allIds = contacts.map { it.identity }.toSet()
                                 selectedRecipients = if (selectedRecipients.containsAll(allIds)) emptySet() else allIds
                             },
-                            label = { Text("👥 Všechny kontakty (${contacts.size})") },
+                            label = { Text("Všechny kontakty (${contacts.size})") },
                             modifier = Modifier.padding(end = 4.dp)
                         )
                         contacts.forEach { c ->
@@ -617,7 +630,7 @@ private fun GlobalSharingSection(sl: ServiceLocator) {
                                 onClick = {
                                     selectedRecipients = if (c.identity in selectedRecipients) selectedRecipients - c.identity else selectedRecipients + c.identity
                                 },
-                                label = { Text("👤 ${c.displayName}") },
+                                label = { Text(c.displayName) },
                                 modifier = Modifier.padding(end = 4.dp)
                             )
                         }
@@ -647,9 +660,9 @@ private fun GlobalSharingSection(sl: ServiceLocator) {
                                     )
                                     sl.shareService.saveGrant(newGrant)
                                     sl.shareService.planAndEnqueue(System.currentTimeMillis())
-                                    notice = "✅ Globální sdílení uloženo (${enabledCategories.size} sekcí, ${chosenFields.size} polí) a zařazeno k odeslání."
+                                    notice = "Globální sdílení uloženo (${enabledCategories.size} sekcí, ${chosenFields.size} polí) a zařazeno k odeslání."
                                 } else {
-                                    notice = "🔒 Všechna sdílení byla vypnuta. Žádná data se nesdílejí."
+                                    notice = "Všechna sdílení byla vypnuta. Žádná data se nesdílejí."
                                 }
                             }
                         }
@@ -679,17 +692,17 @@ private fun GlobalSharingSection(sl: ServiceLocator) {
         activeGrants.forEach { g ->
             Card(
                 shape = RoundedCornerShape(14.dp),
-                border = BorderStroke(1.dp, Color(0xFF232A3B)),
-                colors = CardDefaults.cardColors(containerColor = Color(0xFF131722)),
+                border = BorderStroke(1.dp, app.pulse4.android.ui.theme.MineralOutlineDark),
+                colors = CardDefaults.cardColors(containerColor = app.pulse4.android.ui.theme.MineralSurfaceDark),
                 modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
             ) {
                 Column(Modifier.padding(12.dp)) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                        Text("🟢 Aktivní grant · ${g.recipients.size} příjemců · ${g.fields.size} polí", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                        Text("Aktivní grant · ${g.recipients.size} příjemců · ${g.fields.size} polí", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
                         TextButton(onClick = {
                             scope.launch(Dispatchers.IO) {
                                 sl.shareService.revoke(g.id, System.currentTimeMillis())
-                                notice = "🔒 Sdílení odvoláno."
+                                notice = "Sdílení odvoláno."
                             }
                         }) {
                             Text("Odvolat", color = MaterialTheme.colorScheme.error)
@@ -709,13 +722,14 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
     val clipboard = LocalClipboardManager.current
     val states by sl.db.areaStates().all().collectAsState(emptyList())
     val wState by sl.withings.state.collectAsState()
-    var sub by remember { mutableStateOf(0) }
+    var sub by rememberSaveable { mutableStateOf(0) }
     var apiKey by remember { mutableStateOf("") }
-    var keyDays by remember { mutableStateOf(90) }
-    var email by remember { mutableStateOf("") }
+    var editingGarminKey by rememberSaveable { mutableStateOf(false) }
+    var editingGarminLogin by rememberSaveable { mutableStateOf(false) }
+    var email by rememberSaveable { mutableStateOf("pepe.kocourek@gmail.com") }
     var password by remember { mutableStateOf("") }
-    var mfa by remember { mutableStateOf("") }
-    var needMfa by remember { mutableStateOf(false) }
+    var mfa by rememberSaveable { mutableStateOf("") }
+    var needMfa by rememberSaveable { mutableStateOf(false) }
     var withingsClientId by remember { mutableStateOf("") }
     var withingsSecret by remember { mutableStateOf("") }
     var minKgInput by remember { mutableStateOf("") }
@@ -728,6 +742,8 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
     var showKeyHelp by remember { mutableStateOf(false) }
     var showWithingsHelp by remember { mutableStateOf<Boolean?>(null) }
     var showFilter by remember { mutableStateOf(false) }
+    var showWebLoginDialog by remember { mutableStateOf(false) }
+    var webLoginMode by remember { mutableStateOf(WithingsDialogMode.FullLogin) }
 
     val contacts by sl.db.contacts().all().collectAsState(emptyList())
     val wCfg by io(tick) {
@@ -746,18 +762,29 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
             childWithingsUserId = sl.withings.childUserId()
         )
     }
-    val keyExpires by io(tick + states.size) { sl.secrets.getString(SecretStore.GARMIN_API_KEY_EXPIRES)?.toLongOrNull() }
-    val hasGarminKey by io(tick) { sl.secrets.getString(SecretStore.GARMIN_API_KEY) != null }
-    val garminLoggedIn by io(tick) { sl.secrets.getString(SecretStore.GARMIN_EXT_TOKENS) != null }
+    val keyExpires by io(tick + states.size) {
+        val raw = sl.secrets.getString(SecretStore.GARMIN_API_KEY_EXPIRES)?.toLongOrNull()
+        if (raw != null && raw <= System.currentTimeMillis() + 2L * 86_400_000L) {
+            sl.secrets.delete(SecretStore.GARMIN_API_KEY_EXPIRES)
+            null
+        } else raw
+    }
+    val savedGarminKey by io(tick) { sl.secrets.getString(SecretStore.GARMIN_API_KEY) }
+    val hasGarminKey = !savedGarminKey.isNullOrBlank()
+    val garminLoggedInFromStore by io(tick) { sl.secrets.getString(SecretStore.GARMIN_EXT_TOKENS) != null }
+    var garminLoggedInImmediate by remember { mutableStateOf<Boolean?>(null) }
+    val garminLoggedIn = garminLoggedInImmediate ?: garminLoggedInFromStore
+    var expandGarminSync by rememberSaveable { mutableStateOf(false) }
+    var expandWithingsSync by rememberSaveable { mutableStateOf(false) }
 
     val csvLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
         if (uri == null) return@rememberLauncherForActivityResult
         scope.launch {
             notice = withContext(Dispatchers.IO) {
                 val bytes = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                    ?: return@withContext "❌ Soubor nelze přečíst."
+                    ?: return@withContext "Soubor nelze přečíst."
                 val r = sl.withings.importCsv(bytes)
-                "✅ Naimportováno ${r.items.size} měření" +
+                "Naimportováno ${r.items.size} měření" +
                     if (r.errors.isNotEmpty()) " (přeskočeno ${r.errors.size})" else ""
             }
             tick++
@@ -776,8 +803,22 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
         runCatching { ctx.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, Uri.parse(url))) }
     }
 
-    val wConnected = wState is app.pulse4.android.di.WithingsUiState.Connected
+    val webSession by io(tick) { sl.withings.loadWebSession() }
+    val wConnected = wState is app.pulse4.android.di.WithingsUiState.Connected || webSession?.isConnected() == true
     val garminOk = hasGarminKey == true || garminLoggedIn == true
+    val latestBody by io(tick + states.size) { sl.withings.latestBodyComposition(730) }
+
+    if (showWebLoginDialog) {
+        WithingsWebLoginDialog(
+            sl = sl,
+            mode = webLoginMode,
+            onDismiss = { showWebLoginDialog = false },
+            onSuccess = { profile ->
+                notice = "Withings připojen k profilu: ${profile.displayName}"
+                tick++
+            }
+        )
+    }
 
     Column(
         Modifier
@@ -787,16 +828,18 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
     ) {
         // Přepínač služby – vždy vidíte jen jednu věc
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            val withingsFailed = wState is app.pulse4.android.di.WithingsUiState.Failed
             listOf(
-                Triple("⌚", "Garmin", garminOk),
-                Triple("⚖️", "Withings", wConnected),
-                Triple("🧒", "Dítě", (wCfg?.childRecipientIdentity ?: "").isNotBlank())
+                Triple("", "Garmin", garminOk),
+                Triple("", "Withings", wConnected && !withingsFailed),
+                Triple("", "Dítě", (wCfg?.childRecipientIdentity ?: "").isNotBlank())
             ).forEachIndexed { i, (icon, label, ok) ->
                 val selected = sub == i
+                val isWithingsAlert = label == "Withings" && withingsFailed
                 Card(
                     shape = RoundedCornerShape(14.dp),
-                    border = BorderStroke(1.dp, if (selected) Color(0xFF38BDF8) else Color(0xFF232A3B)),
-                    colors = CardDefaults.cardColors(containerColor = if (selected) Color(0xFF0F2A3D) else Color(0xFF131722)),
+                    border = BorderStroke(1.dp, if (selected) Color(0xFF38BDF8) else if (isWithingsAlert) Color(0xFFEF4444) else app.pulse4.android.ui.theme.MineralOutlineDark),
+                    colors = CardDefaults.cardColors(containerColor = if (selected) Color(0xFF0F2A3D) else if (isWithingsAlert) Color(0xFF450A0A) else app.pulse4.android.ui.theme.MineralSurfaceDark),
                     modifier = Modifier.weight(1f).clickable { sub = i; notice = null }
                 ) {
                     Column(
@@ -805,10 +848,21 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                     ) {
                         Text(icon, style = MaterialTheme.typography.titleMedium)
                         Text(label, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
+                        val statusText = when {
+                            isWithingsAlert -> "⚠️ vyžaduje login"
+                            ok -> "● připojeno"
+                            else -> "○ nenastaveno"
+                        }
+                        val statusColor = when {
+                            isWithingsAlert -> Color(0xFFF87171)
+                            ok -> Color(0xFF10B981)
+                            else -> Color(0xFF64748B)
+                        }
                         Text(
-                            if (ok) "● připojeno" else "○ nenastaveno",
+                            statusText,
                             style = MaterialTheme.typography.labelSmall,
-                            color = if (ok) Color(0xFF10B981) else Color(0xFF64748B),
+                            color = statusColor,
+                            fontWeight = if (isWithingsAlert) FontWeight.Bold else FontWeight.Normal,
                             maxLines = 1,
                             softWrap = false
                         )
@@ -832,74 +886,189 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
         when (sub) {
             // ───────────────────────── GARMIN ─────────────────────────
             0 -> {
-                AccountCard("Přihlášení", if (garminLoggedIn == true) "🟢 Přihlášeno" else null) {
+                fun summarizeGarminSync(res: Map<SyncArea, app.pulse4.provider.AreaResult>?): String {
+                    if (res == null) return "Synchronizace již probíhá."
+                    val okAreas = res.values.filterIsInstance<app.pulse4.provider.AreaResult.Success>()
+                    val failedAreas = res.entries.mapNotNull { (a, r) ->
+                        when (r) {
+                            is app.pulse4.provider.AreaResult.Failed -> "${a.name}: ${r.error::class.simpleName}"
+                            is app.pulse4.provider.AreaResult.NeedsUser -> "${a.name}: vyžaduje přihlášení/klíč"
+                            else -> null
+                        }
+                    }
+                    val totalSaved = okAreas.sumOf { it.saved }
+                    return if (okAreas.isNotEmpty() && failedAreas.isEmpty()) {
+                        "Garmin synchronizován (${okAreas.size} oblastí, uloženo $totalSaved záznamů)."
+                    } else if (okAreas.isNotEmpty()) {
+                        "Garmin částečně synchronizován (${okAreas.size}/${res.size} oblastí, $totalSaved záznamů). Chyby: ${failedAreas.joinToString(", ")}"
+                    } else {
+                        "Synchronizace Garmin selhala (${failedAreas.joinToString(", ")}). Zkontrolujte klíč nebo přihlášení."
+                    }
+                }
+
+                AccountCard("Přihlášení Garmin Connect", if (garminLoggedIn == true) "Přihlášeno" else null) {
                     Text(
-                        "Pro zápis tréninků do hodinek.",
+                        "Pro přímé stahování metrik, aktivit a zápis tréninků do hodinek.",
                         style = MaterialTheme.typography.bodySmall,
                         color = Color(0xFF94A3B8)
                     )
-                    OutlinedTextField(
-                        value = email,
-                        onValueChange = { email = it },
-                        label = { Text("E-mail") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    TextButton(
-                        onClick = {
-                            runCatching {
-                                accountPickerLauncher.launch(
-                                    android.accounts.AccountManager.newChooseAccountIntent(null, null, null, null, null, null, null)
+                    if (garminLoggedIn == true && !editingGarminLogin) {
+                        Row(
+                            Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    email.ifBlank { "Garmin Connect účet" },
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
                                 )
-                            }.onFailure { notice = "⚠️ Výběr účtu nelze otevřít." }
+                                Text(
+                                    "Šifrovaná relace uložena v Keystore",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFF10B981)
+                                )
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(Color(0xFF064E3B))
+                                    .padding(horizontal = 10.dp, vertical = 4.dp)
+                            ) {
+                                Text(
+                                    "AKTIVNÍ",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF34D399)
+                                )
+                            }
                         }
-                    ) { Text("👤 Vyplnit e-mail z účtů v telefonu", maxLines = 1, softWrap = false) }
-                    OutlinedTextField(
-                        value = password,
-                        onValueChange = { password = it },
-                        label = { Text("Heslo") },
-                        supportingText = { Text("Může doplnit Bitwarden / správce hesel") },
-                        visualTransformation = PasswordVisualTransformation(),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    if (needMfa) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                enabled = !syncing,
+                                onClick = {
+                                    scope.launch {
+                                        syncing = true
+                                        notice = null
+                                        val res = withContext(Dispatchers.IO) { sl.importService.runAll(System.currentTimeMillis()) }
+                                        notice = summarizeGarminSync(res)
+                                        syncing = false
+                                        tick++
+                                    }
+                                },
+                                modifier = Modifier.weight(1f)
+                            ) { Text(if (syncing) "Stahuji…" else "Synchronizovat", maxLines = 1, softWrap = false) }
+                            OutlinedButton(
+                                onClick = { editingGarminLogin = true },
+                                modifier = Modifier.weight(1f)
+                            ) { Text("Přepojit účet", maxLines = 1, softWrap = false) }
+                        }
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                            TextButton(onClick = {
+                                garminLoggedInImmediate = false
+                                editingGarminLogin = false
+                                scope.launch(Dispatchers.IO) { sl.garminExt.logout(); tick++ }
+                                notice = "Odhlášeno z Garmin Connect."
+                            }) { Text("Odhlásit", color = MaterialTheme.colorScheme.error) }
+                        }
+                    } else {
+                        OutlinedTextField(
+                            value = email,
+                            onValueChange = { email = it },
+                            label = { Text("E-mail") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        TextButton(
+                            onClick = {
+                                runCatching {
+                                    accountPickerLauncher.launch(
+                                        android.accounts.AccountManager.newChooseAccountIntent(null, null, null, null, null, null, null)
+                                    )
+                                }.onFailure { notice = "Výběr účtu nelze otevřít." }
+                            }
+                        ) { Text("Vyplnit e-mail z účtů v telefonu", maxLines = 1, softWrap = false) }
+                        OutlinedTextField(
+                            value = password,
+                            onValueChange = { password = it },
+                            label = { Text("Heslo") },
+                            supportingText = { Text("Může doplnit Bitwarden / správce hesel") },
+                            visualTransformation = PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
                         OutlinedTextField(
                             value = mfa,
                             onValueChange = { mfa = it },
-                            label = { Text("Kód z e-mailu / SMS") },
+                            label = { Text("Ověřovací kód z e-mailu / SMS (2FA)") },
+                            placeholder = { Text("Zadejte kód, pokud jej Garmin vyžádal") },
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth()
                         )
-                    }
-                    Button(
-                        enabled = needMfa && mfa.isNotBlank() || !needMfa && email.isNotBlank() && password.isNotBlank(),
-                        onClick = {
-                            scope.launch {
-                                notice = withContext(Dispatchers.IO) {
-                                    try {
-                                        val r = if (needMfa) sl.garminExt.resumeMfa(mfa) else sl.garminExt.loginPassword(email, password)
-                                        when (r) {
-                                            LoginResult.Ok -> { password = ""; mfa = ""; needMfa = false; "✅ Přihlášeno do Garmin Connect." }
-                                            LoginResult.NeedsMfa -> { needMfa = true; "🔐 Zadejte ověřovací kód." }
+                        Button(
+                            enabled = !syncing && ((mfa.isNotBlank() && (needMfa || email.isNotBlank())) || (email.isNotBlank() && password.isNotBlank())),
+                            onClick = {
+                                scope.launch {
+                                    syncing = true
+                                    var loginSucceeded = false
+                                    val loginMsg = withContext(Dispatchers.IO) {
+                                        try {
+                                            val r = if (needMfa || mfa.isNotBlank()) sl.garminExt.resumeMfa(mfa) else sl.garminExt.loginPassword(email, password)
+                                            when (r) {
+                                                LoginResult.Ok -> {
+                                                    loginSucceeded = true
+                                                    null
+                                                }
+                                                LoginResult.NeedsMfa -> {
+                                                    needMfa = true
+                                                    "Zadejte ověřovací kód z e-mailu / SMS do pole výše a klikněte na Potvrdit kód."
+                                                }
+                                            }
+                                        } catch (e: ProviderError.MfaRequired) {
+                                            needMfa = true
+                                            "Garmin vyžaduje dvoufázový kód – zadejte ho do pole Ověřovací kód a klikněte na Potvrdit kód."
+                                        } catch (e: ProviderError.Unauthorized) {
+                                            "Neplatný e-mail, heslo nebo ověřovací kód pro Garmin Connect."
+                                        } catch (e: ProviderError.RateLimited) {
+                                            "Garmin dočasně omezil počet pokusů (429 Too Many Requests). Zkuste to za chvíli."
+                                        } catch (e: ProviderError) {
+                                            "Chyba komunikace s Garmin Connect (${e::class.simpleName})."
+                                        } catch (e: Exception) {
+                                            "Přihlášení selhalo: ${e.message}"
                                         }
-                                    } catch (e: Exception) {
-                                        "❌ Přihlášení selhalo: ${e.message}"
                                     }
+                                    if (loginSucceeded) {
+                                        // Okamžitě skryjeme pole pro heslo a přepneme kartu na přihlášený účet:
+                                        password = ""
+                                        mfa = ""
+                                        needMfa = false
+                                        editingGarminLogin = false
+                                        garminLoggedInImmediate = true
+                                        tick++
+                                        notice = "Přihlášeno do Garmin Connect ($email). Probíhá synchronizace dat…"
+                                        val syncRes = withContext(Dispatchers.IO) {
+                                            runCatching { sl.importService.runAll(System.currentTimeMillis()) }.getOrNull()
+                                        }
+                                        notice = "Přihlášeno do Garmin Connect. " + summarizeGarminSync(syncRes)
+                                    } else {
+                                        notice = loginMsg
+                                    }
+                                    syncing = false
+                                    tick++
                                 }
-                                tick++
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text(if (syncing) "Přihlašuji a synchronizuji…" else if (needMfa || mfa.isNotBlank()) "Potvrdit kód a přihlásit" else "Přihlásit") }
+                        if (garminLoggedIn == true && editingGarminLogin) {
+                            TextButton(onClick = { editingGarminLogin = false }) {
+                                Text("Zrušit úpravu")
                             }
-                        },
-                        modifier = Modifier.fillMaxWidth()
-                    ) { Text(if (needMfa) "Potvrdit kód" else "Přihlásit") }
-                    if (garminLoggedIn == true) {
-                        TextButton(onClick = {
-                            scope.launch(Dispatchers.IO) { sl.garminExt.logout(); tick++ }
-                            notice = "🔌 Odhlášeno z Garmin Connect."
-                        }) { Text("Odhlásit", color = MaterialTheme.colorScheme.error) }
+                        }
                     }
                 }
 
@@ -907,11 +1076,11 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
 
                 AccountCard(
                     "Osobní API klíč",
-                    if (hasGarminKey == true) "🟢 Uložen" else null,
+                    if (hasGarminKey) "Aktivní" else null,
                     onHelp = { showKeyHelp = !showKeyHelp }
                 ) {
                     Text(
-                        "Pro čtení spánku, tepu, HRV a aktivit.",
+                        "Oficiální Personal API klíč pro čtení spánku, tepu, HRV a aktivit.",
                         style = MaterialTheme.typography.bodySmall,
                         color = Color(0xFF94A3B8)
                     )
@@ -920,86 +1089,134 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                             listOf(
                                 "Přihlaste se na Garmin Developer Portal.",
                                 "V sekci Personal API vygenerujte klíč (začíná GCDC_).",
-                                "Zkopírujte ho sem a zvolte platnost."
+                                "Vložte ho sem a klikněte na Uložit a synchronizovat."
                             )
                         ) {
                             OutlinedButton(
                                 onClick = { openUrl("https://developer.garmin.com/gc-developer-program/") },
                                 modifier = Modifier.fillMaxWidth()
-                            ) { Text("🌐 Otevřít developer.garmin.com", maxLines = 1, softWrap = false) }
+                            ) { Text("Otevřít developer.garmin.com", maxLines = 1, softWrap = false) }
                         }
                     }
-                    Status.keyExpiry(keyExpires, System.currentTimeMillis())?.let { exp ->
-                        Text(
-                            exp.text,
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = if (exp.warn) MaterialTheme.colorScheme.error else Color(0xFF10B981)
-                        )
-                    }
-                    OutlinedTextField(
-                        value = apiKey,
-                        onValueChange = { apiKey = it },
-                        label = { Text(if (hasGarminKey == true) "Nový klíč (GCDC_…)" else "Klíč (GCDC_…)") },
-                        visualTransformation = PasswordVisualTransformation(),
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("Platnost ", style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8))
-                        listOf(30, 90, 180, 365).forEach { d ->
-                            FilterChip(
-                                selected = keyDays == d,
-                                onClick = { keyDays = d },
-                                label = { Text("${d}d") },
-                                modifier = Modifier.padding(horizontal = 2.dp)
-                            )
-                        }
-                    }
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(
-                            enabled = apiKey.isNotBlank(),
-                            onClick = {
-                                val trimmed = apiKey.trim()
-                                scope.launch(Dispatchers.IO) {
-                                    sl.secrets.putString(SecretStore.GARMIN_API_KEY, trimmed)
-                                    sl.secrets.putString(SecretStore.GARMIN_API_KEY_EXPIRES, (System.currentTimeMillis() + keyDays.toLong() * 86_400_000L).toString())
-                                    apiKey = ""
-                                    notice = "✅ Klíč uložen."
-                                    tick++
-                                }
-                            },
-                            modifier = Modifier.weight(1f)
-                        ) { Text("Uložit", maxLines = 1, softWrap = false) }
-                        OutlinedButton(
-                            enabled = !syncing && hasGarminKey == true,
-                            onClick = {
-                                scope.launch {
-                                    syncing = true
-                                    notice = null
-                                    val res = withContext(Dispatchers.IO) { sl.importService.runAll(System.currentTimeMillis()) }
-                                    notice = "✅ Garmin synchronizován (${res?.size ?: 0} oblastí)."
-                                    syncing = false
-                                    tick++
-                                }
-                            },
-                            modifier = Modifier.weight(1f)
-                        ) { Text(if (syncing) "Stahuji…" else "🔄 Sync", maxLines = 1, softWrap = false) }
-                    }
-                }
 
-                if (states.any { it.lastSuccessMs != null }) {
-                    Spacer(Modifier.height(12.dp))
-                    AccountCard("Poslední synchronizace", null) {
-                        SyncArea.entries.forEach { area ->
-                            val st = states.firstOrNull { it.area == area.name }
-                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                Text(area.name, style = MaterialTheme.typography.bodySmall)
+                    if (hasGarminKey && !editingGarminKey) {
+                        val maskedKey = remember(savedGarminKey) {
+                            val k = savedGarminKey.orEmpty().trim()
+                            if (k.length > 10) "${k.take(6)}••••••••${k.takeLast(4)}" else "Uložen v Keystore"
+                        }
+                        Row(
+                            Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f)) {
                                 Text(
-                                    st?.lastSuccessMs?.let { fmt.time(it) } ?: "—",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = if (st?.lastSuccessMs != null) Color(0xFF10B981) else Color(0xFF64748B)
+                                    maskedKey,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
                                 )
+                                Status.keyExpiry(keyExpires, System.currentTimeMillis())?.let { exp ->
+                                    Text(
+                                        "Platnost z API: ${exp.text}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = if (exp.warn) MaterialTheme.colorScheme.error else Color(0xFF10B981)
+                                    )
+                                } ?: Text(
+                                    "Klíč bezpečně uložen v Keystore",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFF10B981)
+                                )
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(Color(0xFF064E3B))
+                                    .padding(horizontal = 10.dp, vertical = 4.dp)
+                            ) {
+                                Text(
+                                    "ULOŽEN",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF34D399)
+                                )
+                            }
+                        }
+
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                enabled = !syncing,
+                                onClick = {
+                                    scope.launch {
+                                        syncing = true
+                                        notice = null
+                                        val res = withContext(Dispatchers.IO) { sl.importService.runAll(System.currentTimeMillis()) }
+                                        notice = summarizeGarminSync(res)
+                                        syncing = false
+                                        tick++
+                                    }
+                                },
+                                modifier = Modifier.weight(1f)
+                            ) { Text(if (syncing) "Stahuji…" else "Synchronizovat", maxLines = 1, softWrap = false) }
+                            OutlinedButton(
+                                onClick = {
+                                    apiKey = ""
+                                    editingGarminKey = true
+                                },
+                                modifier = Modifier.weight(1f)
+                            ) { Text("Změnit klíč", maxLines = 1, softWrap = false) }
+                        }
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                            TextButton(
+                                onClick = {
+                                    scope.launch(Dispatchers.IO) {
+                                        sl.secrets.delete(SecretStore.GARMIN_API_KEY)
+                                        sl.secrets.delete(SecretStore.GARMIN_API_KEY_EXPIRES)
+                                        notice = "Osobní API klíč byl odebrán."
+                                        tick++
+                                    }
+                                }
+                            ) { Text("Odebrat klíč", color = MaterialTheme.colorScheme.error) }
+                        }
+                    } else {
+                        OutlinedTextField(
+                            value = apiKey,
+                            onValueChange = { apiKey = it },
+                            label = { Text("Osobní klíč (GCDC_…)") },
+                            visualTransformation = PasswordVisualTransformation(),
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                enabled = !syncing && apiKey.isNotBlank(),
+                                onClick = {
+                                    val trimmed = apiKey.trim().removePrefix("ApiKey ").trim()
+                                    scope.launch {
+                                        syncing = true
+                                        notice = withContext(Dispatchers.IO) {
+                                            sl.secrets.putString(SecretStore.GARMIN_API_KEY, trimmed)
+                                            // Smažeme případnou umělou expiraci – nastaví se pouze tehdy, když ji vrátí samo API
+                                            sl.secrets.delete(SecretStore.GARMIN_API_KEY_EXPIRES)
+                                            apiKey = ""
+                                            editingGarminKey = false
+                                            val res = runCatching { sl.importService.runAll(System.currentTimeMillis()) }.getOrNull()
+                                            "Klíč uložen. " + summarizeGarminSync(res)
+                                        }
+                                        syncing = false
+                                        tick++
+                                    }
+                                },
+                                modifier = Modifier.weight(1f)
+                            ) { Text(if (syncing) "Ověřuji a stahuji…" else "Uložit a synchronizovat", maxLines = 1, softWrap = false) }
+                            if (hasGarminKey && editingGarminKey) {
+                                OutlinedButton(
+                                    onClick = {
+                                        apiKey = ""
+                                        editingGarminKey = false
+                                    }
+                                ) { Text("Zrušit", maxLines = 1, softWrap = false) }
                             }
                         }
                     }
@@ -1008,15 +1225,300 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
 
             // ───────────────────────── WITHINGS ─────────────────────────
             1 -> {
-                val helpOpen = showWithingsHelp ?: (wCfg?.hasCreds != true)
-                val statusText = when (val s = wState) {
-                    is app.pulse4.android.di.WithingsUiState.Connected -> "🟢 Připojeno"
-                    app.pulse4.android.di.WithingsUiState.WaitingForBrowser -> "🟡 Čeká na prohlížeč"
-                    is app.pulse4.android.di.WithingsUiState.Failed -> "🔴 Chyba: ${s.message.lowercase().replace('_', ' ')}"
-                    app.pulse4.android.di.WithingsUiState.Idle -> null
+                val conn = wState as? app.pulse4.android.di.WithingsUiState.Connected
+                val failed = wState as? app.pulse4.android.di.WithingsUiState.Failed
+                val isWeb = conn?.isWeb == true || webSession != null
+                val profName = conn?.userName ?: webSession?.primaryUserName ?: wCfg?.profileLabel?.ifBlank { null }
+                val wSyncState = states.firstOrNull { it.area == "withings.WEIGHT" }
+                val lastWithingsSyncMs = wSyncState?.lastSuccessMs ?: conn?.lastSyncMs ?: webSession?.lastSyncMs
+
+                if (failed != null) {
+                    Card(
+                        Modifier.fillMaxWidth().padding(bottom = 12.dp),
+                        shape = RoundedCornerShape(14.dp),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF450A0A)),
+                        border = BorderStroke(1.dp, Color(0xFFEF4444).copy(alpha = 0.8f))
+                    ) {
+                        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    Icons.Outlined.Warning,
+                                    contentDescription = null,
+                                    tint = Color(0xFFEF4444),
+                                    modifier = Modifier.size(22.dp)
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    "Withings vyžaduje přihlášení / obnovení",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
+                            }
+                            Text(
+                                "Webová relace vypršela na serveru Withings. Pro pokračování stahování tělesných dat se znovu přihlaste (e-mailovým kódem nebo heslem) nebo účet odpojte.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color(0xFFFCA5A5)
+                            )
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Button(
+                                    onClick = {
+                                        webLoginMode = WithingsDialogMode.Reconnect
+                                        showWebLoginDialog = true
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFDC2626)),
+                                    modifier = Modifier.weight(1.3f)
+                                ) {
+                                    Icon(Icons.AutoMirrored.Outlined.Login, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("Znovu přihlásit", fontWeight = FontWeight.Bold)
+                                }
+                                OutlinedButton(
+                                    onClick = {
+                                        sl.withings.disconnect()
+                                        notice = "Withings byl odpojen."
+                                        tick++
+                                    },
+                                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFFCA5A5)),
+                                    border = BorderStroke(1.dp, Color(0xFFEF4444).copy(alpha = 0.6f)),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Icon(Icons.Outlined.LinkOff, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("Odpojit")
+                                }
+                            }
+                        }
+                    }
                 }
-                AccountCard("Účet Withings", statusText, onHelp = { showWithingsHelp = !helpOpen }) {
-                    if (helpOpen) {
+
+                if (wConnected) {
+                    AccountCard("Withings účet", if (isWeb) "Web propojen" else "API propojeno") {
+                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(
+                                        profName ?: "Withings Uživatel",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.White
+                                    )
+                                    Text(
+                                        if (isWeb) "Přímý webový konektor (ID ${conn?.userId ?: webSession?.primaryUserId?.toString() ?: ""})" else "Vývojářské API OAuth 2.0",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = Color(0xFF38BDF8)
+                                    )
+                                    if (conn?.childName != null || webSession?.childUserName != null) {
+                                        Text(
+                                            "Dětský profil: ${conn?.childName ?: webSession?.childUserName}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = Color(0xFFA7F3D0)
+                                        )
+                                    }
+                                }
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(if (failed != null) Color(0xFF7F1D1D) else Color(0xFF064E3B))
+                                        .padding(horizontal = 10.dp, vertical = 4.dp)
+                                ) {
+                                    Text(
+                                        if (failed != null) "VYŽADUJE LOGIN" else "AKTIVNÍ",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (failed != null) Color(0xFFFCA5A5) else Color(0xFF34D399)
+                                    )
+                                }
+                            }
+
+                            Text(
+                                "Stahuje kompletní tělesná data: váhu, % tuku, svalovou hmotu, beztukovou hmotu, hydrataci těla, kosti, viscerální tuk, cévní věk, PWV, BMR, tep a ECG.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color(0xFF94A3B8)
+                            )
+
+                            if (lastWithingsSyncMs != null && lastWithingsSyncMs > 0L) {
+                                Row(
+                                    Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text("Poslední synchronizace:", style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8))
+                                    Text(fmt.time(lastWithingsSyncMs), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold, color = Color(0xFF10B981))
+                                }
+                            }
+                            if (!wSyncState?.lastError.isNullOrBlank()) {
+                                Text(
+                                    "Poslední chyba: ${wSyncState?.lastError}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFFF87171)
+                                )
+                            }
+
+                            val profiles = webSession?.allProfiles.orEmpty()
+                            if (profiles.size > 1) {
+                                Text(
+                                    "Rychlé přepnutí hlavního profilu:",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFF94A3B8)
+                                )
+                                FlowRow(
+                                    Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    profiles.forEach { p ->
+                                        val isCurrent = p.id == webSession?.primaryUserId
+                                        FilterChip(
+                                            selected = isCurrent,
+                                            onClick = {
+                                                if (!isCurrent) {
+                                                    scope.launch(Dispatchers.IO) {
+                                                        sl.withings.selectProfiles(p.id, webSession?.childUserId)
+                                                        notice = "Přepnuto na profil ${p.displayName} a synchronizováno."
+                                                        tick++
+                                                    }
+                                                }
+                                            },
+                                            label = { Text(p.displayName, maxLines = 1, softWrap = false) }
+                                        )
+                                    }
+                                }
+                            }
+
+                            if (!latestBody.isNullOrEmpty()) {
+                                val summaryParts = buildList {
+                                    latestBody?.get(app.pulse4.domain.MetricType.WEIGHT)?.let { add("Váha ${"%.1f".format(java.util.Locale.US, it.value)} kg") }
+                                    latestBody?.get(app.pulse4.domain.MetricType.BODY_FAT)?.let { add("Tuk ${"%.1f".format(java.util.Locale.US, it.value)} %") }
+                                    latestBody?.get(app.pulse4.domain.MetricType.MUSCLE_MASS)?.let { add("Svaly ${"%.1f".format(java.util.Locale.US, it.value)} kg") }
+                                    latestBody?.get(app.pulse4.domain.MetricType.FAT_FREE_MASS)?.let { add("FFM ${"%.1f".format(java.util.Locale.US, it.value)} kg") }
+                                    latestBody?.get(app.pulse4.domain.MetricType.BODY_WATER)?.let { add("Voda ${"%.1f".format(java.util.Locale.US, it.value)} %") }
+                                    latestBody?.get(app.pulse4.domain.MetricType.BONE_MASS)?.let { add("Kosti ${"%.2f".format(java.util.Locale.US, it.value)} kg") }
+                                    latestBody?.get(app.pulse4.domain.MetricType.VISCERAL_FAT)?.let { add("Visc. tuk ${"%.1f".format(java.util.Locale.US, it.value)}") }
+                                    latestBody?.get(app.pulse4.domain.MetricType.VASCULAR_AGE)?.let { add("Cévní věk ${"%.0f".format(java.util.Locale.US, it.value)} r") }
+                                    latestBody?.get(app.pulse4.domain.MetricType.PULSE_WAVE_VELOCITY)?.let { add("PWV ${"%.1f".format(java.util.Locale.US, it.value)} m/s") }
+                                    latestBody?.get(app.pulse4.domain.MetricType.BMR)?.let { add("BMR ${"%.0f".format(java.util.Locale.US, it.value)} kcal") }
+                                    latestBody?.get(app.pulse4.domain.MetricType.METABOLIC_AGE)?.let { add("Metab. věk ${"%.0f".format(java.util.Locale.US, it.value)} r") }
+                                    latestBody?.get(app.pulse4.domain.MetricType.ECG)?.let { add("ECG ${"%.0f".format(java.util.Locale.US, it.value)} ${if (it.value >= 200.0) "ms" else "bpm"}") }
+                                }
+                                if (summaryParts.isNotEmpty()) {
+                                    Text(
+                                        "Poslední měření (${summaryParts.size} metrik): ${summaryParts.joinToString(" · ")}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color(0xFFCBD5E1)
+                                    )
+                                }
+                            }
+
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Button(
+                                    enabled = !syncing,
+                                    onClick = {
+                                        if (failed != null) {
+                                            webLoginMode = WithingsDialogMode.Reconnect
+                                            showWebLoginDialog = true
+                                        } else {
+                                            scope.launch {
+                                                syncing = true
+                                                val r = withContext(Dispatchers.IO) {
+                                                    sl.withings.renewSession()
+                                                    runCatching { sl.withings.runImport(System.currentTimeMillis()) }.getOrNull()
+                                                }
+                                                syncing = false
+                                                notice = when (r) {
+                                                    is app.pulse4.provider.AreaResult.Success -> "Staženo ${r.saved} měření z Withings."
+                                                    is app.pulse4.provider.AreaResult.Failed -> "Chyba synchronizace: ${r.error}"
+                                                    else -> "Synchronizace dokončena."
+                                                }
+                                                tick++
+                                            }
+                                        }
+                                    },
+                                    colors = if (failed != null) ButtonDefaults.buttonColors(containerColor = Color(0xFFDC2626)) else ButtonDefaults.buttonColors(),
+                                    modifier = Modifier.weight(1.3f)
+                                ) {
+                                    Icon(
+                                        if (failed != null) Icons.AutoMirrored.Outlined.Login else Icons.Outlined.Sync,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(if (syncing) "Stahuji…" else if (failed != null) "Znovu přihlásit" else "Synchronizovat", maxLines = 1, softWrap = false)
+                                }
+
+                                OutlinedButton(
+                                    onClick = {
+                                        webLoginMode = WithingsDialogMode.SelectProfilesOnly
+                                        showWebLoginDialog = true
+                                    },
+                                    modifier = Modifier.weight(1f)
+                                ) { Text("Změnit profil", maxLines = 1, softWrap = false) }
+                            }
+
+                            Row(
+                                Modifier.fillMaxWidth().padding(top = 4.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    "Odebrání propojení účtu:",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFF64748B)
+                                )
+                                OutlinedButton(
+                                    onClick = {
+                                        sl.withings.disconnect()
+                                        notice = "Withings byl odpojen."
+                                        tick++
+                                    },
+                                    border = BorderStroke(1.dp, Color(0xFFEF4444).copy(alpha = 0.5f)),
+                                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFEF4444)),
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                                ) {
+                                    Icon(Icons.Outlined.LinkOff, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("Odpojit Withings", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    AccountCard("Přihlášení Withings účtem", "Na pozadí · Google / Apple / Heslo") {
+                        WithingsNativeLoginForm(
+                            sl = sl,
+                            onLoggedIn = { res ->
+                                val primaryName = res.profiles.firstOrNull { it.isPrimary }?.displayName
+                                    ?: res.profiles.firstOrNull()?.displayName
+                                    ?: "Hlavní"
+                                notice = "Přihlášeno k Withings profilu $primaryName."
+                                tick++
+                                if (res.profiles.size > 1) {
+                                    webLoginMode = WithingsDialogMode.SelectProfilesOnly
+                                    showWebLoginDialog = true
+                                }
+                            },
+                            onNotice = { notice = it }
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(12.dp))
+
+                var showOAuthCard by remember { mutableStateOf(false) }
+                AccountCard("Vývojářské API (OAuth 2.0)", if (wCfg?.hasCreds == true) "Nastaveno" else "Alternativa", onHelp = { showOAuthCard = !showOAuthCard }) {
+                    Text(
+                        "Alternativní připojení přes vývojářský portál Withings (pro ty, kdo mají vlastní Client ID a Secret).",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFF94A3B8)
+                    )
+                    if (showOAuthCard || wCfg?.hasCreds == true) {
+                        Spacer(Modifier.height(8.dp))
                         HelpBox(
                             listOf(
                                 "Přihlaste se na developer.withings.com (stejný účet jako v aplikaci Withings).",
@@ -1027,7 +1529,7 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                             OutlinedButton(
                                 onClick = { openUrl("https://developer.withings.com/dashboard/") },
                                 modifier = Modifier.fillMaxWidth()
-                            ) { Text("🌐 Otevřít developer.withings.com", maxLines = 1, softWrap = false) }
+                            ) { Text("Otevřít developer.withings.com", maxLines = 1, softWrap = false) }
                             Text(
                                 app.pulse4.android.BuildConfig.WITHINGS_REDIRECT,
                                 style = MaterialTheme.typography.labelSmall,
@@ -1036,29 +1538,27 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                             OutlinedButton(
                                 onClick = {
                                     clipboard.setText(AnnotatedString(app.pulse4.android.BuildConfig.WITHINGS_REDIRECT))
-                                    notice = "📋 Callback URL zkopírována."
+                                    notice = "Callback URL zkopírována."
                                 },
                                 modifier = Modifier.fillMaxWidth()
-                            ) { Text("📋 Kopírovat Callback URL", maxLines = 1, softWrap = false) }
+                            ) { Text("Kopírovat Callback URL", maxLines = 1, softWrap = false) }
                         }
-                    }
-                    OutlinedTextField(
-                        value = withingsClientId.ifEmpty { wCfg?.clientId.orEmpty() },
-                        onValueChange = { withingsClientId = it },
-                        label = { Text("Client ID") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    OutlinedTextField(
-                        value = withingsSecret,
-                        onValueChange = { withingsSecret = it },
-                        label = { Text(if (wCfg?.hasCreds == true) "Client Secret (uložen ✓)" else "Client Secret") },
-                        visualTransformation = PasswordVisualTransformation(),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = withingsClientId.ifEmpty { wCfg?.clientId.orEmpty() },
+                            onValueChange = { withingsClientId = it },
+                            label = { Text("Client ID") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        OutlinedTextField(
+                            value = withingsSecret,
+                            onValueChange = { withingsSecret = it },
+                            label = { Text(if (wCfg?.hasCreds == true) "Client Secret (uložen)" else "Client Secret") },
+                            visualTransformation = PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
                         Button(
                             onClick = {
                                 scope.launch(Dispatchers.IO) {
@@ -1075,33 +1575,12 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                                         val authUrl = sl.withings.beginLogin(System.currentTimeMillis())
                                         withContext(Dispatchers.Main) { openUrl(authUrl) }
                                     } catch (e: Exception) {
-                                        notice = "⚠️ Vyplňte Client ID i Client Secret."
+                                        notice = "Vyplňte Client ID i Client Secret."
                                     }
                                 }
                             },
-                            modifier = Modifier.weight(1f)
-                        ) { Text(if (wConnected) "Přepojit" else "🔗 Připojit", maxLines = 1, softWrap = false) }
-                        OutlinedButton(
-                            enabled = wConnected,
-                            onClick = {
-                                scope.launch(Dispatchers.IO) {
-                                    val r = runCatching { sl.withings.runImport(System.currentTimeMillis()) }.getOrNull()
-                                    notice = when (r) {
-                                        is app.pulse4.provider.AreaResult.Success -> "✅ Staženo ${r.saved} měření."
-                                        else -> "⚠️ Synchronizace se nezdařila – zkuste se znovu připojit."
-                                    }
-                                    tick++
-                                }
-                            },
-                            modifier = Modifier.weight(1f)
-                        ) { Text("🔄 Sync", maxLines = 1, softWrap = false) }
-                    }
-                    if (wConnected) {
-                        TextButton(onClick = {
-                            sl.withings.disconnect()
-                            notice = "🔌 Withings odpojen."
-                            tick++
-                        }) { Text("Odpojit", color = MaterialTheme.colorScheme.error) }
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text(if (wConnected && !isWeb) "Přepojit OAuth" else "Připojit přes OAuth", maxLines = 1, softWrap = false) }
                     }
                 }
 
@@ -1165,10 +1644,10 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                                         scope.launch(Dispatchers.IO) {
                                             sl.settings.weightFilterMinKg = mn
                                             sl.settings.weightFilterMaxKg = mx
-                                            notice = "✅ Filtr ${mn.toInt()}–${mx.toInt()} kg uložen."
+                                            notice = "Filtr ${mn.toInt()}–${mx.toInt()} kg uložen."
                                             tick++
                                         }
-                                    } else notice = "❌ Neplatný rozsah."
+                                    } else notice = "Neplatný rozsah."
                                 },
                                 modifier = Modifier.weight(0.8f)
                             ) { Text("OK", maxLines = 1, softWrap = false) }
@@ -1209,9 +1688,9 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                                         )
                                         sl.db.observations().upsert(listOf(obs.toRow()))
                                         manualWeightKg = ""
-                                        notice = "✅ Váha ${fmt.weight(kg)} uložena."
+                                        notice = "Váha ${fmt.weight(kg)} uložena."
                                     }
-                                } else notice = "❌ Zadejte váhu v kg (např. 75.4)."
+                                } else notice = "Zadejte platnou váhu v kg (např. 75.4)."
                             },
                             modifier = Modifier.weight(1f)
                         ) { Text("Zapsat", maxLines = 1, softWrap = false) }
@@ -1219,7 +1698,7 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                     OutlinedButton(
                         onClick = { csvLauncher.launch(arrayOf("text/*", "application/*")) },
                         modifier = Modifier.fillMaxWidth()
-                    ) { Text("📄 Import CSV z aplikace Withings", maxLines = 1, softWrap = false) }
+                    ) { Text("Import CSV z aplikace Withings", maxLines = 1, softWrap = false) }
                 }
             }
 
@@ -1255,7 +1734,7 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                                             tick++
                                         }
                                     },
-                                    label = { Text((if (isSelected) "🧒 " else "") + c.displayName, maxLines = 1, softWrap = false) }
+                                    label = { Text(c.displayName, maxLines = 1, softWrap = false) }
                                 )
                             }
                         }
@@ -1265,38 +1744,49 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                 Spacer(Modifier.height(12.dp))
 
                 val childUid = wCfg?.childWithingsUserId
-                AccountCard("2. Odkud brát váhu", if (childUid != null) "🟢 Profil připojen" else null) {
+                val childName = sl.withings.loadWebSession()?.childUserName
+                AccountCard("2. Odkud brát váhu", if (childUid != null) (childName ?: "Profil připojen") else null) {
                     Text(
-                        "Připojte dětský profil z vašeho Withings účtu (v prohlížeči vyberete dítě).",
+                        "Připojte dětský profil z vašeho Withings účtu (v dialogu vyberte dítě pro přesměrování do Reticulum).",
                         style = MaterialTheme.typography.bodySmall,
                         color = Color(0xFF94A3B8)
                     )
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(
                             onClick = {
-                                scope.launch(Dispatchers.IO) {
-                                    try {
-                                        val authUrl = sl.withings.beginChildLogin(System.currentTimeMillis())
-                                        withContext(Dispatchers.Main) { openUrl(authUrl) }
-                                    } catch (e: Exception) {
-                                        notice = "⚠️ Nejdřív nastavte Withings (záložka ⚖️)."
-                                    }
-                                }
+                                webLoginMode = WithingsDialogMode.SelectProfilesOnly
+                                showWebLoginDialog = true
                             },
                             modifier = Modifier.weight(1f)
-                        ) { Text("🔗 Připojit", maxLines = 1, softWrap = false) }
+                        ) { Text(if (childUid != null) "Změnit profil" else "Vybrat profil", maxLines = 1, softWrap = false) }
                         Button(
                             onClick = {
                                 scope.launch(Dispatchers.IO) {
                                     val sent = sl.withings.syncAndForwardChildWeights(System.currentTimeMillis())
-                                    notice = if (sent > 0) "✅ Odesláno $sent vážení."
-                                    else if ((wCfg?.childRecipientIdentity ?: "").isBlank()) "⚠️ Vyberte, komu posílat."
-                                    else "ℹ️ Nic nového k odeslání."
+                                    notice = if (sent > 0) "Odesláno $sent vážení."
+                                    else if ((wCfg?.childRecipientIdentity ?: "").isBlank()) "Vyberte, komu posílat."
+                                    else "Nic nového k odeslání."
                                     tick++
                                 }
                             },
                             modifier = Modifier.weight(1f)
-                        ) { Text("📤 Poslat", maxLines = 1, softWrap = false) }
+                        ) { Text("Poslat", maxLines = 1, softWrap = false) }
+                    }
+                    if (childUid != null) {
+                        Row(
+                            Modifier.fillMaxWidth().padding(top = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("Aktivní dětský profil: ${childName ?: "ID $childUid"}", style = MaterialTheme.typography.labelSmall, color = Color(0xFF38BDF8))
+                            TextButton(onClick = {
+                                sl.withings.disconnectChild()
+                                notice = "Dětský profil odpojen."
+                                tick++
+                            }) {
+                                Text("Odpojit dítě", color = MaterialTheme.colorScheme.error)
+                            }
+                        }
                     }
                     Row(
                         Modifier.fillMaxWidth(),
@@ -1316,7 +1806,7 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                                 val kg = childWeightSendKg.replace(',', '.').toDoubleOrNull()
                                 val childId = wCfg?.childRecipientIdentity.orEmpty()
                                 if (childId.isBlank()) {
-                                    notice = "⚠️ Vyberte, komu posílat."
+                                    notice = "Vyberte, komu posílat."
                                 } else if (kg != null && kg in 5.0..150.0) {
                                     scope.launch(Dispatchers.IO) {
                                         val now = System.currentTimeMillis()
@@ -1335,10 +1825,10 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                                         )
                                         val ok = sl.withings.forwardSingleWeightToChild(obs, now, excludeFromParent = false)
                                         childWeightSendKg = ""
-                                        notice = if (ok) "✅ ${fmt.weight(kg)} odesláno dítěti." else "❌ Odeslání se nezdařilo."
+                                        notice = if (ok) "${fmt.weight(kg)} odesláno dítěti." else "Odeslání se nezdařilo."
                                         tick++
                                     }
-                                } else notice = "❌ Zadejte váhu v kg."
+                                } else notice = "Zadejte váhu v kg."
                             },
                             modifier = Modifier.weight(1f)
                         ) { Text("Poslat", maxLines = 1, softWrap = false) }
@@ -1366,6 +1856,290 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                 }
             }
         }
+
+        // ───────────────────────── DOLE: ROZROLOVÁVACÍ STAV SYNC GARMIN & SYNC WITHINGS ─────────────────────────
+        Spacer(Modifier.height(16.dp))
+
+        val garminAreas = remember { SyncArea.entries.filter { it != SyncArea.WEIGHT } }
+        val garminAreaLabels = remember {
+            mapOf(
+                SyncArea.SLEEP to "Spánek (SLEEP)",
+                SyncArea.HRV to "Variabilita tepu (HRV)",
+                SyncArea.BODY_BATTERY to "Body Battery (BODY_BATTERY)",
+                SyncArea.HEART_RATE to "Tepová frekvence (HEART_RATE)",
+                SyncArea.STEPS_STRESS to "Kroky a stres (STEPS_STRESS)",
+                SyncArea.ACTIVITIES to "Sportovní aktivity (ACTIVITIES)"
+            )
+        }
+        val garminStatesList = garminAreas.map { area -> area to states.firstOrNull { it.area == area.name } }
+        val garminLastSyncMs = garminStatesList.mapNotNull { it.second?.lastSuccessMs }.maxOrNull()
+        val garminHasError = garminStatesList.any { !it.second?.lastError.isNullOrBlank() }
+        val garminAllSynced = garminStatesList.all { it.second?.lastSuccessMs != null && it.second?.lastError.isNullOrBlank() }
+        val garminBarColor = when {
+            garminHasError -> Color(0xFFEF4444)
+            garminAllSynced -> Color(0xFF10B981)
+            garminLastSyncMs != null -> Color(0xFFF59E0B)
+            else -> Color(0xFF64748B)
+        }
+
+        Card(
+            shape = RoundedCornerShape(16.dp),
+            border = BorderStroke(1.5.dp, garminBarColor.copy(alpha = 0.7f)),
+            colors = CardDefaults.cardColors(containerColor = garminBarColor.copy(alpha = 0.10f)),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { expandGarminSync = !expandGarminSync }
+        ) {
+            Column(Modifier.padding(14.dp)) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                        Text(
+                            "●",
+                            color = garminBarColor,
+                            style = MaterialTheme.typography.titleMedium,
+                            modifier = Modifier.padding(end = 8.dp)
+                        )
+                        Column {
+                            Text(
+                                "Sync Garmin",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                            Text(
+                                when {
+                                    garminHasError -> "Chyba u některé oblasti – klikněte pro detail"
+                                    garminAllSynced && garminLastSyncMs != null -> "Všech ${garminAreas.size} oblastí OK · ${fmt.time(garminLastSyncMs)}"
+                                    garminLastSyncMs != null -> "Částečně synchronizováno · ${fmt.time(garminLastSyncMs)}"
+                                    else -> "Zatím nesynchronizováno"
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = garminBarColor
+                            )
+                        }
+                    }
+                    Text(
+                        if (expandGarminSync) "Skrýt ▲" else "Detail ▼",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = garminBarColor
+                    )
+                }
+
+                if (expandGarminSync) {
+                    Spacer(Modifier.height(10.dp))
+                    garminStatesList.forEach { (area, st) ->
+                        val hasErr = !st?.lastError.isNullOrBlank()
+                        val isOk = st?.lastSuccessMs != null && !hasErr
+                        val rowColor = when {
+                            hasErr -> Color(0xFFF87171)
+                            isOk -> Color(0xFF10B981)
+                            else -> Color(0xFF94A3B8)
+                        }
+                        Column(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    garminAreaLabels[area] ?: area.name,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.Medium,
+                                    color = Color.White
+                                )
+                                Text(
+                                    when {
+                                        st?.lastSuccessMs != null -> fmt.time(st.lastSuccessMs)
+                                        hasErr -> "Selhalo"
+                                        else -> "Nesynchronizováno"
+                                    },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = rowColor
+                                )
+                            }
+                            if (hasErr) {
+                                Text(
+                                    "Chyba: ${st?.lastError}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFFF87171)
+                                )
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(
+                        enabled = !syncing,
+                        onClick = {
+                            scope.launch {
+                                syncing = true
+                                withContext(Dispatchers.IO) {
+                                    runCatching { sl.importService.runAll(System.currentTimeMillis()) }
+                                }
+                                syncing = false
+                                tick++
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(if (syncing) "Synchronizuji Garmin…" else "Synchronizovat Garmin nyní")
+                    }
+                }
+            }
+        }
+
+        Spacer(Modifier.height(10.dp))
+
+        val wConn = wState as? app.pulse4.android.di.WithingsUiState.Connected
+        val wFailed = wState as? app.pulse4.android.di.WithingsUiState.Failed
+        val wAreaState = states.firstOrNull { it.area == "withings.WEIGHT" }
+        val wLastSyncMs = wAreaState?.lastSuccessMs ?: wConn?.lastSyncMs ?: webSession?.lastSyncMs
+        val wErrorText = wFailed?.message ?: wAreaState?.lastError?.takeIf { it.isNotBlank() }
+        val withingsBarColor = when {
+            wErrorText != null -> Color(0xFFEF4444)
+            wLastSyncMs != null && !latestBody.isNullOrEmpty() -> Color(0xFF10B981)
+            wConnected || wLastSyncMs != null -> Color(0xFFF59E0B)
+            else -> Color(0xFF64748B)
+        }
+
+        Card(
+            shape = RoundedCornerShape(16.dp),
+            border = BorderStroke(1.5.dp, withingsBarColor.copy(alpha = 0.7f)),
+            colors = CardDefaults.cardColors(containerColor = withingsBarColor.copy(alpha = 0.10f)),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { expandWithingsSync = !expandWithingsSync }
+        ) {
+            Column(Modifier.padding(14.dp)) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                        Text(
+                            "●",
+                            color = withingsBarColor,
+                            style = MaterialTheme.typography.titleMedium,
+                            modifier = Modifier.padding(end = 8.dp)
+                        )
+                        Column {
+                            Text(
+                                "Sync Withings",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                            Text(
+                                when {
+                                    wErrorText != null -> "Chyba: $wErrorText"
+                                    wLastSyncMs != null -> "Synchronizováno (${latestBody?.size ?: 0} metrik) · ${fmt.time(wLastSyncMs)}"
+                                    wConnected -> "Připojeno – čeká na synchronizaci"
+                                    else -> "Zatím nesynchronizováno"
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = withingsBarColor
+                            )
+                        }
+                    }
+                    Text(
+                        if (expandWithingsSync) "Skrýt ▲" else "Detail ▼",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = withingsBarColor
+                    )
+                }
+
+                if (expandWithingsSync) {
+                    Spacer(Modifier.height(10.dp))
+                    if (wErrorText != null) {
+                        Text(
+                            "Poslední chyba: $wErrorText",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFFF87171),
+                            modifier = Modifier.padding(bottom = 6.dp)
+                        )
+                    }
+                    val withingsMetricLabels = listOf(
+                        app.pulse4.domain.MetricType.WEIGHT to "Tělesná hmotnost (WEIGHT)",
+                        app.pulse4.domain.MetricType.BODY_FAT to "Tělesný tuk (BODY_FAT)",
+                        app.pulse4.domain.MetricType.MUSCLE_MASS to "Svalová hmota (MUSCLE_MASS)",
+                        app.pulse4.domain.MetricType.FAT_FREE_MASS to "Beztuková hmota (FAT_FREE_MASS)",
+                        app.pulse4.domain.MetricType.BODY_WATER to "Tělesná voda (BODY_WATER)",
+                        app.pulse4.domain.MetricType.BONE_MASS to "Kostní hmota (BONE_MASS)",
+                        app.pulse4.domain.MetricType.VISCERAL_FAT to "Viscerální tuk (VISCERAL_FAT)",
+                        app.pulse4.domain.MetricType.VASCULAR_AGE to "Cévní věk (VASCULAR_AGE)",
+                        app.pulse4.domain.MetricType.PULSE_WAVE_VELOCITY to "Rychlost pulzní vlny (PWV)",
+                        app.pulse4.domain.MetricType.BMR to "Bazální metabolismus (BMR)",
+                        app.pulse4.domain.MetricType.METABOLIC_AGE to "Metabolický věk (METABOLIC_AGE)",
+                        app.pulse4.domain.MetricType.ECG to "Elektrokardiogram (ECG)"
+                    )
+                    withingsMetricLabels.forEach { (mType, label) ->
+                        val obs = latestBody?.get(mType)
+                        val valText = obs?.let {
+                            val v = it.value
+                            val formatted = when (mType) {
+                                app.pulse4.domain.MetricType.WEIGHT,
+                                app.pulse4.domain.MetricType.MUSCLE_MASS,
+                                app.pulse4.domain.MetricType.FAT_FREE_MASS -> "${"%.1f".format(java.util.Locale.US, v)} kg"
+                                app.pulse4.domain.MetricType.BONE_MASS -> "${"%.2f".format(java.util.Locale.US, v)} kg"
+                                app.pulse4.domain.MetricType.BODY_FAT,
+                                app.pulse4.domain.MetricType.BODY_WATER -> "${"%.1f".format(java.util.Locale.US, v)} %"
+                                app.pulse4.domain.MetricType.VISCERAL_FAT -> "${"%.1f".format(java.util.Locale.US, v)} idx"
+                                app.pulse4.domain.MetricType.VASCULAR_AGE,
+                                app.pulse4.domain.MetricType.METABOLIC_AGE -> "${"%.0f".format(java.util.Locale.US, v)} let"
+                                app.pulse4.domain.MetricType.PULSE_WAVE_VELOCITY -> "${"%.2f".format(java.util.Locale.US, v)} m/s"
+                                app.pulse4.domain.MetricType.BMR -> "${"%.0f".format(java.util.Locale.US, v)} kcal"
+                                app.pulse4.domain.MetricType.ECG -> "${"%.0f".format(java.util.Locale.US, v)} ${if (v >= 200.0) "ms" else "bpm"}"
+                                else -> "%.1f".format(java.util.Locale.US, v)
+                            }
+                            "$formatted (${it.localDate ?: fmt.time(it.startUtcMs)})"
+                        } ?: "Zatím bez záznamu"
+                        Row(
+                            Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                label,
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.Medium,
+                                color = Color.White,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Text(
+                                valText,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = if (obs != null) Color(0xFF10B981) else Color(0xFF94A3B8)
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(
+                        enabled = !syncing,
+                        onClick = {
+                            scope.launch {
+                                syncing = true
+                                withContext(Dispatchers.IO) {
+                                    runCatching { sl.withings.runImport(System.currentTimeMillis()) }
+                                }
+                                syncing = false
+                                tick++
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(if (syncing) "Synchronizuji Withings…" else "Synchronizovat Withings nyní")
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1379,8 +2153,8 @@ private fun AccountCard(
 ) {
     Card(
         shape = RoundedCornerShape(18.dp),
-        border = BorderStroke(1.dp, Color(0xFF232A3B)),
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF131722)),
+        border = BorderStroke(1.dp, app.pulse4.android.ui.theme.MineralOutlineDark),
+        colors = CardDefaults.cardColors(containerColor = app.pulse4.android.ui.theme.MineralSurfaceDark),
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1390,7 +2164,7 @@ private fun AccountCard(
                     Text(it, style = MaterialTheme.typography.labelSmall, color = Color(0xFF10B981), maxLines = 1, softWrap = false)
                 }
                 onHelp?.let {
-                    TextButton(onClick = it) { Text("❓ Kde získat?", style = MaterialTheme.typography.labelSmall, maxLines = 1, softWrap = false) }
+                    TextButton(onClick = it) { Text("Kde získat?", style = MaterialTheme.typography.labelSmall, maxLines = 1, softWrap = false) }
                 }
             }
             content()
@@ -1462,13 +2236,13 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
         // 1. Srozumitelná volba spojení pro běžného uživatele (BFU)
         Card(
             shape = RoundedCornerShape(18.dp),
-            border = BorderStroke(1.dp, Color(0xFF232A3B)),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF131722)),
+            border = BorderStroke(1.dp, app.pulse4.android.ui.theme.MineralOutlineDark),
+            colors = CardDefaults.cardColors(containerColor = app.pulse4.android.ui.theme.MineralSurfaceDark),
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(Modifier.padding(16.dp)) {
                 Text(
-                    "📡 JAK SE SPOJIT S PŘÁTELI VE SKUPINĚ",
+                    "JAK SE SPOJIT S PŘÁTELI VE SKUPINĚ",
                     style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.Bold,
                     color = Color(0xFF38BDF8)
@@ -1484,17 +2258,17 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
                 val modesInfo = listOf(
                     Triple(
                         NetworkMode.AUTO,
-                        "🌐 Automaticky (Doporučeno)",
+                        "Automaticky (Doporučeno)",
                         "Spojí vás s přáteli doma na stejné Wi-Fi i přes internet, když jste každý jinde."
                     ),
                     Triple(
                         NetworkMode.LOCAL_ONLY,
-                        "🏠 Pouze doma na stejné Wi-Fi",
+                        "Pouze doma na stejné Wi-Fi",
                         "Data nikdy neopustí vaši domácí Wi-Fi síť. Funguje zcela bez internetu."
                     ),
                     Triple(
                         NetworkMode.MANUAL,
-                        "🔧 Vlastní vybraný uzel",
+                        "Vlastní vybraný uzel",
                         "Připojení pouze k serveru (uzlu), který si ručně vyberete nebo přidáte níže."
                     )
                 )
@@ -1503,7 +2277,7 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
                     val selected = mode == m
                     Card(
                         shape = RoundedCornerShape(14.dp),
-                        border = BorderStroke(1.dp, if (selected) Color(0xFF38BDF8) else Color(0xFF232A3B)),
+                        border = BorderStroke(1.dp, if (selected) Color(0xFF38BDF8) else app.pulse4.android.ui.theme.MineralOutlineDark),
                         colors = CardDefaults.cardColors(
                             containerColor = if (selected) Color(0xFF0F2942) else Color(0xFF1A202E)
                         ),
@@ -1514,7 +2288,7 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
                                 mode = m
                                 scope.launch(Dispatchers.IO) {
                                     sl.settings.networkMode = m
-                                    feedback = "✅ Nastaven režim spojení: $title"
+                                    feedback = "Nastaven režim spojení: $title"
                                     tick++
                                 }
                             }
@@ -1529,7 +2303,7 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
                                 Text(desc, style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8))
                             }
                             Text(
-                                if (selected) "🟢 Aktivní" else "Vybrat",
+                                if (selected) "Aktivní" else "Vybrat",
                                 style = MaterialTheme.typography.labelSmall,
                                 fontWeight = FontWeight.Bold,
                                 color = if (selected) Color(0xFF38BDF8) else Color(0xFF64748B),
@@ -1545,11 +2319,11 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
                 Button(
                     onClick = {
                         Scheduler.shareNow(ctx, manual = true)
-                        feedback = "📡 Spuštěno okamžité odeslání a stažení sdílených dat."
+                        feedback = "Spuštěno okamžité odeslání a stažení sdílených dat."
                     },
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("🔄 Synchronizovat se skupinou hned teď")
+                    Text("Synchronizovat se skupinou hned teď")
                 }
             }
         }
@@ -1568,8 +2342,8 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
         // 2. Správa P2P uzlů (seznam uzlů s možností přepnout, přidat nový nebo ODEBRAT)
         Card(
             shape = RoundedCornerShape(18.dp),
-            border = BorderStroke(1.dp, Color(0xFF232A3B)),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF131722)),
+            border = BorderStroke(1.dp, app.pulse4.android.ui.theme.MineralOutlineDark),
+            colors = CardDefaults.cardColors(containerColor = app.pulse4.android.ui.theme.MineralSurfaceDark),
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(Modifier.padding(16.dp)) {
@@ -1580,7 +2354,7 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
                 ) {
                     Column(Modifier.weight(1f)) {
                         Text(
-                            "🌐 ULOŽENÉ PROPOJOVACÍ UZLY (${savedNodes.size})",
+                            "ULOŽENÉ PROPOJOVACÍ UZLY (${savedNodes.size})",
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.Bold,
                             color = Color(0xFF94A3B8)
@@ -1624,7 +2398,7 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
 
                         Card(
                             shape = RoundedCornerShape(12.dp),
-                            border = BorderStroke(1.dp, if (isActive) Color(0xFF10B981).copy(alpha = 0.6f) else Color(0xFF232A3B)),
+                            border = BorderStroke(1.dp, if (isActive) Color(0xFF10B981).copy(alpha = 0.6f) else app.pulse4.android.ui.theme.MineralOutlineDark),
                             colors = CardDefaults.cardColors(containerColor = Color(0xFF1A202E)),
                             modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)
                         ) {
@@ -1641,7 +2415,7 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
                                         color = if (isActive) Color(0xFF10B981) else Color.White
                                     )
                                     Text(
-                                        if (isActive) "🟢 Právě používaný uzel" else "Uložený uzel",
+                                        if (isActive) "Právě používaný uzel" else "Uložený uzel",
                                         style = MaterialTheme.typography.labelSmall,
                                         color = if (isActive) Color(0xFF10B981) else Color(0xFF94A3B8)
                                     )
@@ -1656,7 +2430,7 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
                                                     sl.settings.gatewayHost = nHost
                                                     sl.settings.gatewayPort = nPort
                                                     runCatching { sl.bridge.announce() }
-                                                    feedback = "✅ Přepnuto na uzel $nHost:$nPort"
+                                                    feedback = "Přepnuto na uzel $nHost:$nPort"
                                                     tick++
                                                 }
                                             }
@@ -1680,12 +2454,12 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
                                                         sl.settings.networkMode = NetworkMode.LOCAL_ONLY
                                                     }
                                                 }
-                                                feedback = "🗑️ Uzel $entry byl odebrán."
+                                                feedback = "Uzel $entry byl odebrán."
                                                 tick++
                                             }
                                         }
                                     ) {
-                                        Text("🗑️ Odebrat", color = MaterialTheme.colorScheme.error, maxLines = 1, softWrap = false)
+                                        Text("Odebrat", color = MaterialTheme.colorScheme.error, maxLines = 1, softWrap = false)
                                     }
                                 }
                             }
@@ -1727,12 +2501,12 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
                                 sl.settings.gatewayHost = h
                                 sl.settings.gatewayPort = p
                                 newNodeHost = ""
-                                feedback = "✅ Uzel $combined přidán a aktivován."
+                                feedback = "Uzel $combined přidán a aktivován."
                                 tick++
                             }
                         }
                     ) {
-                        Text("➕ Přidat", maxLines = 1, softWrap = false)
+                        Text("Přidat", maxLines = 1, softWrap = false)
                     }
                 }
             }
@@ -1743,8 +2517,8 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
         // 3. Pokročilé detaily (Moje P2P adresa, Offline schránka s možností odebrat, Fronta zpráv)
         Card(
             shape = RoundedCornerShape(18.dp),
-            border = BorderStroke(1.dp, Color(0xFF232A3B)),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF131722)),
+            border = BorderStroke(1.dp, app.pulse4.android.ui.theme.MineralOutlineDark),
+            colors = CardDefaults.cardColors(containerColor = app.pulse4.android.ui.theme.MineralSurfaceDark),
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(Modifier.padding(16.dp)) {
@@ -1754,7 +2528,7 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        "🔧 POKROČILÉ SÍŤOVÉ DETAILY A FRONTA (${outbox.size})",
+                        "POKROČILÉ SÍŤOVÉ DETAILY A FRONTA (${outbox.size})",
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.Bold,
                         color = Color(0xFF94A3B8),
@@ -1784,11 +2558,11 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
                             onClick = {
                                 myInfo?.deliveryHash?.let {
                                     clipboard.setText(AnnotatedString(it))
-                                    feedback = "✅ Adresa zkopírována do schránky"
+                                    feedback = "Adresa zkopírována do schránky"
                                 }
                             }
                         ) {
-                            Text("📋 Kopírovat", maxLines = 1, softWrap = false)
+                            Text("Kopírovat", maxLines = 1, softWrap = false)
                         }
                     }
 
@@ -1813,12 +2587,12 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
                                     scope.launch(Dispatchers.IO) {
                                         sl.settings.propagationNode = ""
                                         runCatching { sl.bridge.applyPropagationNode() }
-                                        feedback = "🗑️ Offline schránka odebrána."
+                                        feedback = "Offline schránka odebrána."
                                         tick++
                                     }
                                 }
                             ) {
-                                Text("🗑️ Odebrat", color = MaterialTheme.colorScheme.error, maxLines = 1, softWrap = false)
+                                Text("Odebrat", color = MaterialTheme.colorScheme.error, maxLines = 1, softWrap = false)
                             }
                         }
                         Button(
@@ -1826,7 +2600,7 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
                                 scope.launch(Dispatchers.IO) {
                                     sl.settings.propagationNode = propagationNode
                                     runCatching { sl.bridge.applyPropagationNode() }
-                                    feedback = "✅ Nastavení offline schránky uloženo."
+                                    feedback = "Nastavení offline schránky uloženo."
                                     tick++
                                 }
                             }
@@ -1874,7 +2648,7 @@ private fun PrivacyAndBackupSection(sl: ServiceLocator) {
         if (uri != null && data != null) {
             scope.launch(Dispatchers.IO) {
                 ctx.contentResolver.openOutputStream(uri)?.use { it.write(data) }
-                msg = "✅ Šifrovaná záloha byla úspěšně uložena do souboru."
+                msg = "Šifrovaná záloha byla úspěšně uložena do souboru."
                 pendingBackup = null
             }
         }
@@ -1886,11 +2660,11 @@ private fun PrivacyAndBackupSection(sl: ServiceLocator) {
             msg = try {
                 val bytes = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: error("nelze číst")
                 val n = sl.backupService.restore(sl.backupService.open(bytes, pass.toCharArray()))
-                "✅ Obnoveno $n záznamů ze zálohy."
+                "Obnoveno $n záznamů ze zálohy."
             } catch (e: BackupException) {
-                "❌ Chyba hesla nebo poškozená záloha: ${e.message}"
+                "Chyba hesla nebo poškozená záloha: ${e.message}"
             } catch (e: Exception) {
-                "❌ Obnova selhala: ${e.message}"
+                "Obnova selhala: ${e.message}"
             }
         }
     }
@@ -1904,13 +2678,13 @@ private fun PrivacyAndBackupSection(sl: ServiceLocator) {
         // 1. Šifrovaná záloha a obnova dat
         Card(
             shape = RoundedCornerShape(18.dp),
-            border = BorderStroke(1.dp, Color(0xFF232A3B)),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF131722)),
+            border = BorderStroke(1.dp, app.pulse4.android.ui.theme.MineralOutlineDark),
+            colors = CardDefaults.cardColors(containerColor = app.pulse4.android.ui.theme.MineralSurfaceDark),
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(Modifier.padding(16.dp)) {
                 Text(
-                    "💾 ŠIFROVANÁ ZÁLOHA VŠECH DAT DO SOUBORU",
+                    "ŠIFROVANÁ ZÁLOHA VŠECH DAT DO SOUBORU",
                     style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.Bold,
                     color = Color(0xFF38BDF8)
@@ -1941,12 +2715,12 @@ private fun PrivacyAndBackupSection(sl: ServiceLocator) {
                             }
                         },
                         modifier = Modifier.weight(1f)
-                    ) { Text("📤 Uložit zálohu", maxLines = 1, softWrap = false) }
+                    ) { Text("Uložit zálohu", maxLines = 1, softWrap = false) }
                     Button(
                         enabled = pass.length >= 8,
                         onClick = { open.launch(arrayOf("*/*")) },
                         modifier = Modifier.weight(1f)
-                    ) { Text("📥 Obnovit ze souboru", maxLines = 1, softWrap = false) }
+                    ) { Text("Obnovit ze souboru", maxLines = 1, softWrap = false) }
                 }
             }
         }
@@ -1956,13 +2730,13 @@ private fun PrivacyAndBackupSection(sl: ServiceLocator) {
         // 2. Skrytí bydliště u sdílených aktivit (srozumitelné vysvětlení pro BFU + automatické nastavení)
         Card(
             shape = RoundedCornerShape(18.dp),
-            border = BorderStroke(1.dp, Color(0xFF232A3B)),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF131722)),
+            border = BorderStroke(1.dp, app.pulse4.android.ui.theme.MineralOutlineDark),
+            colors = CardDefaults.cardColors(containerColor = app.pulse4.android.ui.theme.MineralSurfaceDark),
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(Modifier.padding(16.dp)) {
                 Text(
-                    "🏠 SKRYTÍ BYDLIŠTĚ PŘI SDÍLENÍ AKTIVIT DO SKUPINY",
+                    "SKRYTÍ BYDLIŠTĚ PŘI SDÍLENÍ AKTIVIT DO SKUPINY",
                     style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.Bold,
                     color = Color(0xFF10B981)
@@ -1995,7 +2769,7 @@ private fun PrivacyAndBackupSection(sl: ServiceLocator) {
                             ) {
                                 Column(Modifier.weight(1f)) {
                                     Text(
-                                        "🏠 Skrytý okruh #${idx + 1} (${fmt.elevation(z.radiusM)})",
+                                        "Skrytý okruh #${idx + 1} (${fmt.elevation(z.radiusM)})",
                                         style = MaterialTheme.typography.bodyMedium,
                                         fontWeight = FontWeight.Bold,
                                         color = Color.White
@@ -2009,11 +2783,11 @@ private fun PrivacyAndBackupSection(sl: ServiceLocator) {
                                 TextButton(onClick = {
                                     scope.launch(Dispatchers.IO) {
                                         sl.settings.privacyZones = (zones ?: emptyList()) - z
-                                        msg = "🗑️ Skrytý okruh byl odebrán."
+                                        msg = "Skrytý okruh byl odebrán."
                                         tick++
                                     }
                                 }) {
-                                    Text("🗑️ Odebrat", color = MaterialTheme.colorScheme.error, maxLines = 1, softWrap = false)
+                                    Text("Odebrat", color = MaterialTheme.colorScheme.error, maxLines = 1, softWrap = false)
                                 }
                             }
                         }
@@ -2024,7 +2798,7 @@ private fun PrivacyAndBackupSection(sl: ServiceLocator) {
                 Button(
                     onClick = {
                         scope.launch(Dispatchers.IO) {
-                            val latestAct = sl.db.activities().allNow().firstOrNull()
+                            val latestAct = sl.db.activities().latest()
                             val pts = latestAct?.let { sl.db.activities().track(it.id) }?.let { tr ->
                                 runCatching {
                                     Wire.json.decodeFromString(
@@ -2037,17 +2811,17 @@ private fun PrivacyAndBackupSection(sl: ServiceLocator) {
                             if (firstGps?.lat != null && firstGps.lon != null) {
                                 val r = radius.toDoubleOrNull()?.coerceAtLeast(50.0) ?: 200.0
                                 sl.settings.privacyZones = (zones ?: emptyList()) + PrivacyZone(firstGps.lat!!, firstGps.lon!!, r)
-                                msg = "✅ Nastaven skrytý okruh (${r.toInt()} m) podle startu vaší poslední aktivity."
+                                msg = "Nastaven skrytý okruh (${r.toInt()} m) podle startu vaší poslední aktivity."
                                 tick++
                             } else {
-                                msg = "⚠️ Nebyla nalezena žádná aktivita s GPS trasou. Zadejte polohu ručně níže."
+                                msg = "Nebyla nalezena žádná aktivita s GPS trasou. Zadejte polohu ručně níže."
                                 showManualZoneCoords = true
                             }
                         }
                     },
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("📍 Nastavit automaticky podle startu poslední aktivity")
+                    Text("Nastavit automaticky podle startu poslední aktivity")
                 }
 
                 TextButton(
@@ -2070,17 +2844,17 @@ private fun PrivacyAndBackupSection(sl: ServiceLocator) {
                             val lo = lon.replace(',', '.').toDoubleOrNull()
                             val r = radius.toDoubleOrNull()
                             if (la == null || lo == null || r == null || la !in -90.0..90.0 || lo !in -180.0..180.0 || r < 50) {
-                                msg = "❌ Zadejte platné GPS souřadnice a okruh alespoň 50 m."
+                                msg = "Zadejte platné GPS souřadnice a okruh alespoň 50 m."
                             } else {
                                 scope.launch(Dispatchers.IO) {
                                     sl.settings.privacyZones = (zones ?: emptyList()) + PrivacyZone(la, lo, r)
                                     lat = ""; lon = ""; tick++
                                 }
-                                msg = "✅ Skrytý okruh soukromí přidán."
+                                msg = "Skrytý okruh soukromí přidán."
                             }
                         },
                         modifier = Modifier.fillMaxWidth()
-                    ) { Text("➕ Přidat zadané místo") }
+                    ) { Text("Přidat zadané místo") }
                 }
             }
         }

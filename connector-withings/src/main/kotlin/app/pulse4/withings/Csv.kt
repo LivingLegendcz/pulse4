@@ -33,7 +33,7 @@ object WithingsCsv {
 
     fun parse(bytes: ByteArray, zoneId: String, accountId: String = "withings-csv"): CsvImportResult {
         if (bytes.isEmpty() || bytes.size > MAX_BYTES) return CsvImportResult(emptyList(), listOf(CsvRowError(0, "Velikost souboru mimo limit")))
-        val text = bytes.toString(Charsets.UTF_8).removePrefix("﻿")
+        val text = bytes.toString(Charsets.UTF_8).removePrefix("\uFEFF")
         val rows = readRows(text)
         if (rows.size < 2) return CsvImportResult(emptyList(), listOf(CsvRowError(1, "Soubor neobsahuje data")))
         if (rows.size > MAX_ROWS) return CsvImportResult(emptyList(), listOf(CsvRowError(0, "Příliš mnoho řádků")))
@@ -43,9 +43,19 @@ object WithingsCsv {
         val weightCol = header.indexOfFirst { it.startsWith("weight") }
         val fatMassCol = header.indexOfFirst { it.startsWith("fat mass") }
         val fatPctCol = header.indexOfFirst { it.startsWith("fat") && ("%" in it || "ratio" in it) }
+        val fatFreeCol = header.indexOfFirst { it.startsWith("fat-free") || it.startsWith("fat free") || it.startsWith("lean") }
+        val muscleCol = header.indexOfFirst { it.startsWith("muscle") }
+        val boneCol = header.indexOfFirst { it.startsWith("bone") }
+        val hydrationCol = header.indexOfFirst { it.startsWith("hydration") || it.startsWith("water") || it.startsWith("body water") }
+
         if (dateCol < 0 || weightCol < 0) return CsvImportResult(emptyList(), listOf(CsvRowError(1, "Chybí sloupec Date nebo Weight")))
         val weightToKg = unitFactor(header[weightCol]) ?: return CsvImportResult(emptyList(), listOf(CsvRowError(1, "Neznámá jednotka váhy")))
         val fatToKg = if (fatMassCol >= 0) unitFactor(header[fatMassCol]) else null
+        val fatFreeToKg = if (fatFreeCol >= 0) (unitFactor(header[fatFreeCol]) ?: weightToKg) else null
+        val muscleToKg = if (muscleCol >= 0) (unitFactor(header[muscleCol]) ?: weightToKg) else null
+        val boneToKg = if (boneCol >= 0) (unitFactor(header[boneCol]) ?: weightToKg) else null
+        val hydrationHeader = if (hydrationCol >= 0) header[hydrationCol] else ""
+        val hydrationToKg = unitFactor(hydrationHeader)
 
         val zone = ZoneId.of(zoneId)
         val items = ArrayList<MetricObservation>()
@@ -59,12 +69,38 @@ object WithingsCsv {
             if (ts == null) { errors += CsvRowError(line, "Nečitelné datum"); continue }
             if (w == null || w !in 10.0..500.0) { errors += CsvRowError(line, "Váha chybí nebo je mimo rozsah"); continue }
             items += obs(MetricType.WEIGHT, w, ts, zoneId, accountId)
+
             val pct = when {
                 fatPctCol >= 0 -> r.getOrNull(fatPctCol)?.let(::num)
                 fatMassCol >= 0 && fatToKg != null -> r.getOrNull(fatMassCol)?.let(::num)?.let { it * fatToKg / w * 100.0 }
                 else -> null
             }
             if (pct != null && pct in 1.0..80.0) items += obs(MetricType.BODY_FAT, pct, ts, zoneId, accountId)
+
+            if (fatFreeCol >= 0 && fatFreeToKg != null) {
+                val ffm = r.getOrNull(fatFreeCol)?.let(::num)?.times(fatFreeToKg)
+                if (ffm != null && ffm in 5.0..250.0) items += obs(MetricType.FAT_FREE_MASS, ffm, ts, zoneId, accountId)
+            }
+            if (muscleCol >= 0 && muscleToKg != null) {
+                val mus = r.getOrNull(muscleCol)?.let(::num)?.times(muscleToKg)
+                if (mus != null && mus in 5.0..200.0) items += obs(MetricType.MUSCLE_MASS, mus, ts, zoneId, accountId)
+            }
+            if (boneCol >= 0 && boneToKg != null) {
+                val bone = r.getOrNull(boneCol)?.let(::num)?.times(boneToKg)
+                if (bone != null && bone in 0.5..15.0) items += obs(MetricType.BONE_MASS, bone, ts, zoneId, accountId)
+            }
+            if (hydrationCol >= 0) {
+                val rawHyd = r.getOrNull(hydrationCol)?.let(::num)
+                if (rawHyd != null) {
+                    val waterPct = when {
+                        "%" in hydrationHeader -> rawHyd
+                        hydrationToKg != null -> (rawHyd * hydrationToKg / w) * 100.0
+                        rawHyd <= w * 0.72 -> (rawHyd / w) * 100.0
+                        else -> rawHyd
+                    }
+                    if (waterPct in 25.0..85.0) items += obs(MetricType.BODY_WATER, waterPct, ts, zoneId, accountId)
+                }
+            }
         }
         return CsvImportResult(items, errors)
     }

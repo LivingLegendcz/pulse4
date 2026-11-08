@@ -11,10 +11,20 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.DirectionsRun
+import androidx.compose.material.icons.filled.CalendarToday
+import androidx.compose.material.icons.filled.Group
+import androidx.compose.material.icons.filled.QueryStats
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -32,7 +42,27 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.NavHost
+import app.pulse4.android.ui.theme.GlacierContainerDark
+import app.pulse4.android.ui.theme.GlacierOnContainerDark
+import app.pulse4.android.ui.theme.GlacierOnSecondaryDark
+import app.pulse4.android.ui.theme.GlacierSecondaryDark
+import app.pulse4.android.ui.theme.MineralBackgroundDark
+import app.pulse4.android.ui.theme.MineralOnSurfaceDark
+import app.pulse4.android.ui.theme.MineralOnSurfaceVariantDark
+import app.pulse4.android.ui.theme.MineralOutlineDark
+import app.pulse4.android.ui.theme.MineralSurfaceDark
+import app.pulse4.android.ui.theme.MineralSurfaceVariantDark
+import app.pulse4.android.ui.theme.Pulse4Typography
+import app.pulse4.android.ui.theme.SageContainerDark
+import app.pulse4.android.ui.theme.SageOnContainerDark
+import app.pulse4.android.ui.theme.SageOnPrimaryDark
+import app.pulse4.android.ui.theme.SagePrimaryDark
+import app.pulse4.android.ui.theme.SandContainerDark
+import app.pulse4.android.ui.theme.SandOnContainerDark
+import app.pulse4.android.ui.theme.SandOnTertiaryDark
+import app.pulse4.android.ui.theme.SandTertiaryDark
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
@@ -93,6 +123,30 @@ class MainActivity : ComponentActivity() {
         if (intent?.getBooleanExtra("run_share", false) == true) {
             app.pulse4.android.work.Scheduler.shareNow(this, manual = true)
         }
+        if (intent?.getBooleanExtra("clear_test_data", false) == true) {
+            CoroutineScope(Dispatchers.IO).launch {
+                try {
+                    android.util.Log.i("Pulse4", "Vymazávám testovací data a resetuji aktivity...")
+                    sl.importService.clearTestDataAndResetActivities()
+                    android.util.Log.i("Pulse4", "Spouštím čistou synchronizaci aktivit z Garminu...")
+                    val imported = sl.importService.syncGarminActivities(System.currentTimeMillis())
+                    android.util.Log.i("Pulse4", "Synchronizace dokončena: importováno $imported aktivit.")
+                } catch (e: Exception) {
+                    android.util.Log.e("Pulse4", "Chyba při mazání testovacích dat a synchronizaci", e)
+                }
+            }
+        }
+        intent?.getStringExtra("import_fit_path")?.let { p ->
+            CoroutineScope(Dispatchers.IO).launch {
+                try {
+                    val bytes = java.io.File(p).readBytes()
+                    val res = sl.importService.importFit(bytes, System.currentTimeMillis())
+                    android.util.Log.i("Pulse4", "Imported FIT from $p: $res")
+                } catch (e: Exception) {
+                    android.util.Log.e("Pulse4", "Failed to import FIT from $p", e)
+                }
+            }
+        }
         intent?.getStringExtra("add_contact_b64")?.let { b64 ->
             val raw = String(android.util.Base64.decode(b64, android.util.Base64.DEFAULT), Charsets.UTF_8)
             when (val r = app.pulse4.sync.Pairing.parse(raw)) {
@@ -110,13 +164,14 @@ class MainActivity : ComponentActivity() {
                                     verifiedAtMs = System.currentTimeMillis()
                                 )
                             )
+                            android.util.Log.i("Pulse4Contact", "SUCCESS: Added contact ${r.payload.name} (addr=$derived, fp=${r.fingerprint})")
                         } catch (e: Exception) {
-                            android.util.Log.e("Pulse4", "Failed to add contact", e)
+                            android.util.Log.e("Pulse4Contact", "Failed to add contact", e)
                         }
                     }
                 }
                 is app.pulse4.sync.PairingResult.Invalid -> {
-                    android.util.Log.e("Pulse4", "Invalid pairing payload: ${r.reason}")
+                    android.util.Log.e("Pulse4Contact", "Invalid pairing payload: ${r.reason}")
                 }
             }
         }
@@ -136,13 +191,14 @@ class MainActivity : ComponentActivity() {
                                     verifiedAtMs = System.currentTimeMillis()
                                 )
                             )
+                            android.util.Log.i("Pulse4Contact", "SUCCESS: Added contact ${r.payload.name} (addr=$derived, fp=${r.fingerprint})")
                         } catch (e: Exception) {
-                            android.util.Log.e("Pulse4", "Failed to add contact", e)
+                            android.util.Log.e("Pulse4Contact", "Failed to add contact", e)
                         }
                     }
                 }
                 is app.pulse4.sync.PairingResult.Invalid -> {
-                    android.util.Log.e("Pulse4", "Invalid pairing payload: ${r.reason}")
+                    android.util.Log.e("Pulse4Contact", "Invalid pairing payload: ${r.reason}")
                 }
             }
         }
@@ -176,7 +232,7 @@ class MainActivity : ComponentActivity() {
                         ownerId = self,
                         recipients = recipients,
                         fields = allFields,
-                        scope = app.pulse4.sharing.TimeScope.continuousFrom(java.time.LocalDate.now(java.time.ZoneId.of(sl.settings.zoneId)).minusDays(7)),
+                        scope = app.pulse4.sharing.TimeScope.continuousFrom(java.time.LocalDate.now(java.time.ZoneId.of(sl.settings.zoneId)).minusDays(60)),
                         groupId = null,
                         createdAtMs = System.currentTimeMillis()
                     )
@@ -287,12 +343,26 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+        if (intent?.getBooleanExtra("resend_all", false) == true) {
+            CoroutineScope(Dispatchers.IO).launch {
+                try {
+                    sl.db.inbox().deleteAllSent()
+                    sl.db.outbox().deleteAll()
+                    val now = System.currentTimeMillis()
+                    val enqueued = sl.shareService.planAndEnqueue(now)
+                    android.util.Log.i("Pulse4Sync", "RESEND_ALL: enqueued=$enqueued items into fresh outbox")
+                } catch (e: Throwable) {
+                    android.util.Log.e("Pulse4Sync", "Failed to resend all", e)
+                }
+            }
+        }
         if (intent?.getBooleanExtra("trigger_pump", false) == true) {
             CoroutineScope(Dispatchers.IO).launch {
                 try {
-                    val now = System.currentTimeMillis()
-                    val enqueued = sl.shareService.planAndEnqueue(now)
-                    val stats = sl.transport.pump(now, windowMs = 8000)
+                    val realNow = System.currentTimeMillis()
+                    val enqueued = sl.shareService.planAndEnqueue(realNow)
+                    val pumpDueTime = realNow + 86_400_000L
+                    val stats = sl.transport.pump(pumpDueTime, windowMs = 12000)
                     android.util.Log.i("Pulse4Sync", "PUMP_RESULT: enqueued=$enqueued, sent=${stats.sent}, received=${stats.received}, rejected=${stats.rejected}, pending=${stats.pendingInFlight}")
                 } catch (e: Throwable) {
                     android.util.Log.e("Pulse4Sync", "Failed to pump", e)
@@ -304,10 +374,14 @@ class MainActivity : ComponentActivity() {
                 try {
                     val info = sl.bridge.ensureStarted()
                     val contacts = sl.db.contacts().allNow()
-                    val outboxCount = sl.db.outbox().all().size
-                    val actsCount = sl.db.activities().allNow().size
+                    val outboxList = sl.db.outbox().all()
+                    val outboxDetails = outboxList.map { "${it.objectType}/${it.objectId}:${it.state}(att=${it.attempts},sz=${it.wire.size})" }
+                    val actsCount = sl.db.activities().count()
                     val status = sl.bridge.statusJson()
-                    android.util.Log.i("Pulse4Status", "STATUS: hash=${info.deliveryHash}, contacts=${contacts.size}, outbox=$outboxCount, activities=$actsCount, rns=$status")
+                    val inDaily = sl.db.inbox().objectsNow("daily").size
+                    val inActs = sl.db.inbox().objectsNow("activity").size
+                    val recActs = sl.db.activities().recentSummariesNow(5).map { "${it.id}(${it.sport}): ${it.startUtcMs}" }
+                    android.util.Log.i("Pulse4Status", "STATUS: hash=${info.deliveryHash}, contacts=${contacts.size}, outbox=${outboxList.size} $outboxDetails, activities=$actsCount, inDaily=$inDaily, inActs=$inActs, recActs=$recActs, rns=$status")
                 } catch (e: Throwable) {
                     android.util.Log.e("Pulse4Status", "Failed to dump status", e)
                 }
@@ -324,25 +398,33 @@ class MainActivity : ComponentActivity() {
 }
 
 private val ObsidianDarkScheme = darkColorScheme(
-    primary = Color(0xFF38BDF8),
-    onPrimary = Color(0xFF061320),
-    primaryContainer = Color(0xFF0F2942),
-    onPrimaryContainer = Color(0xFFBAE6FD),
-    secondary = Color(0xFF10B981),
-    onSecondary = Color(0xFF052E16),
-    tertiary = Color(0xFFF59E0B),
-    background = Color(0xFF0A0D14),
-    onBackground = Color(0xFFF1F5F9),
-    surface = Color(0xFF11151F),
-    onSurface = Color(0xFFF1F5F9),
-    surfaceVariant = Color(0xFF1A2030),
-    onSurfaceVariant = Color(0xFF94A3B8),
-    outline = Color(0xFF475569)
+    primary = SagePrimaryDark,
+    onPrimary = SageOnPrimaryDark,
+    primaryContainer = SageContainerDark,
+    onPrimaryContainer = SageOnContainerDark,
+    secondary = GlacierSecondaryDark,
+    onSecondary = GlacierOnSecondaryDark,
+    secondaryContainer = GlacierContainerDark,
+    onSecondaryContainer = GlacierOnContainerDark,
+    tertiary = SandTertiaryDark,
+    onTertiary = SandOnTertiaryDark,
+    tertiaryContainer = SandContainerDark,
+    onTertiaryContainer = SandOnContainerDark,
+    background = MineralBackgroundDark,
+    onBackground = MineralOnSurfaceDark,
+    surface = MineralSurfaceDark,
+    onSurface = MineralOnSurfaceDark,
+    surfaceVariant = MineralSurfaceVariantDark,
+    onSurfaceVariant = MineralOnSurfaceVariantDark,
+    outline = MineralOutlineDark
 )
 
 @Composable
 fun Pulse4Theme(content: @Composable () -> Unit) {
-    MaterialTheme(colorScheme = ObsidianDarkScheme) {
+    MaterialTheme(
+        colorScheme = ObsidianDarkScheme,
+        typography = Pulse4Typography
+    ) {
         Surface(
             modifier = Modifier.fillMaxSize(),
             color = MaterialTheme.colorScheme.background,
@@ -351,19 +433,19 @@ fun Pulse4Theme(content: @Composable () -> Unit) {
     }
 }
 
-private data class Dest(val route: String, val label: String, val icon: String)
+private data class Dest(val route: String, val label: String, val icon: androidx.compose.ui.graphics.vector.ImageVector)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun Root(sl: app.pulse4.android.di.ServiceLocator) {
     val nav = rememberNavController()
     val main = listOf(
-        Dest("today", "Dnes", "📅"),
-        Dest("metrics", "Metriky", "📈"),
-        Dest("activities", "Aktivity", "🏃"),
-        Dest("training", "Tréninky", "⏱️"),
-        Dest("groups", "Skupiny", "👥"),
-        Dest("settings", "Nastavení", "⚙️")
+        Dest("today", "Dnes", Icons.Default.CalendarToday),
+        Dest("metrics", "Metriky", Icons.Default.QueryStats),
+        Dest("activities", "Aktivity", Icons.AutoMirrored.Filled.DirectionsRun),
+        Dest("training", "Tréninky", Icons.Default.Timer),
+        Dest("groups", "Skupiny", Icons.Default.Group),
+        Dest("settings", "Nastavení", Icons.Default.Settings)
     )
     val entry by nav.currentBackStackEntryAsState()
     val units by sl.settings.unitSystemFlow.collectAsState()
@@ -382,35 +464,11 @@ private fun Root(sl: app.pulse4.android.di.ServiceLocator) {
     LaunchedEffect(Unit) { if (Build.VERSION.SDK_INT >= 37) askLan.launch("android.permission.ACCESS_LOCAL_NETWORK") }
 
     Scaffold(
-        topBar = {
-            TopAppBar(
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = Color(0xFF0E121B),
-                    titleContentColor = Color.White
-                ),
-                title = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("Pulse4", fontWeight = FontWeight.ExtraBold)
-                        Text(
-                            if (units == app.pulse4.ui.UnitSystem.IMPERIAL) " · MI/LB" else " · KM/KG",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Color(0xFF38BDF8),
-                            modifier = Modifier.padding(start = 6.dp)
-                        )
-                    }
-                },
-                actions = {
-                    Text(
-                        mapProv.shortLabel,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Color(0xFF94A3B8),
-                        modifier = Modifier.padding(end = 12.dp)
-                    )
-                }
-            )
-        },
         bottomBar = {
-            NavigationBar(containerColor = Color(0xFF0E121B)) {
+            NavigationBar(
+                containerColor = MineralBackgroundDark,
+                contentColor = MineralOnSurfaceDark
+            ) {
                 val curRoute = entry?.destination?.route.orEmpty()
                 main.forEach { d ->
                     val isSelected = when (d.route) {
@@ -420,14 +478,36 @@ private fun Root(sl: app.pulse4.android.di.ServiceLocator) {
                     }
                     NavigationBarItem(
                         selected = isSelected,
-                        onClick = { nav.navigate(d.route) { launchSingleTop = true } },
-                        icon = { Text(d.icon, style = MaterialTheme.typography.titleMedium) },
+                        onClick = {
+                            nav.navigate(d.route) {
+                                popUpTo(nav.graph.findStartDestination().id) {
+                                    saveState = true
+                                }
+                                launchSingleTop = true
+                                restoreState = true
+                            }
+                        },
+                        icon = {
+                            Icon(
+                                imageVector = d.icon,
+                                contentDescription = d.label,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        },
+                        colors = NavigationBarItemDefaults.colors(
+                            selectedIconColor = SagePrimaryDark,
+                            selectedTextColor = SagePrimaryDark,
+                            unselectedIconColor = MineralOnSurfaceVariantDark,
+                            unselectedTextColor = MineralOnSurfaceVariantDark,
+                            indicatorColor = SageContainerDark
+                        ),
                         label = {
                             Text(
                                 d.label,
                                 maxLines = 1,
                                 softWrap = false,
-                                fontSize = 10.sp
+                                fontSize = 10.sp,
+                                fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal
                             )
                         }
                     )

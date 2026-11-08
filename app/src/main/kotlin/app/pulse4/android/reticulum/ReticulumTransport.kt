@@ -29,7 +29,7 @@ class ReticulumTransport(
     private val extraHandlers: () -> Map<String, KindHandler>,
 ) {
     private var receiver: Receiver? = null
-    private val inFlightWaitMs = 5 * 60_000L
+    private val inFlightWaitMs = 15_000L
 
     private fun receiver(selfId: String): Receiver = receiver ?: Receiver(
         selfId = selfId,
@@ -48,6 +48,12 @@ class ReticulumTransport(
         val rx = receiver(info.deliveryHash)
         val usePropagation = settings.propagationNode.isNotBlank()
         var sent = 0; var received = 0; var rejected = 0
+
+        // Ujisti se, že všechny známé kontakty z databáze jsou zaregistrovány v RNS/LXMF směrovací tabulce
+        val knownContacts = runCatching { db.contacts().allNow() }.getOrDefault(emptyList())
+        for (c in knownContacts) {
+            runCatching { bridge.addContact(c.publicKeyB64) }
+        }
 
         for (item in outbox.due(nowMs)) {
             try {
@@ -70,10 +76,19 @@ class ReticulumTransport(
                 }, System.currentTimeMillis())
 
                 is BridgeEvent.Message -> {
-                    if (!ev.validated) { rejected++; continue } // podpis neověřen → zahodit
+                    android.util.Log.i("Pulse4Sync", "INCOMING MESSAGE from ${ev.source}, validated=${ev.validated}, len=${ev.content.length}")
+                    if (!ev.validated) {
+                        android.util.Log.w("Pulse4Sync", "REJECTED: ev.validated is false!")
+                        rejected++
+                        continue
+                    }
                     val outcome = rx.receive(ev.source, ev.content.toByteArray(Charsets.UTF_8), System.currentTimeMillis())
+                    android.util.Log.i("Pulse4Sync", "OUTCOME: $outcome")
                     when (outcome) {
-                        is Outcome.Rejected -> rejected++
+                        is Outcome.Rejected -> {
+                            android.util.Log.w("Pulse4Sync", "REJECTED by receiver: ${outcome.reason}")
+                            rejected++
+                        }
                         is Outcome.AckProcessed -> Unit
                         else -> { received++; onApplied() }
                     }

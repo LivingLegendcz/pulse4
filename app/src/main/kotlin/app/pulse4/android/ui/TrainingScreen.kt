@@ -89,7 +89,7 @@ fun TrainingScreen(sl: ServiceLocator) {
             Button({ dialog = "interval" }, Modifier.padding(start = 8.dp)) { Text("+ Intervaly") }
         }
         // Nepodporované kombinace se vysvětlí před exportem, ne až po selhání.
-        draft.issues.forEach { Text("⚠ ${it.message}", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+        draft.issues.forEach { Text(it.message, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
 
         OutlinedTextField(dateText, { dateText = it }, label = { Text("Datum (RRRR-MM-DD)") }, modifier = Modifier.fillMaxWidth())
         when (val d = date) {

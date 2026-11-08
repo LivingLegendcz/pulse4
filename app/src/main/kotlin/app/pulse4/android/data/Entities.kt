@@ -4,6 +4,7 @@ import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
+import app.pulse4.domain.czechName
 
 // Složité objekty se ukládají jako JSON (kotlinx-serialization) vedle několika indexovaných sloupců.
 
@@ -24,7 +25,67 @@ data class SourceRecordRow(
 )
 
 @Entity(tableName = "activity", indices = [Index("startUtcMs")])
-data class ActivityRow(@PrimaryKey val id: String, val startUtcMs: Long, val sport: String, val json: String)
+data class ActivityRow(
+    @PrimaryKey val id: String,
+    val startUtcMs: Long,
+    val sport: String,
+    val json: String,
+    val title: String? = null,
+    val distanceM: Double? = null,
+    val movingTimeS: Double? = null,
+    val ascentM: Double? = null,
+    val avgHeartRate: Int? = null,
+    val maxHeartRate: Int? = null,
+    val caloriesKcal: Double? = null,
+    val aerobicTe: Double? = null,
+    val anaerobicTe: Double? = null,
+    val trainingLoad: Double? = null,
+    val avgPowerW: Double? = null,
+    val avgCadence: Double? = null,
+    val zoneId: String? = null
+)
+
+data class ActivitySummaryRow(
+    val id: String,
+    val startUtcMs: Long,
+    val sport: String,
+    val title: String?,
+    val distanceM: Double?,
+    val movingTimeS: Double?,
+    val ascentM: Double?,
+    val avgHeartRate: Int?,
+    val maxHeartRate: Int?,
+    val caloriesKcal: Double?,
+    val aerobicTe: Double?,
+    val anaerobicTe: Double?,
+    val trainingLoad: Double?,
+    val avgPowerW: Double?,
+    val avgCadence: Double?,
+    val zoneId: String?,
+    val json: String? = null
+)
+
+data class IdAndJson(val id: String, val json: String)
+
+fun app.pulse4.domain.Activity.toRow(jsonString: String): ActivityRow = ActivityRow(
+    id = this.id,
+    startUtcMs = this.startUtcMs,
+    sport = this.sport.name,
+    json = jsonString,
+    title = this.title?.takeIf { it.isNotBlank() } ?: this.sport.czechName(),
+    distanceM = this.distanceM,
+    movingTimeS = this.movingTimeS ?: this.totalTimeS,
+    ascentM = this.ascentM,
+    avgHeartRate = this.avgHeartRate,
+    maxHeartRate = this.maxHeartRate,
+    caloriesKcal = this.caloriesKcal,
+    aerobicTe = this.aerobicTrainingEffect,
+    anaerobicTe = this.anaerobicTrainingEffect,
+    trainingLoad = this.trainingLoad,
+    avgPowerW = this.avgPowerW,
+    avgCadence = this.avgCadence,
+    zoneId = this.zoneId
+)
 
 @Entity(tableName = "track")
 data class TrackRow(@PrimaryKey val activityId: String, val json: String)

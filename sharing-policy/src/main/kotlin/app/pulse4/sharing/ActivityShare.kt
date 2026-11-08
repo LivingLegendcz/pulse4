@@ -44,6 +44,9 @@ data class ActivityProjection(
     val route: List<RoutePoint>? = null,
     val laps: List<LapOut>? = null,
     val attachments: List<AttachmentRef>? = null,
+    val aerobicTrainingEffect: Double? = null,
+    val anaerobicTrainingEffect: Double? = null,
+    val trainingEffectLabel: String? = null,
     /** Důvod, proč se něco z požadovaného neodeslalo (zobrazí se v náhledu). */
     val omitted: List<String> = emptyList(),
 )
@@ -56,7 +59,7 @@ object ActivityProjector {
         laps: List<LapIn>,
         zones: List<PrivacyZone>,
         originalFit: AttachmentRef? = null,
-        chartBuckets: Int = 120,
+        chartBuckets: Int = 80,
     ): ActivityProjection? {
         if (!grant.active) return null
         val date = TimeRules.localDate(activity.startUtcMs, activity.zoneId)
@@ -94,17 +97,24 @@ object ActivityProjector {
             route = route,
             laps = outLaps,
             attachments = attachments,
+            aerobicTrainingEffect = activity.aerobicTrainingEffect.takeIf { wantsSummary },
+            anaerobicTrainingEffect = activity.anaerobicTrainingEffect.takeIf { wantsSummary },
+            trainingEffectLabel = activity.trainingEffectLabel.takeIf { wantsSummary },
             omitted = omitted,
         )
     }
 
-    fun sanitizedRoute(track: List<TrackPoint>, zones: List<PrivacyZone>): List<RoutePoint> =
-        track.mapNotNull { p ->
+    fun sanitizedRoute(track: List<TrackPoint>, zones: List<PrivacyZone>, maxPoints: Int = 120): List<RoutePoint> {
+        val filtered = track.mapNotNull { p ->
             val la = p.lat; val lo = p.lon
             if (la == null || lo == null) null
             else if (zones.any { it.contains(la, lo) }) null
             else RoutePoint(la, lo)
         }
+        if (filtered.size <= maxPoints) return filtered
+        val step = filtered.size.toDouble() / maxPoints
+        return (0 until maxPoints).map { i -> filtered[(i * step).toInt()] } + filtered.last()
+    }
 
     private fun sanitizeLap(l: LapIn, zones: List<PrivacyZone>): LapOut {
         val inZone = l.startLat != null && l.startLon != null && zones.any { it.contains(l.startLat, l.startLon) }
@@ -125,6 +135,12 @@ object ActivityProjector {
             series("elevation") { it.elevationM },
             series("cadence") { it.cadence?.toDouble() },
             series("power") { it.powerW?.toDouble() },
+            series("strideLength") { it.strideLengthM },
+            series("verticalOscillation") { it.verticalOscillationCm },
+            series("groundContactTime") { it.groundContactTimeMs },
+            series("verticalRatio") { it.verticalRatioPct },
+            series("stamina") { it.staminaPct },
+            series("performanceCondition") { it.performanceCondition?.toDouble() },
         )
     }
 }

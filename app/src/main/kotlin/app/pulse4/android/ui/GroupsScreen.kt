@@ -2,6 +2,8 @@
 
 package app.pulse4.android.ui
 
+import app.pulse4.domain.czechName
+
 import android.graphics.Bitmap
 import android.graphics.Color as AColor
 import androidx.compose.foundation.BorderStroke
@@ -25,8 +27,38 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Icon
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.CompareArrows
+import androidx.compose.material.icons.automirrored.outlined.DirectionsRun
+import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.Bedtime
+import androidx.compose.material.icons.outlined.Bolt
+import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.CheckCircle
+import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.EmojiEvents
+import androidx.compose.material.icons.outlined.Equalizer
+import androidx.compose.material.icons.outlined.Favorite
+import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.outlined.Group
+import androidx.compose.material.icons.outlined.GroupAdd
+import androidx.compose.material.icons.outlined.MonitorHeart
+import androidx.compose.material.icons.outlined.People
+import androidx.compose.material.icons.outlined.Person
+import androidx.compose.material.icons.outlined.PersonAdd
+import androidx.compose.material.icons.outlined.Public
+import androidx.compose.material.icons.outlined.QrCode
+import androidx.compose.material.icons.outlined.QrCodeScanner
+import androidx.compose.material.icons.outlined.Scale
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Share
+import androidx.compose.material.icons.outlined.Star
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
@@ -103,15 +135,15 @@ fun qrBitmap(text: String, size: Int = 600): Bitmap {
  *
  * ÚROVEŇ 1 (Kořen stromu — Seznam skupin & kontaktů, když `openedGroupId == null`):
  * - Přehledný seznam skupin (karty jednotlivých skupin s výčtem členů, sdílených kategorií a počtem aktivit)
- * - Tlačítka "➕ Nová skupina" a "📲 Spárovat kontakt (QR)"
+ * - Tlačítka "Nová skupina" a "QR párování"
  * - Sekce ověřených P2P kontaktů
  *
  * ÚROVEŇ 2 (Detail rozkliknuté skupiny, když `openedGroupId != null`):
- * - Drobečková navigace "← Zpět na skupiny · 👥 Název skupiny"
+ * - Drobečková navigace "Skupiny · Název skupiny"
  * - Rozdělení dat rozkliknuté skupiny do 3 samostatných tabů:
- *   0 -> 📊 Sdílené metriky (společný Grafana graf členů skupiny + žebříček a statistiky)
- *   1 -> 🏃 Sdílené aktivity (feed aktivit členů skupiny + Compare porovnávání)
- *   2 -> 🔐 Členové & Co sdílím (správa členů této skupiny a přepínače kategorií, které do skupiny sdílím)
+ *   0 -> Sdílené metriky (společný Grafana graf členů skupiny + žebříček a statistiky)
+ *   1 -> Sdílené aktivity (feed aktivit členů skupiny + Compare porovnávání)
+ *   2 -> Členové & Co sdílím (správa členů této skupiny a přepínače kategorií, které do skupiny sdílím)
  */
 @Composable
 fun GroupsScreen(
@@ -124,7 +156,7 @@ fun GroupsScreen(
     val grants by sl.db.grants().all().collectAsState(emptyList())
     val receivedDaily by sl.db.inbox().objects("daily").collectAsState(emptyList())
     val receivedActs by sl.db.inbox().objects("activity").collectAsState(emptyList())
-    val myActs by sl.db.activities().all().collectAsState(emptyList())
+    val myActs by sl.db.activities().recentSummaries(20).collectAsState(emptyList())
 
     val decodedGroups = remember(groups) {
         groups.mapNotNull { runCatching { Wire.json.decodeFromString(Group.serializer(), it.json) }.getOrNull() }
@@ -236,10 +268,14 @@ private fun GroupsTreeRootView(
             }
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 OutlinedButton(onClick = onOpenPairing) {
-                    Text("📲 QR", style = MaterialTheme.typography.labelMedium)
+                    Icon(Icons.Outlined.QrCode, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("QR párování", style = MaterialTheme.typography.labelMedium)
                 }
                 Button(onClick = onOpenNewGroup) {
-                    Text("➕ Skupina", style = MaterialTheme.typography.labelMedium)
+                    Icon(Icons.Outlined.GroupAdd, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Nová skupina", style = MaterialTheme.typography.labelMedium)
                 }
             }
         }
@@ -247,12 +283,16 @@ private fun GroupsTreeRootView(
         Spacer(Modifier.height(14.dp))
 
         // Sekce 1: Strom skupin
-        Text(
-            "📁 MOJE SKUPINY (${decodedGroups.size + 1})",
-            style = MaterialTheme.typography.labelSmall,
-            fontWeight = FontWeight.Bold,
-            color = Color(0xFF94A3B8)
-        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Outlined.Folder, contentDescription = null, tint = Color(0xFF94A3B8), modifier = Modifier.size(16.dp))
+            Spacer(Modifier.width(6.dp))
+            Text(
+                "MOJE SKUPINY (${decodedGroups.size + 1})",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                color = Color(0xFF94A3B8)
+            )
+        }
         Spacer(Modifier.height(6.dp))
 
         // Speciální souhrnná větev: Všichni spárovaní přátelé
@@ -260,7 +300,7 @@ private fun GroupsTreeRootView(
             (listOf(meId) + contacts.map { it.identity } + receivedDaily.map { it.author }).distinct()
         }
         GroupTreeFolderCard(
-            icon = "🌐",
+            icon = Icons.Outlined.Public,
             title = "Všichni spárovaní přátelé",
             subtitle = "Souhrnný přehled všech vašich P2P kontaktů",
             memberNames = allParticipantIds.map { id ->
@@ -286,7 +326,7 @@ private fun GroupsTreeRootView(
             val groupCatsCount = groupGrants.flatMap { it.fields }.map { it.category }.distinct().size
 
             GroupTreeFolderCard(
-                icon = "👥",
+                icon = Icons.Outlined.Group,
                 title = g.name,
                 subtitle = "Skupina · verze ${g.version}",
                 memberNames = memberNames,
@@ -320,7 +360,7 @@ private fun GroupsTreeRootView(
                             .background(Color(0xFF38BDF8).copy(alpha = 0.14f), RoundedCornerShape(12.dp)),
                         contentAlignment = Alignment.Center
                     ) {
-                        Text("➕", style = MaterialTheme.typography.titleMedium)
+                        Icon(Icons.Outlined.Add, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(20.dp))
                     }
                     Spacer(Modifier.width(12.dp))
                     Column {
@@ -340,14 +380,20 @@ private fun GroupsTreeRootView(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(
-                "👤 OVĚŘENÉ P2P KONTAKTY (${contacts.size})",
-                style = MaterialTheme.typography.labelSmall,
-                fontWeight = FontWeight.Bold,
-                color = Color(0xFF94A3B8)
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Outlined.People, contentDescription = null, tint = Color(0xFF94A3B8), modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    "OVĚŘENÉ P2P KONTAKTY (${contacts.size})",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF94A3B8)
+                )
+            }
             TextButton(onClick = onOpenPairing) {
-                Text("📲 Spárovat nový kontakt")
+                Icon(Icons.Outlined.PersonAdd, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("Spárovat nový kontakt")
             }
         }
 
@@ -360,7 +406,7 @@ private fun GroupsTreeRootView(
                 Column(Modifier.padding(14.dp)) {
                     Text("Zatím nemáte žádné spárované kontakty", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
                     Text(
-                        "Klepněte na '📲 QR' pro zobrazení vašeho párovacího QR kódu nebo načtení kódu přítele.",
+                        "Klepněte na 'QR párování' pro zobrazení vašeho párovacího QR kódu nebo načtení kódu přítele.",
                         style = MaterialTheme.typography.bodySmall,
                         color = Color(0xFF94A3B8)
                     )
@@ -395,18 +441,27 @@ private fun GroupsTreeRootView(
                                 Text("Otisk: ${c.fingerprint}", style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8))
                             }
                         }
-                        Text(
-                            if (hasSentData) "📡 Aktivní P2P" else "✓ Ověřeno",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = if (hasSentData) Color(0xFF38BDF8) else Color(0xFF10B981),
+                        val badgeColor = if (hasSentData) Color(0xFF38BDF8) else Color(0xFF10B981)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier
-                                .background(
-                                    (if (hasSentData) Color(0xFF38BDF8) else Color(0xFF10B981)).copy(alpha = 0.15f),
-                                    RoundedCornerShape(8.dp)
-                                )
+                                .background(badgeColor.copy(alpha = 0.15f), RoundedCornerShape(8.dp))
                                 .padding(horizontal = 8.dp, vertical = 4.dp)
-                        )
+                        ) {
+                            Icon(
+                                if (hasSentData) Icons.Outlined.Share else Icons.Outlined.CheckCircle,
+                                contentDescription = null,
+                                tint = badgeColor,
+                                modifier = Modifier.size(13.dp)
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                if (hasSentData) "Aktivní P2P" else "Ověřeno",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = badgeColor
+                            )
+                        }
                     }
                 }
             }
@@ -417,7 +472,7 @@ private fun GroupsTreeRootView(
 
 @Composable
 private fun GroupTreeFolderCard(
-    icon: String,
+    icon: ImageVector,
     title: String,
     subtitle: String,
     memberNames: List<String>,
@@ -449,7 +504,7 @@ private fun GroupTreeFolderCard(
                             .background(accentColor.copy(alpha = 0.16f), RoundedCornerShape(12.dp)),
                         contentAlignment = Alignment.Center
                     ) {
-                        Text(icon, style = MaterialTheme.typography.titleLarge)
+                        Icon(icon, contentDescription = null, tint = accentColor, modifier = Modifier.size(24.dp))
                     }
                     Spacer(Modifier.width(12.dp))
                     Column {
@@ -490,16 +545,16 @@ private fun GroupTreeFolderCard(
             // Výčet členů skupiny
             Row(
                 Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                Icon(Icons.Outlined.Group, contentDescription = null, tint = Color(0xFF94A3B8), modifier = Modifier.size(15.dp))
+                Spacer(Modifier.width(6.dp))
                 Text(
-                    "👥 Členové (${memberNames.size}): ${memberNames.joinToString(", ")}",
+                    "Členové (${memberNames.size}): ${memberNames.joinToString(", ")}",
                     style = MaterialTheme.typography.bodySmall,
                     color = Color(0xFFE2E8F0),
                     maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
+                    overflow = TextOverflow.Ellipsis
                 )
             }
 
@@ -515,26 +570,34 @@ private fun GroupTreeFolderCard(
                         .background(Color(0xFF1E293B), RoundedCornerShape(8.dp))
                         .padding(horizontal = 8.dp, vertical = 3.dp)
                 ) {
-                    Text(
-                        "📊 Metriky od $sharedDailyCount přátel",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Color(0xFF38BDF8),
-                        maxLines = 1,
-                        softWrap = false
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Outlined.Equalizer, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(13.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            "Metriky od $sharedDailyCount přátel",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFF38BDF8),
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
                 }
                 Box(
                     modifier = Modifier
                         .background(Color(0xFF1E293B), RoundedCornerShape(8.dp))
                         .padding(horizontal = 8.dp, vertical = 3.dp)
                 ) {
-                    Text(
-                        "🏃 $sharedActivitiesCount sdílených aktivit",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Color(0xFF10B981),
-                        maxLines = 1,
-                        softWrap = false
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.AutoMirrored.Outlined.DirectionsRun, contentDescription = null, tint = Color(0xFF10B981), modifier = Modifier.size(13.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            "$sharedActivitiesCount sdílených aktivit",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFF10B981),
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
                 }
                 if (activeCategoriesCount > 0) {
                     Box(
@@ -542,13 +605,17 @@ private fun GroupTreeFolderCard(
                             .background(accentColor.copy(alpha = 0.16f), RoundedCornerShape(8.dp))
                             .padding(horizontal = 8.dp, vertical = 3.dp)
                     ) {
-                        Text(
-                            "📤 Sdílím $activeCategoriesCount sekcí",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = accentColor,
-                            maxLines = 1,
-                            softWrap = false
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Outlined.Share, contentDescription = null, tint = accentColor, modifier = Modifier.size(13.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                "Sdílím $activeCategoriesCount sekcí",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = accentColor,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
                     }
                 }
             }
@@ -559,9 +626,9 @@ private fun GroupTreeFolderCard(
 /**
  * ÚROVEŇ 2 (Detail rozkliknuté skupiny):
  * Po rozkliknutí skupiny ze stromu zobrazí drobečkovou navigaci a rozdělí data skupiny na:
- * 0 -> 📊 Sdílené metriky (společný graf + žebříček členů skupiny)
- * 1 -> 🏃 Sdílené aktivity (aktivity členů této skupiny + Compare)
- * 2 -> 🔐 Členové & Co sdílím (správa členů a kategorií sdílených do této skupiny)
+ * 0 -> Sdílené metriky (společný graf + žebříček členů skupiny)
+ * 1 -> Sdílené aktivity (aktivity členů této skupiny + Compare)
+ * 2 -> Členové & Co sdílím (správa členů a kategorií sdílených do této skupiny)
  */
 @Composable
 private fun GroupDetailBranchView(
@@ -573,7 +640,7 @@ private fun GroupDetailBranchView(
     activeGrants: List<ShareGrant>,
     receivedDaily: List<ReceivedRow>,
     receivedActs: List<ReceivedRow>,
-    myActs: List<app.pulse4.android.data.ActivityRow>,
+    myActs: List<app.pulse4.android.data.ActivitySummaryRow>,
     onBackToTree: () -> Unit,
     onOpenPairing: () -> Unit,
     onOpenActivity: (String) -> Unit,
@@ -616,8 +683,15 @@ private fun GroupDetailBranchView(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     TextButton(onClick = onBackToTree) {
+                        Icon(
+                            Icons.AutoMirrored.Outlined.ArrowBack,
+                            contentDescription = "Zpět na skupiny",
+                            tint = Color(0xFF38BDF8),
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(4.dp))
                         Text(
-                            "← Skupiny",
+                            "Skupiny",
                             fontWeight = FontWeight.Bold,
                             color = Color(0xFF38BDF8),
                             maxLines = 1,
@@ -626,14 +700,18 @@ private fun GroupDetailBranchView(
                     }
                     Spacer(Modifier.width(4.dp))
                     Column(Modifier.weight(1f)) {
-                        Text(
-                            "👥 $groupTitle",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = Color.White,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Outlined.Group, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                groupTitle,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Color.White,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
                         Text(
                             "${participantIds.size} členů: ${memberNames.joinToString(", ")}",
                             style = MaterialTheme.typography.labelSmall,
@@ -652,14 +730,15 @@ private fun GroupDetailBranchView(
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     val branchTabs = listOf(
-                        0 to "📊 Metriky",
-                        1 to "🏃 Aktivity",
-                        2 to "🔐 Členové & Sdílení"
+                        Triple(0, "Metriky", Icons.Outlined.Equalizer),
+                        Triple(1, "Aktivity", Icons.AutoMirrored.Outlined.DirectionsRun),
+                        Triple(2, "Členové", Icons.Outlined.People)
                     )
-                    branchTabs.forEach { (idx, label) ->
+                    branchTabs.forEach { (idx, label, icon) ->
                         FilterChip(
                             selected = activeTab == idx,
                             onClick = { activeTab = idx },
+                            leadingIcon = { Icon(icon, contentDescription = null, modifier = Modifier.size(16.dp)) },
                             label = {
                                 Text(
                                     label,
@@ -702,7 +781,8 @@ private fun GroupDetailBranchView(
                 participantIds = participantIds,
                 contacts = contacts,
                 activeGrants = activeGrants,
-                onOpenPairing = onOpenPairing
+                onOpenPairing = onOpenPairing,
+                onBackToTree = onBackToTree
             )
         }
     }
@@ -818,15 +898,16 @@ private fun GroupMetricsComparisonSection(
             verticalAlignment = Alignment.CenterVertically
         ) {
             listOf(
-                Field.HRV_DAILY to "💓 HRV",
-                Field.SLEEP_DURATION to "🛌 Spánek",
-                Field.BB_LAST to "⚡ Body Battery",
-                Field.HR_DAILY to "❤️ Klidový tep",
-                Field.WEIGHT to "⚖️ Váha"
-            ).forEach { (f, label) ->
+                Triple(Field.HRV_DAILY, "HRV", Icons.Outlined.MonitorHeart),
+                Triple(Field.SLEEP_DURATION, "Spánek", Icons.Outlined.Bedtime),
+                Triple(Field.BB_LAST, "Body Battery", Icons.Outlined.Bolt),
+                Triple(Field.HR_DAILY, "Klidový tep", Icons.Outlined.Favorite),
+                Triple(Field.WEIGHT, "Váha", Icons.Outlined.Scale)
+            ).forEach { (f, label, icon) ->
                 FilterChip(
                     selected = activeField == f,
                     onClick = { activeField = f },
+                    leadingIcon = { Icon(icon, contentDescription = null, modifier = Modifier.size(16.dp)) },
                     label = { Text(label) }
                 )
             }
@@ -857,11 +938,11 @@ private fun GroupMetricsComparisonSection(
         MultiSeriesLineChart(
             series = multiSeries,
             xLabels = datesAxis.map { it.takeLast(5) },
-            title = "📊 $groupTitle · ${windowDays} dní"
+            title = "$groupTitle · ${windowDays} dní"
         )
 
         Spacer(Modifier.height(8.dp))
-        SectionTitle("🏆 Žebříček a statistiky členů skupiny (${participantIds.size})")
+        SectionTitle("Žebříček a statistiky členů skupiny (${participantIds.size})", icon = Icons.Outlined.EmojiEvents)
 
         val rankedParticipants = remember(participantIds, multiSeries, activeField) {
             participantIds.mapIndexed { idx, memberId ->
@@ -978,7 +1059,7 @@ private fun GroupSharedActivitiesSection(
     contacts: List<ContactRow>,
     participantIds: List<String>,
     receivedActs: List<ReceivedRow>,
-    myActs: List<app.pulse4.android.data.ActivityRow>,
+    myActs: List<app.pulse4.android.data.ActivitySummaryRow>,
     onOpenActivity: (String) -> Unit,
     onCompareActivities: (List<String>) -> Unit,
 ) {
@@ -1006,24 +1087,45 @@ private fun GroupSharedActivitiesSection(
             )
         }
         val mine = myActs.take(15).mapNotNull { row ->
-            val a = runCatching { Wire.json.decodeFromString(Activity.serializer(), row.json) }.getOrNull() ?: return@mapNotNull null
-            UnifiedActivityItem(
-                key = a.id,
-                sport = a.sport,
-                title = "${a.title ?: a.sport.czechName()} · Já",
-                ownerName = "Já",
-                isShared = false,
-                startUtcMs = a.startUtcMs,
-                localDate = Instant.ofEpochMilli(a.startUtcMs).atZone(ZoneId.of(a.zoneId)).toLocalDate().toString(),
-                distanceM = a.distanceM,
-                movingTimeS = a.movingTimeS ?: a.totalTimeS,
-                ascentM = a.ascentM,
-                avgHeartRate = a.avgHeartRate,
-                maxHeartRate = a.maxHeartRate,
-                caloriesKcal = a.caloriesKcal,
-                aerobicTe = a.aerobicTrainingEffect,
-                trainingLoad = a.trainingLoad
-            )
+            if (row.title != null) {
+                val sp = runCatching { Sport.valueOf(row.sport) }.getOrDefault(Sport.OTHER)
+                UnifiedActivityItem(
+                    key = row.id,
+                    sport = sp,
+                    title = "${row.title} · Já",
+                    ownerName = "Já",
+                    isShared = false,
+                    startUtcMs = row.startUtcMs,
+                    localDate = Instant.ofEpochMilli(row.startUtcMs).atZone(ZoneId.of(row.zoneId ?: ZoneId.systemDefault().id)).toLocalDate().toString(),
+                    distanceM = row.distanceM,
+                    movingTimeS = row.movingTimeS,
+                    ascentM = row.ascentM,
+                    avgHeartRate = row.avgHeartRate,
+                    maxHeartRate = row.maxHeartRate,
+                    caloriesKcal = row.caloriesKcal,
+                    aerobicTe = row.aerobicTe,
+                    trainingLoad = row.trainingLoad
+                )
+            } else {
+                val a = row.json?.let { js -> runCatching { Wire.json.decodeFromString(Activity.serializer(), js) }.getOrNull() } ?: return@mapNotNull null
+                UnifiedActivityItem(
+                    key = a.id,
+                    sport = a.sport,
+                    title = "${a.title ?: a.sport.czechName()} · Já",
+                    ownerName = "Já",
+                    isShared = false,
+                    startUtcMs = a.startUtcMs,
+                    localDate = Instant.ofEpochMilli(a.startUtcMs).atZone(ZoneId.of(a.zoneId)).toLocalDate().toString(),
+                    distanceM = a.distanceM,
+                    movingTimeS = a.movingTimeS ?: a.totalTimeS,
+                    ascentM = a.ascentM,
+                    avgHeartRate = a.avgHeartRate,
+                    maxHeartRate = a.maxHeartRate,
+                    caloriesKcal = a.caloriesKcal,
+                    aerobicTe = a.aerobicTrainingEffect,
+                    trainingLoad = a.trainingLoad
+                )
+            }
         }
         (shared + mine).sortedByDescending { it.startUtcMs ?: 0L }
     }
@@ -1044,17 +1146,19 @@ private fun GroupSharedActivitiesSection(
             FilterChip(
                 selected = filterMode == 0,
                 onClick = { filterMode = 0 },
-                label = { Text("Vše ve skupině (${allActivities.size})") }
+                label = { Text("Vše (${allActivities.size})") }
             )
             FilterChip(
                 selected = filterMode == 1,
                 onClick = { filterMode = 1 },
-                label = { Text("📡 Od členů (${allActivities.count { it.isShared }})") }
+                leadingIcon = { Icon(Icons.Outlined.Share, contentDescription = null, modifier = Modifier.size(16.dp)) },
+                label = { Text("Od členů (${allActivities.count { it.isShared }})") }
             )
             FilterChip(
                 selected = filterMode == 2,
                 onClick = { filterMode = 2 },
-                label = { Text("👤 Moje (${allActivities.count { !it.isShared }})") }
+                leadingIcon = { Icon(Icons.Outlined.Person, contentDescription = null, modifier = Modifier.size(16.dp)) },
+                label = { Text("Moje (${allActivities.count { !it.isShared }})") }
             )
         }
 
@@ -1087,7 +1191,9 @@ private fun GroupSharedActivitiesSection(
                             enabled = selectedActsForCompare.size >= 2,
                             onClick = { onCompareActivities(selectedActsForCompare.toList()) }
                         ) {
-                            Text("⚖️ Porovnat (${selectedActsForCompare.size})", maxLines = 1, softWrap = false)
+                            Icon(Icons.AutoMirrored.Outlined.CompareArrows, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Porovnat (${selectedActsForCompare.size})", maxLines = 1, softWrap = false)
                         }
                     }
                 }
@@ -1108,7 +1214,7 @@ private fun GroupSharedActivitiesSection(
                 modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
             ) {
                 Column(Modifier.padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("🏃 Zatím žádné aktivity v tomto filtru", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                    Text("Zatím žádné aktivity v tomto filtru", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
                     Text(
                         "Jakmile členové této skupiny nasdílí své aktivity přes Reticulum P2P, objeví se zde.",
                         style = MaterialTheme.typography.bodySmall,
@@ -1143,11 +1249,20 @@ private fun GroupSharedActivitiesSection(
                                 }
                             }
                         )
-                        Text(
-                            act.sport.icon(),
-                            style = MaterialTheme.typography.headlineSmall,
-                            modifier = Modifier.padding(horizontal = 8.dp)
-                        )
+                        Box(
+                            modifier = Modifier
+                                .padding(horizontal = 8.dp)
+                                .size(38.dp)
+                                .background(act.sport.badgeColor().copy(alpha = 0.16f), RoundedCornerShape(10.dp)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = act.sport.materialIcon(),
+                                contentDescription = act.sport.czechName(),
+                                tint = act.sport.badgeColor(),
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
                         Column(Modifier.weight(1f)) {
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                 Text(
@@ -1161,11 +1276,20 @@ private fun GroupSharedActivitiesSection(
                                         .background(ownerBadgeColor.copy(alpha = 0.18f), RoundedCornerShape(6.dp))
                                         .padding(horizontal = 6.dp, vertical = 2.dp)
                                 ) {
-                                    Text(
-                                        if (act.isShared) "📡 ${act.ownerName}" else "👤 Moje",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = ownerBadgeColor
-                                    )
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(
+                                            if (act.isShared) Icons.Outlined.Share else Icons.Outlined.Person,
+                                            contentDescription = null,
+                                            tint = ownerBadgeColor,
+                                            modifier = Modifier.size(12.dp)
+                                        )
+                                        Spacer(Modifier.width(3.dp))
+                                        Text(
+                                            if (act.isShared) act.ownerName else "Moje",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = ownerBadgeColor
+                                        )
+                                    }
                                 }
                             }
                             Spacer(Modifier.height(2.dp))
@@ -1180,8 +1304,8 @@ private fun GroupSharedActivitiesSection(
                             Text(
                                 buildString {
                                     append(act.localDate)
-                                    act.avgHeartRate?.let { append(" · ❤️ $it bpm") }
-                                    act.ascentM?.let { append(" · ⛰️ +${it.toInt()} m") }
+                                    act.avgHeartRate?.let { append(" · $it bpm") }
+                                    act.ascentM?.let { append(" · +${it.toInt()} m") }
                                 },
                                 style = MaterialTheme.typography.labelSmall,
                                 color = Color(0xFF94A3B8)
@@ -1210,17 +1334,18 @@ private fun GroupBranchMembersAndSharingSection(
     contacts: List<ContactRow>,
     activeGrants: List<ShareGrant>,
     onOpenPairing: () -> Unit,
+    onBackToTree: () -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     var notice by remember { mutableStateOf<String?>(null) }
 
     val categories = listOf(
-        Triple(Category.SLEEP, "🛌 Spánek", "Doba spánku, skóre a fáze"),
-        Triple(Category.HRV, "💓 HRV & Regenerace", "Noční variabilita tepu rMSSD"),
-        Triple(Category.BODY_BATTERY, "⚡ Body Battery", "Nabití energie a denní průběh"),
-        Triple(Category.HEART_RATE, "❤️ Klidový tep", "Klidová tepová frekvence"),
-        Triple(Category.ACTIVITY, "🏃 Aktivity & GPS trasy", "Souhrny aktivit, tempo a trasy"),
-        Triple(Category.BODY_COMPOSITION, "⚖️ Váha & Tělo", "Hmotnost a procento tuku")
+        Triple(Category.SLEEP, "Spánek" to "Doba spánku, skóre a fáze", Icons.Outlined.Bedtime),
+        Triple(Category.HRV, "HRV & Regenerace" to "Noční variabilita tepu rMSSD", Icons.Outlined.MonitorHeart),
+        Triple(Category.BODY_BATTERY, "Body Battery" to "Nabití energie a denní průběh", Icons.Outlined.Bolt),
+        Triple(Category.HEART_RATE, "Klidový tep" to "Klidová tepová frekvence", Icons.Outlined.Favorite),
+        Triple(Category.ACTIVITY, "Aktivity & GPS trasy" to "Souhrny aktivit, tempo a trasy", Icons.AutoMirrored.Outlined.DirectionsRun),
+        Triple(Category.BODY_COMPOSITION, "Váha & Tělo" to "Hmotnost a procento tuku", Icons.Outlined.Scale)
     )
 
     val targetRecipients = remember(currentGroup, contacts, meId) {
@@ -1250,12 +1375,17 @@ private fun GroupBranchMembersAndSharingSection(
             modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
         ) {
             Column(Modifier.padding(14.dp)) {
-                Text(
-                    "📤 Co sdílím do skupiny '${currentGroup?.name ?: "Všichni přátelé"}'",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Outlined.Share, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        "Co sdílím do skupiny '${currentGroup?.name ?: "Všichni přátelé"}'",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
+                }
+                Spacer(Modifier.height(4.dp))
                 Text(
                     "Zapněte kategorie dat, které chcete automaticky šifrovaně posílat členům této skupiny.",
                     style = MaterialTheme.typography.bodySmall,
@@ -1271,7 +1401,8 @@ private fun GroupBranchMembersAndSharingSection(
                         color = Color(0xFFF59E0B)
                     )
                 } else {
-                    categories.forEach { (cat, title, subtitle) ->
+                    categories.forEach { (cat, info, icon) ->
+                        val (title, subtitle) = info
                         val catFields = Field.entries.filter { it.category == cat }.toSet()
                         val matchingGrant = activeGrants.firstOrNull { g ->
                             g.fields.intersect(catFields).isNotEmpty() &&
@@ -1284,9 +1415,20 @@ private fun GroupBranchMembersAndSharingSection(
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Column(Modifier.weight(1f)) {
-                                Text(title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, color = Color.White)
-                                Text(subtitle, style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8))
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(36.dp)
+                                        .background(Color(0xFF38BDF8).copy(alpha = 0.15f), RoundedCornerShape(10.dp)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(icon, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(18.dp))
+                                }
+                                Spacer(Modifier.width(10.dp))
+                                Column {
+                                    Text(title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, color = Color.White)
+                                    Text(subtitle, style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8))
+                                }
                             }
                             Switch(
                                 checked = isEnabled,
@@ -1302,16 +1444,16 @@ private fun GroupBranchMembersAndSharingSection(
                                                     ownerId = self,
                                                     recipients = targetRecipients,
                                                     fields = catFields,
-                                                    scope = TimeScope.continuousFrom(today.minusDays(7)),
+                                                    scope = TimeScope.continuousFrom(today.minusDays(60)),
                                                     groupId = currentGroup?.id,
                                                     createdAtMs = now
                                                 )
                                                 sl.shareService.saveGrant(newGrant)
                                                 sl.shareService.planAndEnqueue(now)
-                                                "✅ Sdílení sekce '$title' do skupiny zapnuto."
+                                                "Sdílení sekce '$title' do skupiny zapnuto."
                                             } else {
                                                 matchingGrant?.let { sl.shareService.revoke(it.id, now) }
-                                                "🛑 Sdílení sekce '$title' bylo odvoláno."
+                                                "Sdílení sekce '$title' bylo odvoláno."
                                             }
                                         }
                                     }
@@ -1338,14 +1480,20 @@ private fun GroupBranchMembersAndSharingSection(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        "👥 Členové skupiny (${participantIds.size})",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Outlined.People, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            "Členové skupiny (${participantIds.size})",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                    }
                     TextButton(onClick = onOpenPairing) {
-                        Text("📲 Nový kontakt")
+                        Icon(Icons.Outlined.PersonAdd, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Nový kontakt")
                     }
                 }
 
@@ -1359,12 +1507,21 @@ private fun GroupBranchMembersAndSharingSection(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Column(Modifier.weight(1f)) {
-                            Text(
-                                if (isMe) "👑 $name" else "👤 $name",
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.SemiBold,
-                                color = Color.White
-                            )
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    if (isMe) Icons.Outlined.Star else Icons.Outlined.Person,
+                                    contentDescription = null,
+                                    tint = if (isMe) Color(0xFFFFB300) else Color(0xFF94A3B8),
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    name,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color.White
+                                )
+                            }
                             Text(
                                 if (isMe) "Lokální účet" else "Otisk: ${contact?.fingerprint ?: memberId.take(12)}",
                                 style = MaterialTheme.typography.labelSmall,
@@ -1429,16 +1586,39 @@ private fun GroupBranchMembersAndSharingSection(
                                                 sl.outbox.enqueue(
                                                     OutboxItem(e.eventId, c.identity, e.kind, e.objectType, e.objectId, e.objectVersion, null, Wire.encode(msg), now)
                                                 )
-                                                "✅ Kontakt '${c.displayName}' byl přidán do skupiny '${updated.name}'."
+                                                "Kontakt '${c.displayName}' byl přidán do skupiny '${updated.name}'."
                                             }
                                         }
                                     },
                                     modifier = Modifier.padding(end = 6.dp, bottom = 4.dp)
                                 ) {
-                                    Text("➕ ${c.displayName}")
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(Icons.Outlined.Add, contentDescription = null, modifier = Modifier.size(14.dp))
+                                        Spacer(Modifier.width(4.dp))
+                                        Text(c.displayName)
+                                    }
                                 }
                             }
                         }
+                    }
+                }
+
+                if (currentGroup != null) {
+                    Spacer(Modifier.height(16.dp))
+                    OutlinedButton(
+                        onClick = {
+                            scope.launch {
+                                withContext(Dispatchers.IO) {
+                                    sl.db.grants().deleteGroup(currentGroup.id)
+                                }
+                                onBackToTree()
+                            }
+                        },
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFF43F5E)),
+                        border = BorderStroke(1.dp, Color(0xFFF43F5E).copy(alpha = 0.5f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Smazat skupinu '${currentGroup.name}'", fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -1473,7 +1653,11 @@ private fun PairingModalDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
-            Text("📲 P2P Párování kontaktů", fontWeight = FontWeight.Bold)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Outlined.QrCode, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(22.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("P2P Párování kontaktů", fontWeight = FontWeight.Bold)
+            }
         },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
@@ -1512,11 +1696,13 @@ private fun PairingModalDialog(
                             Button(
                                 onClick = {
                                     clipboard.setText(AnnotatedString(text))
-                                    msg = "✅ Párovací kód zkopírován do schránky."
+                                    msg = "Párovací kód zkopírován do schránky."
                                 },
                                 modifier = Modifier.fillMaxWidth()
                             ) {
-                                Text("📋 Kopírovat můj párovací kód")
+                                Icon(Icons.Outlined.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text("Kopírovat můj párovací kód")
                             }
                         }
                     }
@@ -1535,7 +1721,9 @@ private fun PairingModalDialog(
                         },
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text("📷 Naskenovat QR kód kamerou")
+                        Icon(Icons.Outlined.QrCodeScanner, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Naskenovat QR kód kamerou")
                     }
 
                     OutlinedTextField(
@@ -1555,7 +1743,9 @@ private fun PairingModalDialog(
                         enabled = paste.isNotBlank(),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text("🔍 Ověřit vložený kód")
+                        Icon(Icons.Outlined.Search, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Ověřit vložený kód")
                     }
 
                     pending?.let { p ->
@@ -1564,7 +1754,11 @@ private fun PairingModalDialog(
                             colors = CardDefaults.cardColors(containerColor = Color(0xFF131722))
                         ) {
                             Column(Modifier.padding(10.dp)) {
-                                Text("👤 ${p.payload.name}", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Outlined.Person, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(p.payload.name, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                                }
                                 Text("Otisk: ${p.fingerprint}", style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8))
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Checkbox(verified, { verified = it })
@@ -1579,12 +1773,12 @@ private fun PairingModalDialog(
                                                 val derived = sl.bridge.addContact(p.payload.pub)
                                                 if (!Pairing.addressMatches(p.payload.addr, derived)) {
                                                     sl.bridge.removeContact(derived)
-                                                    "❌ Adresa v kódu neodpovídá klíči."
+                                                    "Adresa v kódu neodpovídá klíči."
                                                 } else {
                                                     sl.db.contacts().upsert(
                                                         ContactRow(derived, p.payload.name, p.payload.pub, p.fingerprint, System.currentTimeMillis())
                                                     )
-                                                    "✅ Kontakt '${p.payload.name}' byl uložen."
+                                                    "Kontakt '${p.payload.name}' byl uložen."
                                                 }
                                             }
                                             pending = null
@@ -1593,7 +1787,9 @@ private fun PairingModalDialog(
                                     },
                                     modifier = Modifier.fillMaxWidth()
                                 ) {
-                                    Text("✅ Uložit kontakt")
+                                    Icon(Icons.Outlined.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("Uložit kontakt")
                                 }
                             }
                         }
@@ -1632,7 +1828,11 @@ private fun CreateGroupModalDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
-            Text("➕ Vytvořit novou skupinu", fontWeight = FontWeight.Bold)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Outlined.GroupAdd, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(22.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Vytvořit novou skupinu", fontWeight = FontWeight.Bold)
+            }
         },
         text = {
             Column {
@@ -1658,7 +1858,10 @@ private fun CreateGroupModalDialog(
                                 onClick = {
                                     members = if (c.identity in members) members - c.identity else members + c.identity
                                 },
-                                label = { Text("👤 ${c.displayName}") },
+                                leadingIcon = {
+                                    Icon(Icons.Outlined.Person, contentDescription = null, modifier = Modifier.size(16.dp))
+                                },
+                                label = { Text(c.displayName) },
                                 modifier = Modifier.padding(end = 4.dp, bottom = 4.dp)
                             )
                         }

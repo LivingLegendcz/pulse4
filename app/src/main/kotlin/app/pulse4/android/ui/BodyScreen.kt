@@ -6,6 +6,7 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -62,6 +63,7 @@ fun BodyScreen(sl: ServiceLocator) {
     var msg by remember { mutableStateOf<String?>(null) }
     var type by remember { mutableStateOf(MetricType.WEIGHT) }
     var showSuspect by remember { mutableStateOf(true) }
+    var showWebDialog by remember { mutableStateOf(false) }
 
     val points by io(Triple(tick, type, showSuspect)) { sl.withings.trend(type, 180, includeSuspect = showSuspect) }
     val sourceStates by sl.db.areaStates().all().collectAsState(emptyList())
@@ -69,6 +71,18 @@ fun BodyScreen(sl: ServiceLocator) {
     val cfg by io(tick) { Triple(sl.settings.withingsDirectEnabled, sl.settings.healthConnectEnabled, sl.settings.withingsClientId) }
     var clientId by remember(cfg) { mutableStateOf(cfg?.third ?: "") }
     var secret by remember { mutableStateOf("") }
+
+    if (showWebDialog) {
+        WithingsWebLoginDialog(
+            sl = sl,
+            mode = if (wState is WithingsUiState.Connected) WithingsDialogMode.SelectProfilesOnly else WithingsDialogMode.FullLogin,
+            onDismiss = { showWebDialog = false },
+            onSuccess = { profile ->
+                msg = "Withings připojen (${profile.displayName})"
+                tick++
+            }
+        )
+    }
 
     val hcPerm = rememberLauncherForActivityResult(PermissionController.createRequestPermissionResultContract()) { granted ->
         msg = if (granted.containsAll(sl.healthConnect.permissions)) "Oprávnění uděleno" else "Bez oprávnění nelze Health Connect číst"
@@ -87,13 +101,27 @@ fun BodyScreen(sl: ServiceLocator) {
 
     Column(Modifier.verticalScroll(rememberScrollState()).padding(12.dp)) {
         Text("Tělo", style = MaterialTheme.typography.titleLarge)
-        Row { listOf(MetricType.WEIGHT to "Váha", MetricType.BODY_FAT to "Tělesný tuk").forEach { (t, l) -> FilterChip(type == t, { type = t }, { Text(l) }, Modifier.padding(2.dp)) } }
+        FlowRow {
+            listOf(
+                MetricType.WEIGHT to "Váha",
+                MetricType.BODY_FAT to "Tělesný tuk",
+                MetricType.MUSCLE_MASS to "Svaly",
+                MetricType.BODY_WATER to "Voda",
+                MetricType.BONE_MASS to "Kosti",
+                MetricType.FAT_FREE_MASS to "FFM",
+                MetricType.VISCERAL_FAT to "Viscerální tuk",
+                MetricType.VASCULAR_AGE to "Cévní věk",
+                MetricType.PULSE_WAVE_VELOCITY to "PWV"
+            ).forEach { (t, l) ->
+                FilterChip(type == t, { type = t }, { Text(l) }, Modifier.padding(2.dp))
+            }
+        }
         val pts = points
         if (pts == null) Text("Načítání…")
         else if (pts.isEmpty()) Text("Zatím žádná měření. Připojte zdroj níže nebo importujte CSV.")
         else {
             LineChart(pts.map { it.value })
-            Text("Poslední: ${fmt.number(pts.last().value, 1)} ${if (type == MetricType.WEIGHT) "kg" else "%"} · ${pts.last().localDate}")
+            Text("Poslední: ${fmt.number(pts.last().value, 1)} ${type.unit} · ${pts.last().localDate}")
         }
         Row { Text("Zahrnout nejednoznačná měření"); Switch(showSuspect, { showSuspect = it }, Modifier.padding(start = 8.dp)) }
 
@@ -101,7 +129,34 @@ fun BodyScreen(sl: ServiceLocator) {
         pts?.takeLast(15)?.reversed()?.forEach { o -> MeasurementRow(o, onWrong = { scope.launch(Dispatchers.IO) { sl.withings.markWrong(o.id, System.currentTimeMillis()); tick++ } },
             onConfirm = { scope.launch(Dispatchers.IO) { sl.withings.confirm(o.id); tick++ } }) }
 
-        SectionTitle("Zdroj: Health Connect (doporučeno)")
+        SectionTitle("Zdroj: Přímý webový konektor Withings (doporučeno)")
+        Text("Přihlášení přímo k účtu Withings bez nutnosti registrace vývojářského účtu či serveru. Stahuje kompletní složení těla a ECG souhrny.", style = MaterialTheme.typography.bodySmall)
+        Row {
+            Button({ showWebDialog = true }) {
+                Text(if (wState is WithingsUiState.Connected) "Změnit profil / Přihlásit" else "Přihlásit k Withings")
+            }
+            Button(
+                enabled = sl.withings.isConnected(),
+                onClick = {
+                    scope.launch {
+                        msg = withContext(Dispatchers.IO) {
+                            when (val r = sl.withings.runImport(System.currentTimeMillis())) {
+                                null -> "Withings není připojen"
+                                is AreaResult.Success -> "Withings: uloženo ${r.saved} záznamů"
+                                is AreaResult.NeedsUser -> "Vyžaduje akci: ${r.action}"
+                                is AreaResult.Deferred -> "Odloženo (rate limit)"
+                                else -> "Import selhal"
+                            }
+                        }
+                        tick++
+                    }
+                },
+                modifier = Modifier.padding(start = 8.dp)
+            ) { Text("Synchronizovat") }
+        }
+        SourceStatus("withings.", sourceStates)
+
+        SectionTitle("Zdroj: Health Connect")
         Text("Aplikace Withings exportuje váhu a složení těla do Health Connect. Ne všechny metriky Withings se tam dostanou; čtení na pozadí a historie nad 30 dní vyžadují zvláštní oprávnění.", style = MaterialTheme.typography.bodySmall)
         Row { Text("Používat Health Connect"); Switch(cfg?.second == true, { v -> scope.launch(Dispatchers.IO) { sl.settings.healthConnectEnabled = v; tick++ } }, Modifier.padding(start = 8.dp)) }
         Row {
@@ -160,7 +215,7 @@ private fun SourceStatus(prefix: String, states: List<app.pulse4.android.data.Ar
 private fun MeasurementRow(o: MetricObservation, onWrong: () -> Unit, onConfirm: () -> Unit) {
     Card(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
         Column(Modifier.padding(8.dp)) {
-            Text("${fmt.number(o.value, 1)} ${if (o.type == MetricType.WEIGHT) "kg" else "%"} · ${fmt.time(o.startUtcMs)}", style = MaterialTheme.typography.titleSmall)
+            Text("${fmt.number(o.value, 1)} ${o.type.unit} · ${fmt.time(o.startUtcMs)}", style = MaterialTheme.typography.titleSmall)
             Text("Zdroj: ${o.provider.label()}" + (o.origin?.let { " · $it" } ?: ""), style = MaterialTheme.typography.bodySmall)
             if (o.quality == Quality.SUSPECT) Text("Nejednoznačné přiřazení osoby – v trendu jen když je zahrnete.", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             Row {

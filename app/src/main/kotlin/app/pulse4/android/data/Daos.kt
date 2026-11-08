@@ -12,12 +12,14 @@ interface ObservationDao {
     @Query("SELECT * FROM observation WHERE deleted = 0 AND localDate = :date ORDER BY startUtcMs") fun forDate(date: String): List<ObservationRow>
     @Query("SELECT * FROM observation WHERE deleted = 0 AND localDate BETWEEN :from AND :to ORDER BY startUtcMs") fun forRange(from: String, to: String): List<ObservationRow>
     @Query("SELECT * FROM observation WHERE deleted = 0 AND type = :type ORDER BY startUtcMs DESC LIMIT 1") fun latest(type: String): ObservationRow?
+    @Query("SELECT * FROM observation WHERE deleted = 0 AND type = :type ORDER BY startUtcMs DESC LIMIT :limit") fun latestRows(type: String, limit: Int): List<ObservationRow>
     @Query("SELECT * FROM observation WHERE deleted = 0 AND type = :type AND localDate BETWEEN :from AND :to ORDER BY startUtcMs") fun series(type: String, from: String, to: String): Flow<List<ObservationRow>>
     @Query("UPDATE observation SET deleted = 1 WHERE id IN (:ids)") fun markDeleted(ids: List<String>)
     @Query("SELECT id FROM observation WHERE provider = :provider AND deleted = 0 AND startUtcMs BETWEEN :from AND :to") fun idsIn(provider: String, from: Long, to: Long): List<String>
     @Query("SELECT * FROM observation WHERE type IN (:types) AND localDate BETWEEN :from AND :to ORDER BY startUtcMs DESC") fun ofTypesIncludingDeleted(types: List<String>, from: String, to: String): List<ObservationRow>
     @Query("UPDATE observation SET quality = 'OK' WHERE id = :id") fun confirm(id: String)
     @Query("SELECT DISTINCT localDate FROM observation WHERE deleted = 0 AND localDate IS NOT NULL AND localDate BETWEEN :from AND :to") fun datesWithData(from: String, to: String): List<String>
+    @Query("DELETE FROM observation WHERE id LIKE 'garmin-hist-%'") fun deleteSyntheticHistory()
 }
 
 @Dao
@@ -31,10 +33,35 @@ interface ActivityDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE) fun upsertTrack(row: TrackRow)
     @Query("SELECT * FROM activity ORDER BY startUtcMs DESC") fun all(): Flow<List<ActivityRow>>
     @Query("SELECT * FROM activity ORDER BY startUtcMs DESC") fun allNow(): List<ActivityRow>
+    @Query("SELECT * FROM activity ORDER BY startUtcMs DESC LIMIT 1") fun latest(): ActivityRow?
+    @Query("SELECT id, startUtcMs, sport, title, distanceM, movingTimeS, ascentM, avgHeartRate, maxHeartRate, caloriesKcal, aerobicTe, anaerobicTe, trainingLoad, avgPowerW, avgCadence, zoneId, (CASE WHEN title IS NULL THEN json ELSE NULL END) AS json FROM activity ORDER BY startUtcMs DESC") fun allSummaries(): Flow<List<ActivitySummaryRow>>
+    @Query("SELECT id, startUtcMs, sport, title, distanceM, movingTimeS, ascentM, avgHeartRate, maxHeartRate, caloriesKcal, aerobicTe, anaerobicTe, trainingLoad, avgPowerW, avgCadence, zoneId, (CASE WHEN title IS NULL THEN json ELSE NULL END) AS json FROM activity ORDER BY startUtcMs DESC") fun allSummariesNow(): List<ActivitySummaryRow>
+    @Query("SELECT id, startUtcMs, sport, title, distanceM, movingTimeS, ascentM, avgHeartRate, maxHeartRate, caloriesKcal, aerobicTe, anaerobicTe, trainingLoad, avgPowerW, avgCadence, zoneId, (CASE WHEN title IS NULL THEN json ELSE NULL END) AS json FROM activity ORDER BY startUtcMs DESC LIMIT :limit") fun recentSummaries(limit: Int): Flow<List<ActivitySummaryRow>>
+    @Query("SELECT id, startUtcMs, sport, title, distanceM, movingTimeS, ascentM, avgHeartRate, maxHeartRate, caloriesKcal, aerobicTe, anaerobicTe, trainingLoad, avgPowerW, avgCadence, zoneId, (CASE WHEN title IS NULL THEN json ELSE NULL END) AS json FROM activity ORDER BY startUtcMs DESC LIMIT :limit") fun recentSummariesNow(limit: Int): List<ActivitySummaryRow>
+    @Query("SELECT id, json FROM activity WHERE title IS NULL LIMIT :limit") fun unbackfilled(limit: Int): List<IdAndJson>
+    @Query("UPDATE activity SET title = :title, distanceM = :distanceM, movingTimeS = :movingTimeS, ascentM = :ascentM, avgHeartRate = :avgHeartRate, maxHeartRate = :maxHeartRate, caloriesKcal = :caloriesKcal, aerobicTe = :aerobicTe, anaerobicTe = :anaerobicTe, trainingLoad = :trainingLoad, avgPowerW = :avgPowerW, avgCadence = :avgCadence, zoneId = :zoneId WHERE id = :id")
+    fun updateSummary(
+        id: String,
+        title: String,
+        distanceM: Double?,
+        movingTimeS: Double?,
+        ascentM: Double?,
+        avgHeartRate: Int?,
+        maxHeartRate: Int?,
+        caloriesKcal: Double?,
+        aerobicTe: Double?,
+        anaerobicTe: Double?,
+        trainingLoad: Double?,
+        avgPowerW: Double?,
+        avgCadence: Double?,
+        zoneId: String?
+    )
     @Query("SELECT * FROM activity WHERE startUtcMs >= :from ORDER BY startUtcMs DESC") fun since(from: Long): List<ActivityRow>
     @Query("SELECT * FROM activity WHERE id = :id") fun get(id: String): ActivityRow?
     @Query("SELECT * FROM track WHERE activityId = :id") fun track(id: String): TrackRow?
     @Query("SELECT COUNT(*) FROM activity") fun count(): Int
+    @Query("DELETE FROM activity") fun deleteAll()
+    @Query("DELETE FROM track") fun deleteAllTracks()
 }
 
 @Dao
@@ -51,6 +78,7 @@ interface ContactDao {
     @Query("SELECT * FROM contact") fun allNow(): List<ContactRow>
     @Query("SELECT COUNT(*) FROM contact WHERE identity = :id") fun count(id: String): Int
     @Query("DELETE FROM contact WHERE identity = :id") fun delete(id: String)
+    @Query("DELETE FROM contact") fun deleteAll()
 }
 
 @Dao
@@ -64,6 +92,9 @@ interface GrantDao {
     @Query("SELECT * FROM grp") fun groups(): Flow<List<GroupRow>>
     @Query("SELECT * FROM grp") fun groupsNow(): List<GroupRow>
     @Query("SELECT * FROM grp WHERE id = :id") fun group(id: String): GroupRow?
+    @Query("DELETE FROM grp WHERE id = :id") fun deleteGroup(id: String)
+    @Query("DELETE FROM grp") fun deleteAllGroups()
+    @Query("DELETE FROM share_grant") fun deleteAllGrants()
 }
 
 @Dao
@@ -74,6 +105,7 @@ interface OutboxDao {
     @Query("SELECT * FROM outbox") fun all(): List<OutboxRow>
     @Query("SELECT * FROM outbox ORDER BY createdAtMs DESC LIMIT 200") fun recent(): Flow<List<OutboxRow>>
     @Query("DELETE FROM outbox WHERE state IN ('ACKED','SUPERSEDED','CANCELLED') AND createdAtMs < :before") fun purge(before: Long)
+    @Query("DELETE FROM outbox") fun deleteAll()
 }
 
 @Dao
@@ -90,6 +122,9 @@ interface InboxDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE) fun putSent(row: SentRow)
     @Query("DELETE FROM received_object WHERE author = :a") fun removeAllFrom(a: String)
     @Query("SELECT MAX(appliedAtMs) FROM receipt WHERE author = :a") fun lastReceived(a: String): Long?
+    @Query("DELETE FROM received_object") fun deleteAll()
+    @Query("DELETE FROM receipt") fun deleteAllReceipts()
+    @Query("DELETE FROM sent_projection") fun deleteAllSent()
 }
 
 @Dao

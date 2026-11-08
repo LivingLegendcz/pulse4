@@ -87,7 +87,7 @@ class SyncTest {
         assertEquals(RejectReason.HASH_MISMATCH, reason(Wire.encode(m.copy(payload = """{"ownerId":"josef","d":"zmeněno"}"""))))
         val exp = josef.build("bob", Kinds.PROJECTION_UPSERT, "daily", "x", 1, "{}", 1, expiresAtMs = 10)
         assertEquals(RejectReason.EXPIRED, reason(Wire.encode(exp), now = 11))
-        val big = josef.build("bob", Kinds.PROJECTION_UPSERT, "daily", "x", 1, "{\"a\":\"" + "x".repeat(40_000) + "\"}", 1)
+        val big = josef.build("bob", Kinds.PROJECTION_UPSERT, "daily", "x", 1, "{\"a\":\"" + "x".repeat(ProtocolLimits().maxEventBytes + 500) + "\"}", 1)
         assertEquals(RejectReason.TOO_LARGE, reason(Wire.encode(big)))
         val unk = josef.build("bob", "future.thing", "daily", "x", 1, "{}", 1)
         assertEquals(RejectReason.UNKNOWN_SCHEMA, reason(Wire.encode(unk)))

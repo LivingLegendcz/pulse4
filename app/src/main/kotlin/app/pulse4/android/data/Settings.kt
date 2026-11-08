@@ -11,44 +11,44 @@ enum class NetworkMode { AUTO, LOCAL_ONLY, MANUAL }
 
 enum class MapProvider(val title: String, val shortLabel: String, val subtitle: String, val attribution: String) {
     CARTO_DARK(
-        title = "🌑 Dark Canvas (Tmavá sportovní)",
-        shortLabel = "🌑 Tmavá",
+        title = "Dark Canvas (Tmavá sportovní)",
+        shortLabel = "Tmavá",
         subtitle = "Kontrastní tmavý mapový podklad ideální pro čitelnost GPS trasy",
         attribution = "Tiles © Esri, HERE, Garmin, OpenStreetMap contributors"
     ),
     OSM_STANDARD(
-        title = "🗺️ OpenStreetMap (Klasická)",
-        shortLabel = "🗺️ OSM",
+        title = "OpenStreetMap (Klasická)",
+        shortLabel = "OSM",
         subtitle = "Podrobná celosvětová mapa ulic, stezek a bodů zájmu",
         attribution = "© OpenStreetMap contributors"
     ),
     OPENTOPOMAP(
-        title = "🏔️ OpenTopoMap (Turistická & vrstevnice)",
-        shortLabel = "🏔️ Topo",
+        title = "OpenTopoMap (Turistická & vrstevnice)",
+        shortLabel = "Topo",
         subtitle = "Topografická mapa s vrstevnicemi, výškopisem a turistickými cestami",
         attribution = "© OpenStreetMap contributors, SRTM | © OpenTopoMap"
     ),
     CARTO_VOYAGER(
-        title = "🚴 CyclOSM (Sportovní & Cyklo/Běh)",
-        shortLabel = "🚴 CyclOSM",
+        title = "CyclOSM (Sportovní & Cyklo/Běh)",
+        shortLabel = "CyclOSM",
         subtitle = "Sportovní mapa se zvýrazněním stezek, cyklotras a terénu",
         attribution = "© OpenStreetMap contributors, CyclOSM"
     ),
     ESRI_SATELLITE(
-        title = "🛰️ Esri World Imagery (Satelitní)",
-        shortLabel = "🛰️ Satelit",
+        title = "Esri World Imagery (Satelitní)",
+        shortLabel = "Satelit",
         subtitle = "Letecké a satelitní snímky povrchu",
         attribution = "Tiles © Esri — Source: Esri, Maxar, Earthstar Geographics"
     ),
     CUSTOM_URL(
-        title = "🎨 Vlastní MapLibre URL",
-        shortLabel = "🎨 Vlastní",
+        title = "Vlastní MapLibre URL",
+        shortLabel = "Vlastní",
         subtitle = "Vlastní JSON styl mapy zadaný v poli URL níže",
         attribution = "Vlastní zdroj dlaždic"
     ),
     OFFLINE_CANVAS(
-        title = "📴 Bez mapového podkladu (Offline plátno)",
-        shortLabel = "📴 Offline",
+        title = "Bez mapového podkladu (Offline plátno)",
+        shortLabel = "Offline",
         subtitle = "Pouze čistá vektorová křivka trasy bez stahování dlaždic ze sítě",
         attribution = "Offline vektorové vykreslení"
     )
@@ -134,6 +134,14 @@ class Settings(private val db: AppDatabase) {
     var healthConnectToken: String? get() = db.settings().get("hcToken"); set(v) = put("hcToken", v ?: "")
     /** Pořadí zdrojů pro trend váhy (první vyhrává u duplicit). */
     var weightPreference: List<String> get() = get("weightPref", "WITHINGS_API,MANUAL,GARMIN_PERSONAL").split(','); set(v) = put("weightPref", v.joinToString(","))
+
+    /** Uživatelem definované pořadí widgetů na obrazovce Dnes. */
+    var todayWidgetOrder: List<String>
+        get() = get("todayWidgetOrder", "sleep,bb,hrv,rhr,stress,steps,weight,ecg")
+            .split(',')
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+        set(v) = put("todayWidgetOrder", v.joinToString(","))
 
     /** Nastavení běží na pozadí v pracovních vláknech; volejte mimo hlavní vlákno. */
     companion object { const val GATEWAY_DEFAULT_NAME = "Jihlava WoD Gateway – CZE" }

@@ -77,6 +77,8 @@ dependencies {
     val compose = platform("androidx.compose:compose-bom:2025.09.00")
     implementation(compose)
     implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.material:material-icons-core")
+    implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.activity:activity-compose:1.10.1")
@@ -101,4 +103,7 @@ dependencies {
     // QR kód: generování (ZXing core) a skenování (Google code scanner; bez Play Services lze kód vložit textem).
     implementation("com.google.zxing:core:3.5.4")
     implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
+
+    testImplementation(kotlin("test"))
+    testImplementation("junit:junit:4.13.2")
 }

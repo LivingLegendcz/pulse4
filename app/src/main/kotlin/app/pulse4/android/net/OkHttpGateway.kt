@@ -27,6 +27,11 @@ class OkHttpGateway(
 
     private fun execute(req: Request): HttpResponse =
         client.newCall(req).execute().use { r ->
-            HttpResponse(r.code, r.headers.toMultimap().mapValues { it.value.firstOrNull().orEmpty() }, r.body?.string().orEmpty())
+            val headerMap = LinkedHashMap<String, String>()
+            for (name in r.headers.names()) {
+                val values = r.headers.values(name)
+                headerMap[name] = values.joinToString(if (name.equals("Set-Cookie", ignoreCase = true)) "; " else ", ")
+            }
+            HttpResponse(r.code, headerMap, r.body?.string().orEmpty())
         }
 }

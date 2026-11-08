@@ -61,9 +61,9 @@ fun ReticulumScreen(sl: ServiceLocator) {
         SectionTitle("Režim transportní sítě")
         Row(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
             listOf(
-                NetworkMode.AUTO to "🌐 Automaticky",
-                NetworkMode.LOCAL_ONLY to "📶 Pouze Wi-Fi LAN",
-                NetworkMode.MANUAL to "⚙️ Ruční"
+                NetworkMode.AUTO to "Automaticky",
+                NetworkMode.LOCAL_ONLY to "Pouze Wi-Fi LAN",
+                NetworkMode.MANUAL to "Ruční"
             ).forEach { (m, label) ->
                 FilterChip(
                     selected = mode == m,
@@ -127,7 +127,7 @@ fun ReticulumScreen(sl: ServiceLocator) {
                     port.toIntOrNull()?.let { sl.settings.gatewayPort = it }
                     sl.settings.propagationNode = propagationNode.trim().lowercase()
                     runCatching { sl.bridge.applyPropagationNode() }
-                    feedback = "✅ Nastavení sítě uloženo. Připojení aktualizováno."
+                    feedback = "Nastavení sítě uloženo. Připojení aktualizováno."
                     tick++
                 }
             },
@@ -152,7 +152,7 @@ fun ReticulumScreen(sl: ServiceLocator) {
         ) {
             Column(Modifier.padding(12.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("📶 Stav AutoInterface: ", style = MaterialTheme.typography.titleSmall)
+                    Text("Stav AutoInterface: ", style = MaterialTheme.typography.titleSmall)
                     Text("Aktivní", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.titleSmall)
                 }
                 Text(

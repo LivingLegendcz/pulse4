@@ -4,7 +4,7 @@ Osobní Android aplikace pro čtyři lidi: data z Garminu v telefonu, dobrovoln�
 a plánování tréninků. **Žádný vlastní aplikační server** – úložiště, přihlášení, fronty i oprávnění žijí v telefonech.
 Implementace podle dokumentu *Architektonický návrh a technický posudek* (stav k 28. 10. 2026).
 
-> **Stav: jádro, Withings a logika UI jsou hotové a otestované (173 testů). Android aplikace se sestavuje a běží na fyzickém telefonu (Xiaomi POCO X3 NFC, Android 16); Withings přímé API čeká na registraci aplikace a callback doménu.**
+> **Stav: jádro, dosavadní konektor Withings a logika UI jsou hotové a otestované (173 testů). Android aplikace se sestavuje a běží na fyzickém telefonu (Xiaomi POCO X3 NFC, Android 16). Pro Withings nově ověřujeme webové připojení bez developer účtu: čtení dat je doloženo HAR, přihlášení a trvalá synchronizace ještě ne.**
 > Prostředí, ve kterém vznikla, nemělo Android SDK ani přístup na `dl.google.com` a `chaquo.com`. Přesný rozpis je v
 > [`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md). Garmin Personal API endpointy zde **nejsou vymyšlené** – viz
 > [`docs/garmin-endpoints.md`](docs/garmin-endpoints.md).
@@ -43,10 +43,10 @@ JVM moduly se sestaví a otestují bez Android SDK (`app` se do buildu zahrne je
 
 ## Withings a UI
 
-- **Withings** (`docs/withings.md`): přímé API jako hlavní cesta (jedna registrace autora, Secret v aplikaci, rotace v aplikaci), Health Connect opuštěn; adresy API je třeba ověřit
-  (dokumentace Withings nebyla dostupná, adresy a parametry jsou z paměti a konfigurovatelné), CSV jako nouzová cesta. Stejné vážení přes víc cest
+- **Withings** (`docs/withings.md`): nový směr je přihlášený web bez developer účtu, secretu a vlastního serveru. HAR potvrzuje čtení obou profilů, celého složení těla a EKG;
+  získání a životnost webové relace zbývá ověřit. Současný konektor umí jen váhu a tuk; Health Connect a CSV zůstávají alternativami s omezeným rozsahem. Stejné vážení přes víc cest
   je jeden bod trendu; nejednoznačné měření (jiná osoba) do trendu nevstupuje, dokud je uživatel nepotvrdí; chybné lze označit a přežije re-import.
-  Statická callback stránka a `assetlinks.json` jsou v `docs/withings-applink/`.
+  Statická callback stránka a `assetlinks.json` v `docs/withings-applink/` patří k původnímu OAuth návrhu.
 - **UI**: obrazovky Dnes, Metriky, Aktivity (+ detail s propojeným grafem/trasou a osou čas/vzdálenost), Tréninky, Skupiny (kontakty, sdílení s náhledem, dashboard),
   Tělo, Připojení, Soukromí. Rozhodování je v `ui-logic` (testováno), Compose kód je jen tenká vrstva. Compose artefakty nebyly dostupné, takže **UI nebylo
   zkompilováno proti skutečnému Compose ani vykresleno**; `tools/kotlin-typecheck` ověřuje aspoň Kotlin a volání do vlastních modulů proti stubům.
@@ -60,7 +60,7 @@ v UI není. Dashboard čte denní projekce (`daily`); sdílené aktivity se zobr
 ## Než poprvé sestavíte `app`
 
 1. Doplňte endpointy podle `docs/garmin-endpoints.md`.
-2. Pro Withings přímý režim projděte bezpečnostní bránu v `docs/withings.md` a nastavte `-Ppulse4.withingsHost`.
+2. Pro Withings projděte aktuální stav v `docs/withings.md`. Nový webový konektor ještě není implementován; `-Ppulse4.withingsHost` se týká pouze původního OAuth režimu.
 3. Ověřte a zvyšte verze v `app/build.gradle.kts` (AGP, KSP – musí sedět s Kotlinem, Compose BOM, Room, WorkManager, Chaquopy). Verze jsem volil podle znalostí, ne podle dostupných repozitářů.
 4. Uzamkněte Python závislosti i s hashi (`pip install` v `chaquopy {}` je pro vývoj) a ověřte, že `curl_cffi` wheel funguje v Chaquopy a na 16KB stránkách.
 5. Spusťte přejímací brány z `docs/ACCEPTANCE.md` na skutečných telefonech a hodinkách.

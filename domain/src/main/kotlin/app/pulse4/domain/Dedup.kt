@@ -25,6 +25,15 @@ object DuplicateLinker {
     val defaultRules: Map<MetricType, Rule> = mapOf(
         MetricType.WEIGHT to Rule(10 * 60_000L, 0.15),
         MetricType.BODY_FAT to Rule(10 * 60_000L, 0.5),
+        MetricType.FAT_FREE_MASS to Rule(10 * 60_000L, 0.3),
+        MetricType.MUSCLE_MASS to Rule(10 * 60_000L, 0.3),
+        MetricType.BONE_MASS to Rule(10 * 60_000L, 0.1),
+        MetricType.BODY_WATER to Rule(10 * 60_000L, 0.5),
+        MetricType.VISCERAL_FAT to Rule(10 * 60_000L, 0.5),
+        MetricType.VASCULAR_AGE to Rule(10 * 60_000L, 1.0),
+        MetricType.PULSE_WAVE_VELOCITY to Rule(10 * 60_000L, 0.2),
+        MetricType.BMR to Rule(10 * 60_000L, 20.0),
+        MetricType.METABOLIC_AGE to Rule(10 * 60_000L, 1.0),
     )
 
     /** Klastr = skupina pozorování, která jsou s vysokou jistotou totéž měření. */

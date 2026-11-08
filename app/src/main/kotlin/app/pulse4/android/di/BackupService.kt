@@ -2,6 +2,7 @@ package app.pulse4.android.di
 
 import app.pulse4.android.data.ActivityRow
 import app.pulse4.android.data.ObservationRow
+import app.pulse4.android.data.toRow
 import app.pulse4.backup.BackupCodec
 import app.pulse4.sync.Wire
 import kotlinx.serialization.builtins.ListSerializer
@@ -42,7 +43,7 @@ class BackupService(private val sl: ServiceLocator) {
             entries["activities.json"]?.let { b ->
                 json.decodeFromString(ListSerializer(String.serializer()), b.toString(Charsets.UTF_8)).forEach { js ->
                     val a = json.decodeFromString(app.pulse4.domain.Activity.serializer(), js)
-                    sl.db.activities().upsert(ActivityRow(a.id, a.startUtcMs, a.sport.name, js)); n++
+                    sl.db.activities().upsert(a.toRow(js)); n++
                 }
             }
             entries.filterKeys { it.startsWith("tracks/") }.forEach { (k, v) ->

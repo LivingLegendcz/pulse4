@@ -179,6 +179,7 @@ def send(dest_hash_hex, content, method, event_id):
     msg.register_failed_callback(_on_state)
     with _lock:
         st.pending[id(msg)] = (event_id, msg)
+    print(f"[Pulse4Bridge] SEND to {dest_hash_hex}, method={method}, id={id(msg)}")
     st.router.handle_outbound(msg)
 
 
@@ -200,11 +201,13 @@ def drain_events():
 
 def status():
     st = _require()
+    pending_details = [{"id": k, "ev": v[0], "state": v[1].state, "progress": getattr(v[1], "progress", None)} for k, v in list(st.pending.items())]
     return json.dumps({
         "v": PROTOCOL,
         "interfaces": [{"name": str(i), "online": bool(getattr(i, "online", False))} for i in RNS.Transport.interfaces],
         "propagationNodeSet": st.propagation_node is not None,
         "pendingOutbound": len(st.pending),
+        "pendingDetails": pending_details,
     })
 
 
@@ -217,6 +220,7 @@ def _require():
 
 def _on_message(message):
     """Příchozí zpráva. `source` je jen tvrzení do ověření podpisu: Kotlin zahazuje `validated == false`."""
+    print(f"[Pulse4Bridge] INCOMING_LXMF from {message.source_hash.hex()} validated={message.signature_validated}")
     _push({
         "type": "message",
         "source": message.source_hash.hex(),
@@ -231,6 +235,7 @@ def _on_state(message):
         return
     event_id = entry[0]
     s = message.state
+    print(f"[Pulse4Bridge] STATE_CHANGE event_id={event_id} state={s}")
     if s == LXMF.LXMessage.DELIVERED:
         res = {"state": "HANDED"}
     elif s == LXMF.LXMessage.SENT and message.desired_method == LXMF.LXMessage.PROPAGATED:

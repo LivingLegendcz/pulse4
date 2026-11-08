@@ -8,7 +8,7 @@ import kotlinx.serialization.json.Json
 
 /** Návrhové ochranné limity aplikace; nejsou to limity Reticula a cizí schránka může mít přísnější. */
 data class ProtocolLimits(
-    val maxEventBytes: Int = 32 * 1024,
+    val maxEventBytes: Int = 128 * 1024,
     val summaryTargetBytes: Int = 4 * 1024,
     val maxAttachmentBytes: Long = 25L * 1024 * 1024,
     val maxQueueBytes: Long = 100L * 1024 * 1024,

@@ -2,6 +2,7 @@ package app.pulse4.fit
 
 import app.pulse4.analytics.ActivityMath
 import app.pulse4.domain.Sport
+import app.pulse4.domain.StrengthSet
 import app.pulse4.domain.TrackPoint
 import com.garmin.fit.Decode
 import com.garmin.fit.FitRuntimeException
@@ -9,6 +10,7 @@ import com.garmin.fit.LapMesg
 import com.garmin.fit.MesgBroadcaster
 import com.garmin.fit.RecordMesg
 import com.garmin.fit.SessionMesg
+import com.garmin.fit.SetMesg
 import java.io.ByteArrayInputStream
 
 data class ParsedLap(
@@ -55,6 +57,11 @@ data class ParsedFit(
     val avgGroundContactTimeMs: Double? = null,
     val avgVerticalRatioPct: Double? = null,
     val steps: Int? = null,
+    val strengthSets: List<StrengthSet> = emptyList(),
+    val totalReps: Int? = null,
+    val totalStrokes: Int? = null,
+    val avgSwolf: Int? = null,
+    val poolLengthM: Double? = null,
 )
 
 sealed interface FitResult {
@@ -81,6 +88,7 @@ object FitImporter {
 
             val points = ArrayList<TrackPoint>()
             val laps = ArrayList<ParsedLap>()
+            val strengthSets = ArrayList<StrengthSet>()
             var session: SessionMesg? = null
             var overflow = false
 
@@ -89,6 +97,15 @@ object FitImporter {
             broadcaster.addListener(com.garmin.fit.RecordMesgListener { m: RecordMesg ->
                 if (points.size >= MAX_RECORDS) { overflow = true; return@RecordMesgListener }
                 val ts = m.timestamp ?: return@RecordMesgListener
+                val stepLen = m.stepLength?.toDouble()?.let { if (it > 10.0) it / 1000.0 else it }
+                val vertOsc = m.verticalOscillation?.toDouble()?.let { if (it > 25.0) it / 10.0 else it }
+                val vertRatio = m.verticalRatio?.toDouble()
+                val stanceTime = m.stanceTime?.toDouble()
+                val stanceBal = m.stanceTimeBalance?.toDouble()
+                val stam = (m.getFieldValue(140) as? Number)?.toDouble()
+                val stamPot = (m.getFieldValue(141) as? Number)?.toDouble()
+                val perfCond = (m.getFieldValue(85) as? Number)?.toInt()
+
                 points += TrackPoint(
                     tMs = ts.date.time,
                     lat = m.positionLat?.let { it * SEMICIRCLE_TO_DEG },
@@ -99,6 +116,14 @@ object FitImporter {
                     cadence = m.cadence?.toInt(),
                     powerW = m.power,
                     distanceM = m.distance?.toDouble(),
+                    strideLengthM = stepLen,
+                    verticalOscillationCm = vertOsc,
+                    verticalRatioPct = vertRatio,
+                    groundContactTimeMs = stanceTime,
+                    groundContactBalancePct = stanceBal,
+                    staminaPct = stam,
+                    staminaPotentialPct = stamPot,
+                    performanceCondition = perfCond,
                 )
             })
             broadcaster.addListener(com.garmin.fit.LapMesgListener { m: LapMesg ->
@@ -123,16 +148,39 @@ object FitImporter {
                     caloriesKcal = m.totalCalories?.toDouble(),
                 )
             })
+            broadcaster.addListener(com.garmin.fit.SetMesgListener { m: SetMesg ->
+                val setTypeStr = when (m.setType) {
+                    com.garmin.fit.SetType.ACTIVE -> "ACTIVE"
+                    com.garmin.fit.SetType.REST -> "REST"
+                    else -> if ((m.repetitions ?: 0) > 0) "ACTIVE" else "REST"
+                }
+                val catStr = if (m.numCategory > 0) {
+                    m.getCategory(0)?.let { com.garmin.fit.ExerciseCategory.getStringFromValue(it) }?.takeIf { it.isNotBlank() }
+                } else null
+
+                strengthSets += StrengthSet(
+                    index = strengthSets.size + 1,
+                    setType = setTypeStr,
+                    reps = m.repetitions?.takeIf { it > 0 },
+                    weightKg = m.weight?.toDouble()?.takeIf { it > 0.0 },
+                    durationS = m.duration?.toDouble()?.takeIf { it > 0.0 },
+                    exerciseCategory = catStr,
+                    exerciseName = catStr,
+                    startUtcMs = m.startTime?.date?.time ?: m.timestamp?.date?.time,
+                    wktStepIndex = m.wktStepIndex,
+                )
+            })
             broadcaster.addListener(com.garmin.fit.SessionMesgListener { session = it })
             broadcaster.run(ByteArrayInputStream(bytes))
             if (overflow) return FitResult.Invalid("Příliš mnoho záznamů")
-            if (points.isEmpty() && session == null) return FitResult.Invalid("Soubor neobsahuje aktivitu")
+            if (points.isEmpty() && session == null && strengthSets.isEmpty()) return FitResult.Invalid("Soubor neobsahuje aktivitu")
 
             points.sortBy { it.tMs }
             val s = session
             val computed = ActivityMath.summarize(points)
-            val start = s?.startTime?.date?.time ?: points.firstOrNull()?.tMs ?: return FitResult.Invalid("Chybí čas začátku")
-            val mappedSport = s?.sport?.let(::mapSport) ?: Sport.OTHER
+            val start = s?.startTime?.date?.time ?: points.firstOrNull()?.tMs ?: strengthSets.firstOrNull()?.startUtcMs ?: return FitResult.Invalid("Chybí čas začátku")
+            val baseSport = s?.sport?.let(::mapSport) ?: Sport.OTHER
+            val mappedSport = if (baseSport == Sport.OTHER && strengthSets.isNotEmpty()) Sport.STRENGTH else baseSport
             val cadMult = if (mappedSport == Sport.RUNNING || mappedSport == Sport.WALKING || mappedSport == Sport.HIKING) 2.0 else 1.0
             FitResult.Ok(
                 ParsedFit(
@@ -162,6 +210,11 @@ object FitImporter {
                     avgGroundContactTimeMs = s?.avgStanceTime?.toDouble(),
                     avgVerticalRatioPct = s?.avgVerticalRatio?.toDouble(),
                     steps = s?.totalStrides?.let { it.toInt() * 2 },
+                    strengthSets = strengthSets,
+                    totalReps = s?.totalReps?.toInt() ?: strengthSets.filter { it.isActive }.sumOf { it.reps ?: 0 }.takeIf { it > 0 },
+                    totalStrokes = s?.totalStrokes?.toInt(),
+                    avgSwolf = s?.avgSwolf,
+                    poolLengthM = s?.poolLength?.toDouble(),
                 ),
             )
         } catch (e: FitRuntimeException) {
@@ -173,11 +226,11 @@ object FitImporter {
 
     private fun mapSport(s: com.garmin.fit.Sport): Sport = when (s) {
         com.garmin.fit.Sport.RUNNING -> Sport.RUNNING
-        com.garmin.fit.Sport.CYCLING -> Sport.CYCLING
+        com.garmin.fit.Sport.CYCLING, com.garmin.fit.Sport.E_BIKING -> Sport.CYCLING
         com.garmin.fit.Sport.WALKING -> Sport.WALKING
-        com.garmin.fit.Sport.HIKING -> Sport.HIKING
+        com.garmin.fit.Sport.HIKING, com.garmin.fit.Sport.MOUNTAINEERING -> Sport.HIKING
         com.garmin.fit.Sport.SWIMMING -> Sport.SWIMMING
-        com.garmin.fit.Sport.TRAINING -> Sport.STRENGTH
+        com.garmin.fit.Sport.TRAINING, com.garmin.fit.Sport.FITNESS_EQUIPMENT, com.garmin.fit.Sport.HIIT -> Sport.STRENGTH
         else -> Sport.OTHER
     }
 }

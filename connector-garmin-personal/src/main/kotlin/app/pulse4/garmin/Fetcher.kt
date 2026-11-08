@@ -27,7 +27,7 @@ class GarminPersonalFetcher(
     private val zoneId: String,
     private val nowMs: () -> Long = System::currentTimeMillis,
     /** Při prvním importu: kolik dní zpět (volba aplikace, nikoli záruka historie služby). */
-    private val initialDays: Int = 14,
+    private val initialDays: Int = 28,
     /** Původní odpověď poskytovatele se uchovává před mapováním; originál se nepřepisuje. */
     private val onRawResponse: (EndpointSpec, String) -> Unit = { _, _ -> },
 ) : AreaFetcher {

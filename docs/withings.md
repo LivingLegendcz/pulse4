@@ -1,8 +1,158 @@
 # Withings
 
-Stav k 5. 11. 2026. Pulse4 stahuje z vah Withings váhu a tělesný tuk a zobrazuje je v *Dnes* a *Metrikách*.
+Stav k 7. 11. 2026. Plný konektor Withings (`WithingsWebClient`, `WithingsWebMapper`, `WithingsWebFetcher`, `WithingsDirectAuth`, `WithingsNativeLoginForm`) je implementován a integrován napříč aplikací. Veškeré přihlašování (včetně účtů vedených přes **Google**, **Apple**, účtů bez hesla přes 8místný e-mailový kód i účtů s heslem) a výběr hlavního i dětského profilu probíhá **100% na pozadí v nativním formuláři bez WebView**.
 
-## Rozhodnutí (shrnutí)
+## Mapování metrik Withings Body Scan / Body Comp (ověřeno na reálném HAR i zařízení)
+
+- **Celotělové vs. segmentální pozice (`position = 7` vs `position = null`)**:
+  - Váhy Withings Body Scan / Body Comp vracejí v jedné skupině (`measuregrp`) jak klasické celotělové metriky s `position = null` (`type 1` váha, `type 6` % tuku, `type 11` tep, `type 91` PWV, `type 155` cévní věk), tak celotělové metriky uložené pod **`position = 7` (Whole Body)**:
+    - `type 5`: Beztuková hmota (`FAT_FREE_MASS`, kg)
+    - `type 76`: Svalová hmota (`MUSCLE_MASS`, kg)
+    - `type 77`: Tělesná voda (`BODY_WATER`, v API v kg → přepočteno na `%` z váhy ve stejné skupině nebo nejbližšího vážení ±300 s)
+    - `type 88`: Kostní hmota (`BONE_MASS`, kg)
+    - `type 170`: Viscerální tuk (`VISCERAL_FAT`, index)
+    - `type 226`: Bazální metabolismus (`BMR`, kcal)
+    - `type 227`: Metabolický věk (`METABOLIC_AGE`, roky)
+  - Segmentální hodnoty končetin a trupu (`position` 2 = Pravá ruka, 3 = Levá ruka, 12 = Trup, 10 = Pravá noha, 11 = Levá noha) se uchovávají v `segmentalItems` a nikdy nepřepisují celotělové skalární metriky (priorita výběru v `WithingsWebMapper` i `WithingsMapper`: `position == null` → `position == 7` → `position == 0`).
+  - **Segmentální rozložení svalů a tuku (`type 173`, `type 174`, `type 175`)**:
+    - `WithingsWebMapper.buildSegmentalOriginSuffix` extrahuje ze skupin `measuregrp` segmentální měření z Withings Body Scan:
+      - `type 175` (`SEGMENT_MUSCLE`, kg): svalová hmota pro pozice `2` (Pravá ruka, např. `4.56 kg`), `3` (Levá ruka, `4.60 kg`), `12` (Trup, `35.66 kg`), `10` (Pravá noha, `12.73 kg`), `11` (Levá noha, `12.54 kg`) – součet `70.09 kg`.
+      - `type 174` (`SEGMENT_FAT`, kg): tuková hmota pro pozice `2` (`0.81 kg`), `3` (`0.81 kg`), `12` (`12.58 kg`), `10` (`2.55 kg`), `11` (`2.69 kg`) – součet `19.44 kg`.
+      - `type 173` (`SEGMENT_FAT_FREE`, kg): beztuková hmota pro pozice `2, 3, 12, 10, 11`.
+    - Hodnoty se kódují do `origin` pozorování (`|segm:2=...,3=...,12=...,10=...,11=...|segf:...|segffm:...`) a v UI (`SegmentalBodyCompositionSection` v `PersonalScreens.kt`) se zobrazují jako interaktivní tabulka s přepínačem **Svaly / Tuk**, vyhodnocením pravo-levé symetrie končetin a **rozklikávacím historickým grafem** pro každou část těla i společné porovnání všech 5 segmentů.
+- **Sdružené metriky, zobrazení posledních známých hodnot po půlnoci a sémantické barvy (`PersonalScreens.kt`)**:
+  - **Poslední známé hodnoty (`Dnes`)**: Pokud po půlnoci (`00:00`) ještě neproběhlo měření pro aktuální den, obrazovka `Dnes` automaticky zobrazí poslední známou hodnotu z databáze s jasným označením stáří (`Dnes`, `Včera`, `Poslední (MM-DD)`).
+  - **Sémantické barvy a vysvětlení (`evaluateMetricHealth`, `MetricMeaningAndRangesCard`)**: Každá metrika má fyziologické vysvětlení a referenční pásma barevně odlišená: **Pozitivní / Optimální = zelená (`#10B981`)**, **Hraniční = jantarová (`#F59E0B`)**, **Negativní / Rizikové = červená (`#EF4444`)**. Stejně se barví i samotná hodnota a odchylka `Δ vs medián`.
+  - **Sdružené metriky**:
+    - **Váha & Složení těla (Withings + Garmin)**: spojuje hmotnost, % tuku, svalovou hmotu, viscerální tuk, % vody, beztukovou hmotu, kosti, BMR, metabolický věk a segmentální rozložení Ruce/Trup/Nohy.
+    - **Srdce & Cévy (Garmin + Withings)**: spojuje klidový tep a noční HRV z Garminu s EKG, rychlostí pulzové vlny (PWV) a cévním věkem z Withings.
+    - **Regenerace & Energie (Garmin)**: spojuje spánek, skóre spánku, Body Battery, HRV a stres.
+  - **Skládaný plošný graf (Stacked Area Chart) pro Váhu, Svaly a Tuk (`WeightCompositionStackedAreaChart` v `Common.kt`)**:
+    - Vykresluje vrstvy aktivních svalů (zelená `#10B981`) a tuku (oranžová `#F59E0B`) přímo pod křivkou celkové hmotnosti.
+    - Přepínač mezi detailním pohybem váhy a absolutní škálou od 0 kg.
+    - Sjednocené přepínání jednotek celého kokpitu do kilogramů (`kg`) nebo procent (`%`) bez míchání jednotek.
+  - **Zdrojově specifický Viscerální tuk**:
+    - Pro Withings Body Scan (`WITHINGS_API`) se používá desetinná stupnice `0,0–20,0 idx` s referencí `0,0–2,9 idx` (optimální), `3,0–4,4 idx` (střední), `≥ 4,5 idx` (vysoký).
+    - Pro Garmin a běžné váhy bez madla se používá celočíselná škála `1–59`.
+  - **Matematika BMR a Metabolického věku**:
+    - Withings Body Scan počítá BMR (`type 226`) absolutně v kcal/den, ale metabolický věk (`type 227`) stanovuje z relativního poměru BMR k 1 kg celkové váhy a % tělesného tuku ve srovnání s věkovými průměry. Proto hodnota 41 let při 93 kg váhy a 23,2 % tuku odpovídá normálnímu stavu.
+  - **Ochrana profilů (`primaryUserId`)**:
+    - `WithingsService.trend()` i `latestBodyComposition()` striktně filtrují pozorování podle `primaryUserId` aktivního profilu, aby se nemíchaly váhy různých rodinných příslušníků.
+- **Kvalita skupin (`attrib = 8` a `attrib = 5`)**:
+  - Váha Withings Body Scan ukládá cévní metriky (`PWV` typ 91 a `VASCULAR_AGE` typ 155) do samostatné skupiny se stejným časovým razítkem a `attrib = 8`. V `WithingsWebConfig.attribQuality` jsou proto `0`, `2`, `5`, `7` a `8` mapovány na `Quality.OK`.
+- **EKG (`v2/heart?action=list` a `v2/signal?action=get`)**:
+  - Seznam záznamů EKG se stahuje přes `v2/heart?action=list` (bez omezujícího `startdate`, protože endpoint vrací stránkovanou historii záznamů `series` s `ecg.signalid`, `afib` a případně `heart_rate` / `qtc`).
+  - Pokud v `v2/heart?action=list` není přímo vyplněn `heart_rate`, spáruje `WithingsWebMapper.mapEcgSummaries` záznam EKG se souběžným měřením tepu z váhy (`type 11` v okně ±300 s).
+  - Při rekonciliaci tombstonů (`Reconcile.tombstones`) jsou ID záznamů EKG (`withings:<userId>:ecg:<signalid>:ECG`) i modifikovaných záznamů zahrnuta do `fetchedIdsInWindow`, takže se při synchronizaci nikdy nesmažou.
+  - Plná křivka EKG (15 000 vzorků, `with_filtered=true`, 500 Hz) se stahuje přes `WithingsWebClient.getSignal` a ukládá do `withings_ecg_signal`.
+
+## Aktuální směr: přihlášení na pozadí bez developer účtu a bez WebView (Implementováno)
+
+Požadavek uživatele: žádný developer účet ani pro autora, žádný vlastní server, žádný ruční export při každé
+synchronizaci a žádné matoucí bílé okno WebView. K tomu slouží **přímý konektor Withings** v modulu `connector-withings` a přihlašovací služby v `app` (`WithingsDirectAuth`, `WithingsNativeLoginForm`, `WithingsWebLoginDialog`, `WithingsService`):
+- **Google / Apple / Kód z e-mailu (výchozí režim)**: Účty založené přes *Continue with Google* nebo *Continue with Apple* nemají vlastní heslo Withings. Po zadání e-mailu (nebo 1klik выбора Google účtu z telefonu) zavolá `WithingsDirectAuth.requestEmailCode` na pozadí `account.withings.com/new_workflow/login`, čímž Withings odešle 8místný ověřovací kód na e-mail (s možností opakovaného zaslání přes `scalews.withings.com/cgi-bin/v2/account?action=createshortcode`). Po zadání kódu v nativním poli získá aplikace `session_token` / `session_key` / `sessionid` cookies a načte profily.
+- **E-mail + Heslo Withings**: Klasické přihlášení na pozadí přes `new_workflow/password_check` s automatickým přechodem na 8místný kód při zapnutém 2FA nebo u účtů bez hesla.
+- Původní OAuth 2.0 konektor a CSV import zůstávají k dispozici jako záložní cesty.
+
+### Co doložil HAR
+
+Analyzován uživatelem dodaný `app.withings.com.har`: 35 požadavků, z toho 34 na
+`https://scalews.withings.com/cgi-bin/` a jeden na překlady webu. Všech 34 odpovědí webového API má HTTP 200
+a aplikační `status: 0`. Jde o zaznamenané odpovědi, nikoli nové živé volání API. Analýza neodesílala žádné
+požadavky s přihlašovacími údaji z HAR. Osobní údaje, ID, hodnoty měření a původní HAR se do repozitáře nekopírují.
+
+Záznamy jsou níže číslovány od nuly podle `log.entries`.
+
+| Endpoint za `/cgi-bin/` | `action` | Doloženo v HAR |
+|---|---|---|
+| `v2/account` | `get` | Účet a seznam dvou profilů; záznam 0. |
+| `account` | `getuserslist` | Dva profily se samostatným ID; záznam 1. |
+| `measure` | `getmeas` | Detailní měření; rozsah `startdate`/`enddate`, volitelný `meastype`; záznamy 20 a 24 obsahují plné složení těla. |
+| `measure` | `getmeas` | `meastype=4`, `lastupdate=0`: historie výšky včetně sedmi smazaných skupin; záznam 8. |
+| `measure` | `getmeas` | Čtení váhy druhého profilu, 12 záznamů v rozpětí přibližně 419 dní; záznam 28. |
+| `v2/summary` | `getbyuserid` | Souhrny; záznam 6. |
+| `v2/aggregate` | `getbyuserid` | Agregace podle typu a období; záznamy 9, 17, 21, 25, 29, 32. |
+| `v2/heart` | `list` | 45 položek se strukturou `ecg.signalid` a dalšími metadaty; záznam 14. |
+| `v2/signal` | `get` | Konkrétní signál, jeho metadata a `filtered_data` s 15 000 položkami; záznam 31. |
+| `v2/activity` | `getbyuserid` | Úspěšné, ale prázdné odpovědi: skutečné mapování aktivit tím není ověřeno. |
+| `v2/measure` | `getmeas` / `getagregatewam` | Úspěšné, ale prázdné odpovědi. Nezaměňovat s neprázdným `/measure`. |
+
+Požadavky používají POST s formulářovými parametry a identifikací webového klienta `appname`, `apppfm`,
+`appliver`. Konektor musí hodnotit i JSON `status`, nikoli pouze HTTP status.
+
+Ve všech odpovědích `/measure` je celkem 35 různých skupin, z toho sedm smazaných, a 304 položek měření
+37 různých typů. Přítomné jsou mimo jiné váha (1), výška (4), beztuková hmota (5), tuk v procentech (6)
+a kg (8), tep (11), svaly (76), voda (77), kosti (88), PWV (91), cévní věk (155), vnější/vnitřní buněčná
+voda (168/169), viscerální tuk (170), segmentální složení těla (173–175), bazální metabolismus (226)
+a metabolický věk (227). Význam pokročilých typů vychází z konstant veřejného JavaScriptu Withings;
+nepovažovat názvy za klinickou interpretaci ani všechny jednotky za ověřené.
+
+### Co HAR neobsahuje
+
+- Žádné požadavky přihlášení, MFA, obnovení nebo prodloužení relace.
+- Žádné hlavičky `Cookie`, `Authorization`, `Set-Cookie` ani položky v polích cookies. Export tedy
+  neposkytuje přihlašovací relaci k přehrání. **Absence cookies v exportu neznamená veřejné API bez autentizace.**
+- Žádnou skutečnou další stránku výsledků ani nenulový inkrementální `lastupdate`.
+- Žádná neprázdná data spánku či aktivit. Nelze z něj slíbit úplný obsah všech zařízení nebo všech účtů.
+
+Veřejný webový JavaScript samostatně dokládá použití cookies (`withCredentials`) / `sessionid`, volitelného
+`session_token`, čtení měření a operace `session?action=extend`. Životnost a možnost obnovy běžné relace
+bez interakce uživatele zůstávají neověřené. Zdrojem byly balíky `main.87d703d8.js` a `vendors.6a1aa918.js`
+odkazované webem Withings. Statický kód neprokazuje úspěšné přihlášení z Android WebView.
+
+### Návrh uživatelského průchodu
+
+1. „Připojit Withings“ otevře přihlášení Withings v samostatném WebView P4; ověřit běžné přihlášení a MFA.
+   Automatické přihlášení přes Google/Apple ve WebView není potvrzené. P4 nesbírá ani neukládá heslo.
+2. Po dokončení přihlášení konektor ověří relaci čtením účtu a nabídne seznam profilů. Uživatel vybere svůj
+   profil a případně profil dítěte. Data se přiřazují podle `userid`, nikoli odhadem podle váhy.
+3. Relace zůstane pouze na daném telefonu. Nativní HTTP klient převezme potřebný stav z vlastního WebView;
+   nelze předpokládat přístup ke cookies běžného Chrome. Ověřit přenos cookies, jejich rozsah a případný
+   `session_token`. Kopie relace mimo WebView se šifruje pomocí Keystore a nevstupuje do záloh ani logů.
+4. První import načte dostupnou historii po ověřených časových oknech. Další importy čtou změny a kontrolní
+   překryv při otevření aplikace a přes WorkManager. Interval není zárukou přesného času provedení na Androidu.
+5. Při neplatné relaci zobrazit „Obnovit přihlášení“, zachovat historii a kurzor. Nepředpokládat trvalou platnost
+   relace ani použitelnost OAuth refresh tokenů pro tento konektor.
+6. Rodičovský telefon může číst vybraný profil dítěte a poslat jeho data stávající P2P cestou. Přihlašovací
+   relace rodiče se dítěti neposílá. Současná zpráva `family.weight.push` nepřenáší celé složení těla.
+
+### Nutné změny proti současnému konektoru
+
+- Samostatná webová relace a provider; pouhá výměna URL v OAuth konektoru nestačí.
+- Zachovat celou zdravotní skupinu včetně `modified`, `deleted`, `attrib`, `timezone`, `position`,
+  `algo` a neznámých typů. Neuchovávat kompletní odpověď účtu, která obsahuje také nepotřebné citlivé údaje.
+- Skalární hodnota používá `value * 10^unit`; jednotka a význam metriky se mapují zvlášť.
+- Současný `Measure(type, value)` ztrácí `position`. Klíč pouze `grpid + type` by v tomto HAR vytvořil
+  **180 kolizí**. Klíč rozšířit alespoň na provider + profil + grpid + typ + pozici; další případné kolize
+  nesmí nic přepsat. V tomto vzorku rozlišení pozice všechny kolize odstraní. Původní skupinu zachovat
+  i pro budoucí dosud neznámé rozměry. Chybějící pozice není totéž co pozice nula.
+- Zpracovat explicitní `deleted` i bez položek `measures`; sedm takových záznamů je přímo ve vzorku.
+  Nepřítomnost záznamu v neúplné, filtrované nebo prázdné odpovědi není sama důkaz smazání.
+- Časové pásmo není ve všech skupinách; použít ověřené pásmo profilu s evidencí původu.
+- Nové hodnoty `attrib` uchovat a jejich význam ověřit. Neodvozovat osobu ani kvalitu segmentálních
+  měření pouze z číselného kódu bez doloženého mapování.
+- Kurzory ukládat až s úspěšným commitem dat; pro `lastupdate` ověřit význam serverového `updatetime`,
+  hranice a stránkování. Podpora `lastupdate=0` zatím nedokazuje úplnou inkrementální synchronizaci.
+- Rozšířit doménový model a UI o celé složení těla; segmenty a EKG mají vlastní rozměry/formát.
+  EKG signál ukládat odděleně, nikoli jako skalární `MetricObservation`.
+
+### Nejbližší ověření
+
+Datový formát a čtení obou profilů jsou doložené. Další krok je malý Android prototyp přihlášení a čtení
+jednoho vážení. Ověřit relaci po restartu aplikace/telefonu, na pozadí a po několikadenní neaktivitě,
+nové i opravené/smazané měření, úplnost historie a oddělení profilů. Teprve potom označit automatickou
+synchronizaci za funkční. HAR slouží pouze jako podklad pro vývoj; budoucí běžná synchronizace jej nepotřebuje.
+
+Health Connect zůstává volitelnou cestou s omezeným doloženým rozsahem. Android podporuje vodu, kosti
+a beztukovou hmotu, ale nemá samostatný standardní typ svalové hmoty; není doloženo, že Withings zapisuje
+všechny podporované typy. Beztuková hmota není svalová hmota. Viz
+[datové typy Androidu](https://developer.android.com/health-and-fitness/health-connect/data-types) a
+[export Withings do Health Connect](https://support.withings.com/hc/en-us/articles/27322856325905-Partner-Apps-Health-Connect-Exporting-Withings-data-into-Health-Connect).
+
+## Historický návrh: OAuth (nahrazen výše uvedeným směrem)
+
+Následující části popisují dosavadní implementaci a původní plán. Registrace developer aplikace,
+zabudování společného secretu a callback doména nejsou úkoly pro novou webovou cestu.
 
 | Otázka | Rozhodnutí |
 |---|---|
@@ -15,8 +165,8 @@ Stav k 5. 11. 2026. Pulse4 stahuje z vah Withings váhu a tělesný tuk a zobraz
 | CSV a ruční zápis | Zůstávají jako záložní cesty bez připojení. |
 
 > **Stav implementace:** UI pro OAuth, výměna kódu, rotace tokenů, dětský profil a P2P přeposílání jsou hotové.
-> **Zbývá:** registrace aplikace u Withings, nasazení callback stránky na doménu, přesunutí `client_id`/`client_secret` z UI
-> do buildu a zjednodušení UI na jediné tlačítko „Připojit Withings“. Viz [Otevřené úkoly](#otevřené-úkoly).
+> **Původně zbývalo:** registrace aplikace u Withings, nasazení callback stránky na doménu, přesunutí `client_id`/`client_secret` z UI
+> do buildu a zjednodušení UI na jediné tlačítko „Připojit Withings“. Tyto úkoly nahrazuje webový prototyp popsaný výše.
 
 ---
 
@@ -127,7 +277,7 @@ Snímky: `vault/attachments/settings_accounts_*.png`.
 
 ---
 
-## Otevřené úkoly
+## Historické úkoly OAuth — nyní se neprovádějí
 
 1. **Autor:** na developer.withings.com založit organizaci „Pulse4“ (stačí jméno) a aplikaci *Public API integration*,
    Callback URL `https://<doména>/withings/callback`.

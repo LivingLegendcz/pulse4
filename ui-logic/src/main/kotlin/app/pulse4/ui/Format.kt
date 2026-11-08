@@ -43,9 +43,9 @@ class Fmt(
         else "${number(it, 0)} m"
     } ?: "—"
 
-    fun weight(kg: Double?): String = kg?.takeIf { it.isFinite() && it > 0 }?.let {
-        if (isImperial) "${number(it * 2.20462, 1)} lb"
-        else "${number(it, 1)} kg"
+    fun weight(kg: Double?, decimals: Int = 2): String = kg?.takeIf { it.isFinite() && it > 0 }?.let {
+        if (isImperial) "${number(it * 2.20462, decimals)} lb"
+        else "${number(it, decimals)} kg"
     } ?: "—"
 
     fun weightUnit(): String = if (isImperial) "lb" else "kg"

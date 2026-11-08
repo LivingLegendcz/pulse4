@@ -285,7 +285,7 @@ class SharingViewTest {
         val v = assertNotNull(ProjectionView.parse(payload, F))
         assertEquals("2026-10-20", v.date)
         assertEquals(listOf("Spánek: délka", "Body Battery: min/max", "Váha (výchozí vypnuto)"), v.rows.map { it.first })
-        assertEquals(listOf("7 h 30 min", "30–90", "80,1 kg"), v.rows.map { it.second })
+        assertEquals(listOf("7 h 30 min", "30–90", "80,14 kg"), v.rows.map { it.second })
         assertNull(ProjectionView.parse("{nonsense", F))
         assertEquals("—", ProjectionView.value(Field.SLEEP_DURATION, JsonPrimitive("x"), F))
         assertEquals("3 bodů", ProjectionView.value(Field.HR_SERIES, kotlinx.serialization.json.JsonArray(List(3) { JsonPrimitive(it) }), F))

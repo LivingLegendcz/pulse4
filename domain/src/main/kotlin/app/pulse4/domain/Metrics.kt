@@ -20,6 +20,16 @@ enum class MetricType(val unit: String) {
     SPO2("%"),
     WEIGHT("kg"),
     BODY_FAT("%"),
+    FAT_FREE_MASS("kg"),
+    MUSCLE_MASS("kg"),
+    BONE_MASS("kg"),
+    BODY_WATER("%"),
+    VISCERAL_FAT("idx"),
+    VASCULAR_AGE("yr"),
+    PULSE_WAVE_VELOCITY("m/s"),
+    BMR("kcal"),
+    METABOLIC_AGE("yr"),
+    ECG("ms"),
 }
 
 @Serializable

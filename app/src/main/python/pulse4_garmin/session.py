@@ -23,16 +23,48 @@ def _garmin(*args, **kwargs):
     return Garmin(*args, **kwargs)
 
 
+def _token_holder(g):
+    return getattr(g, "garth", None) or getattr(g, "client", None)
+
+
+def _dump_tokens(g):
+    holder = _token_holder(g)
+    if holder is None:
+        raise RuntimeError("Garmin klient neobsahuje garth/client objekt")
+    return holder.dumps()
+
+
+def _extract_expires_ms(g):
+    try:
+        holder = _token_holder(g)
+        oauth2 = getattr(holder, "oauth2_token", None)
+        if oauth2 is not None:
+            exp = getattr(oauth2, "refresh_token_expires_at", None) or getattr(oauth2, "expires_at", None)
+            if exp:
+                return int(float(exp) * 1000)
+    except Exception:
+        pass
+    return None
+
+
 def login_password(email, password):
-    """Přihlášení jménem a heslem. Vrací JSON `{status: ok|needs_mfa, tokens?}`."""
+    """Přihlášení jménem a heslem. Vrací JSON `{status: ok|needs_mfa, tokens?, expiresAtMs?}`."""
     global _client, _pending
     g = _garmin(email, password, return_on_mfa=True)
-    status, state = g.login()  # bez tokenstore → žádný soubor
+    res = g.login()  # bez tokenstore → žádný soubor
+    if isinstance(res, tuple) and len(res) == 2:
+        status, state = res
+    else:
+        status, state = res, None
     if status == "needs_mfa":
         _pending = (g, state)
         return json.dumps({"status": "needs_mfa"})
     _client, _pending = g, None
-    return json.dumps({"status": "ok", "tokens": g.client.dumps()})
+    out = {"status": "ok", "tokens": _dump_tokens(g)}
+    exp_ms = _extract_expires_ms(g)
+    if exp_ms:
+        out["expiresAtMs"] = exp_ms
+    return json.dumps(out)
 
 
 def resume_mfa(code):
@@ -42,16 +74,34 @@ def resume_mfa(code):
     g, state = _pending
     g.resume_login(state, code)
     _client, _pending = g, None
-    return json.dumps({"status": "ok", "tokens": g.client.dumps()})
+    out = {"status": "ok", "tokens": _dump_tokens(g)}
+    exp_ms = _extract_expires_ms(g)
+    if exp_ms:
+        out["expiresAtMs"] = exp_ms
+    return json.dumps(out)
 
 
 def login_tokens(tokens_json):
     """Obnova relace z uložených tokenů (bez hesla). Vrací případně obnovené tokeny."""
     global _client
     g = _garmin()
-    g.login(tokenstore=tokens_json)
+    if hasattr(g, "garth") and hasattr(g.garth, "loads"):
+        g.garth.loads(tokens_json)
+    else:
+        g.login(tokenstore=tokens_json)
     _client = g
-    return g.client.dumps()
+    return _dump_tokens(g)
+
+
+def connectapi_json(path):
+    """Zavolá Garmin Connect API cestu přes přihlášenou relaci garth a vrátí JSON řetězec."""
+    g = _g()
+    holder = _token_holder(g)
+    if hasattr(holder, "connectapi"):
+        data = holder.connectapi(path)
+    else:
+        data = g.connectapi(path)
+    return json.dumps(data if data is not None else [])
 
 
 def logout():
@@ -63,6 +113,32 @@ def _g():
     if _client is None:
         raise RuntimeError("Garmin relace neběží")
     return _client
+
+
+def download_activity_fit(activity_id):
+    """Stáhne originální FIT soubor (nebo zip) pro danou aktivitu a vrátí Base64 string."""
+    import base64
+    import logging
+    g = _g()
+    try:
+        raw = g.download_activity(str(activity_id), dl_fmt=g.ActivityDownloadFormat.ORIGINAL)
+        if raw and len(raw) > 0:
+            return base64.b64encode(raw).decode('ascii')
+    except Exception as e:
+        logging.getLogger("pulse4_garmin").warning(f"Failed to download original FIT for {activity_id}: {e}")
+    return ""
+
+
+def get_activity_details(activity_id):
+    """Vrátí detaily aktivity včetně GPS polyline / bodů v JSON."""
+    import logging
+    g = _g()
+    try:
+        data = g.get_activity_details(str(activity_id))
+        return json.dumps(data if data is not None else {})
+    except Exception as e:
+        logging.getLogger("pulse4_garmin").warning(f"Failed to get activity details for {activity_id}: {e}")
+        return "{}"
 
 
 # ---------------------------------------------------------------------------------------------

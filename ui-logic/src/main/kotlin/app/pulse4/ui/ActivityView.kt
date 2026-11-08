@@ -4,7 +4,41 @@ import app.pulse4.analytics.ActivityMath
 import app.pulse4.analytics.Geo
 import app.pulse4.domain.TrackPoint
 
-enum class Channel { HEART_RATE, SPEED, ELEVATION, CADENCE, POWER }
+enum class Channel {
+    HEART_RATE,
+    SPEED,
+    ELEVATION,
+    CADENCE,
+    POWER,
+    STRIDE_LENGTH,
+    GROUND_CONTACT_TIME,
+    GROUND_CONTACT_BALANCE,
+    VERTICAL_OSCILLATION,
+    VERTICAL_RATIO,
+    STAMINA,
+    PERFORMANCE_CONDITION;
+
+    fun isScatter(): Boolean = when (this) {
+        CADENCE, STRIDE_LENGTH, GROUND_CONTACT_TIME, GROUND_CONTACT_BALANCE,
+        VERTICAL_OSCILLATION, VERTICAL_RATIO, PERFORMANCE_CONDITION -> true
+        HEART_RATE, SPEED, ELEVATION, POWER, STAMINA -> false
+    }
+
+    fun label(): String = when (this) {
+        HEART_RATE -> "Srdeční tep"
+        SPEED -> "Tempo / Rychlost"
+        ELEVATION -> "Nadmořská výška"
+        CADENCE -> "Kadence"
+        POWER -> "Výkon"
+        STRIDE_LENGTH -> "Délka kroku"
+        GROUND_CONTACT_TIME -> "Doba kontaktu se zemí"
+        GROUND_CONTACT_BALANCE -> "Vyváženost kontaktu L/P"
+        VERTICAL_OSCILLATION -> "Vertikální oscilace"
+        VERTICAL_RATIO -> "Vertikální poměr"
+        STAMINA -> "Stamina (Výdrž)"
+        PERFORMANCE_CONDITION -> "Zhodnocení kondice"
+    }
+}
 enum class Axis { TIME, DISTANCE }
 
 /** Graf převzorkovaný na pravidelnou osu X. [trackIndex] mapuje bod grafu zpět na bod trasy (propojení graf ↔ trasa). */
@@ -48,6 +82,13 @@ class ActivityView(val track: List<TrackPoint>) {
         Channel.ELEVATION -> p.elevationM
         Channel.CADENCE -> p.cadence?.toDouble()
         Channel.POWER -> p.powerW?.toDouble()
+        Channel.STRIDE_LENGTH -> p.strideLengthM
+        Channel.GROUND_CONTACT_TIME -> p.groundContactTimeMs
+        Channel.GROUND_CONTACT_BALANCE -> p.groundContactBalancePct
+        Channel.VERTICAL_OSCILLATION -> p.verticalOscillationCm
+        Channel.VERTICAL_RATIO -> p.verticalRatioPct
+        Channel.STAMINA -> p.staminaPct
+        Channel.PERFORMANCE_CONDITION -> p.performanceCondition?.toDouble()
     }
 
     fun hasChannel(c: Channel) = track.any { value(it, c) != null }
@@ -93,13 +134,21 @@ class ActivityView(val track: List<TrackPoint>) {
     /** Hodnoty vybraného bodu; chybějící údaj je pomlčka, nikdy „0“. */
     fun point(i: Int, f: Fmt = Fmt.default): List<Pair<String, String>> {
         val p = track.getOrNull(i) ?: return emptyList()
-        return listOf(
+        val list = mutableListOf(
             "Tep" to (p.heartRate?.toString() ?: "—"),
             "Rychlost" to (p.speedMps?.let { f.number(it, 1) + " m/s" } ?: "—"),
             "Výška" to (p.elevationM?.let { f.number(it) + " m" } ?: "—"),
             "Kadence" to (p.cadence?.toString() ?: "—"),
             "Výkon" to (p.powerW?.let { "$it W" } ?: "—"),
-            "Poloha" to if (p.hasPosition) "%.5f, %.5f".format(java.util.Locale.ROOT, p.lat, p.lon) else "bez GPS",
         )
+        p.strideLengthM?.let { list += "Délka kroku" to "${f.number(it, 2)} m" }
+        p.groundContactTimeMs?.let { list += "Doba kontaktu" to "${f.number(it, 0)} ms" }
+        p.groundContactBalancePct?.let { list += "Vyváženost kontaktu" to "${f.number(it, 1)} % L" }
+        p.verticalOscillationCm?.let { list += "Vert. oscilace" to "${f.number(it, 1)} cm" }
+        p.verticalRatioPct?.let { list += "Vert. poměr" to "${f.number(it, 1)} %" }
+        p.staminaPct?.let { list += "Výdrž (Stamina)" to "${f.number(it, 0)} %" }
+        p.performanceCondition?.let { list += "Zhodnocení kondice" to (if (it > 0) "+$it" else "$it") }
+        list += "Poloha" to if (p.hasPosition) "%.5f, %.5f".format(java.util.Locale.ROOT, p.lat, p.lon) else "bez GPS"
+        return list
     }
 }

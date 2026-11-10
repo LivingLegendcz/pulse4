@@ -46,6 +46,10 @@ echo " Pulse4 Performance & Frame Budget Regression Test"
 echo " Target Device: $TARGET_DEV ($DEV_MODEL) [Emulator: $IS_EMULATOR]"
 echo "========================================================================"
 
+# Ensure screen is awake and unlocked
+$ADB -s "$TARGET_DEV" shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 || true
+$ADB -s "$TARGET_DEV" shell wm dismiss-keyguard >/dev/null 2>&1 || true
+
 # Helper function to parse gfxinfo stats via python
 parse_gfxinfo() {
     python3 -c "

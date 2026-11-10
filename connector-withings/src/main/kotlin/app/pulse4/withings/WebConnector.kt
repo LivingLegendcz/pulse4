@@ -647,10 +647,10 @@ class WithingsWebFetcher(
         if (!s.isConnected()) throw ProviderError.Unauthorized()
 
         val now = nowMs()
-        // Proaktivní udržování relace: pokud od posledního prodloužení uplynulo více než 2 hodiny,
+        // Proaktivní udržování relace: pokud od posledního prodloužení uplynula více než 1 hodina,
         // bezpečně relaci prodloužíme přes scalews.withings.com ještě před vypršením tokenu.
         val lastExt = s.lastExtendedMs ?: 0L
-        if (now - lastExt > 2 * 3600 * 1000L) {
+        if (now - lastExt > 1 * 3600 * 1000L) {
             val extended = runCatching { client.extendSession(s.cookies, s.sessionToken) }.getOrNull()
             if (extended != null) {
                 val updated = s.copy(

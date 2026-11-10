@@ -27,9 +27,16 @@ class ImportWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val sl = applicationContext.services
         val now = System.currentTimeMillis()
-        sl.importService.runAll(now)
-        // Váha: každý zdroj má vlastní stav a vlastní chyby; výpadek jednoho nesmí zablokovat ostatní.
-        runCatching { sl.withings.runImport(now) }
+        // 1. Garmin proaktivní keepalive a import
+        runCatching { sl.garminExt.ensureSession() }
+        runCatching { sl.importService.runAll(now) }
+
+        // 2. Withings proaktivní keepalive a import (nezávislý na Garminu)
+        runCatching {
+            sl.withings.renewSession()
+            sl.withings.runImport(now)
+        }
+
         if (sl.settings.healthConnectEnabled) runCatching { sl.healthConnect.sync(now, background = true) }
         // Po úspěšném importu zkusit hned odeslat nové projekce, ať nečekají na další interval.
         if (applicationContext.services.settings.networkMode != NetworkMode.MANUAL) Scheduler.shareNow(applicationContext)

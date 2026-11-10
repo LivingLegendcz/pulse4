@@ -21,5 +21,11 @@ class Pulse4App : Application() {
                 services.importService.backfillActivitySummaries()
             }
         }
+
+        // Tichý proaktivní keepalive Garmin & Withings relací při spuštění aplikace
+        CoroutineScope(Dispatchers.IO).launch {
+            runCatching { services.garminExt.ensureSession() }
+            runCatching { services.withings.renewSession() }
+        }
     }
 }

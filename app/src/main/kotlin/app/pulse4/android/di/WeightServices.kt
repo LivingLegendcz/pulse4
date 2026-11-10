@@ -261,18 +261,24 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
 
     /** Prodlouží existující webovou relaci Withings nebo provede automatické znovupřihlášení. */
     fun renewSession(): Boolean {
-        val s = loadWebSession() ?: return tryAutoReLogin()
-        val extended = runCatching { webClient.extendSession(s.cookies, s.sessionToken) }.getOrNull()
-        if (extended != null) {
-            val updated = s.copy(
-                sessionToken = extended.sessionToken ?: s.sessionToken,
-                cookies = extended.cookies,
-                lastExtendedMs = System.currentTimeMillis()
-            )
-            saveWebSession(updated)
-            return true
+        val s = loadWebSession()
+        if (s != null && s.isConnected()) {
+            val extended = runCatching { webClient.extendSession(s.cookies, s.sessionToken) }.getOrNull()
+            if (extended != null) {
+                val updated = s.copy(
+                    sessionToken = extended.sessionToken ?: s.sessionToken,
+                    cookies = extended.cookies,
+                    lastExtendedMs = System.currentTimeMillis()
+                )
+                saveWebSession(updated)
+                return true
+            }
+            return tryAutoReLogin()
         }
-        return tryAutoReLogin()
+        if (session.isConnected()) {
+            return runCatching { session.accessToken(); true }.getOrDefault(false)
+        }
+        return false
     }
 
     /** Dokončí přihlášení vybraných profilů a spustí počáteční import */

@@ -112,13 +112,72 @@ class MainActivity : ComponentActivity() {
             sl.secrets.putString(app.pulse4.android.security.SecretStore.GARMIN_API_KEY, key.trim())
             sl.secrets.putString(app.pulse4.android.security.SecretStore.GARMIN_API_KEY_EXPIRES, (System.currentTimeMillis() + 365L * 86_400_000L).toString())
         }
-        intent?.getStringExtra("set_gateway")?.let { host ->
+        intent?.getStringExtra("set_gateway")?.let { hostRaw ->
             CoroutineScope(Dispatchers.IO).launch {
                 try {
-                    sl.settings.gatewayHost = host.trim()
-                    android.util.Log.i("Pulse4", "Gateway set to $host")
+                    val raw = hostRaw.trim()
+                    if (raw.contains(":")) {
+                        val parts = raw.split(":")
+                        sl.settings.gatewayHost = parts[0].trim()
+                        parts[1].trim().toIntOrNull()?.let { sl.settings.gatewayPort = it }
+                    } else {
+                        sl.settings.gatewayHost = raw
+                    }
+                    sl.bridge.applyPropagationNode()
+                    android.util.Log.i("Pulse4", "Gateway set to ${sl.settings.gatewayHost}:${sl.settings.gatewayPort}")
                 } catch (e: Exception) {
                     android.util.Log.e("Pulse4", "Failed to set gateway", e)
+                }
+            }
+        }
+        intent?.getStringExtra("add_peer_endpoint")?.let { ep ->
+            val parts = ep.split("=")
+            if (parts.size == 2) {
+                sl.bridge.registerLocalPeer(parts[0].trim(), parts[1].trim())
+                android.util.Log.i("Pulse4", "Registered local peer: ${parts[0]} -> ${parts[1]}")
+            }
+        }
+        if (intent?.getBooleanExtra("clear_peer_endpoints", false) == true) {
+            sl.bridge.clearLocalPeers()
+        }
+        if (intent?.getBooleanExtra("send_test_message", false) == true) {
+            val to = intent.getStringExtra("to_hash").orEmpty()
+            val text = intent.getStringExtra("msg_text") ?: "P2P TEST"
+            val forceGateway = intent.getBooleanExtra("force_gateway", false)
+            CoroutineScope(Dispatchers.IO).launch {
+                try {
+                    sl.transport.forceGateway = forceGateway
+                    val selfHash = sl.bridge.ensureStarted().deliveryHash
+                    val nowMs = System.currentTimeMillis()
+                    val mb = app.pulse4.sync.MessageBuilder(selfHash)
+                    val msg = mb.build(
+                        recipient = to,
+                        kind = app.pulse4.sync.Kinds.PROJECTION_UPSERT,
+                        objectType = "daily",
+                        objectId = "test-$nowMs",
+                        objectVersion = 1L,
+                        payload = """{"ownerId":"${sl.settings.displayName}","d":"$text"}""",
+                        nowMs = nowMs
+                    )
+                    val wire = app.pulse4.sync.Wire.encode(msg)
+                    sl.outbox.enqueue(
+                        app.pulse4.sync.OutboxItem(
+                            eventId = msg.envelope.eventId,
+                            recipient = to,
+                            kind = msg.envelope.kind,
+                            objectType = msg.envelope.objectType,
+                            objectId = msg.envelope.objectId,
+                            objectVersion = msg.envelope.objectVersion,
+                            grantId = null,
+                            wire = wire,
+                            createdAtMs = nowMs
+                        )
+                    )
+                    android.util.Log.i("Pulse4Sync", "ENQUEUED test message ${msg.envelope.eventId} to $to: $text")
+                    val stats = sl.transport.pump(System.currentTimeMillis(), 5000L)
+                    android.util.Log.i("Pulse4Sync", "PUMP STATS: $stats")
+                } catch (e: Throwable) {
+                    android.util.Log.e("Pulse4Sync", "Failed to send test message", e)
                 }
             }
         }
@@ -332,7 +391,7 @@ class MainActivity : ComponentActivity() {
                         sl.settings.displayName
                     )
                     val json = app.pulse4.sync.Pairing.encode(p)
-                    android.util.Log.i("Pulse4Pairing", "PAIRING_PAYLOAD:$json")
+                    android.util.Log.i("Pulse4Pairing", "PAIRING_PAYLOAD:$json, port=${info.localPort}")
                 } catch (e: Throwable) {
                     android.util.Log.e("Pulse4Pairing", "Failed to dump pairing", e)
                 }

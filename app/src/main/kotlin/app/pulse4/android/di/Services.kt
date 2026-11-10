@@ -73,6 +73,8 @@ class ServiceLocator(private val context: Context) {
                 db.areaStates().put(AreaStateRow("withings.WEIGHT", prevW?.cursorMs, nowMs, nowMs, null, null))
                 app.pulse4.sync.HandlerResult.Applied
             })
+        }.also { t ->
+            bridge.onEventReceived = { ev -> t.processEvent(ev) }
         }
     }
     val garminExt by lazy { ExtendedGarminApi(context, secrets) }

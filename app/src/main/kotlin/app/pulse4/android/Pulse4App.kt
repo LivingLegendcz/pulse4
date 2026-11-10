@@ -27,5 +27,13 @@ class Pulse4App : Application() {
             runCatching { services.garminExt.ensureSession() }
             runCatching { services.withings.renewSession() }
         }
+
+        // Inicializace P2P mostu a transportu (připojení k lokální síti i Reticulum bráně)
+        CoroutineScope(Dispatchers.IO).launch {
+            runCatching {
+                services.bridge.ensureStarted()
+                services.transport
+            }
+        }
     }
 }

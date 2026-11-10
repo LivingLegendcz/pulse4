@@ -223,6 +223,8 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
             val child = existing?.childUserId?.let { cid -> r.profiles.firstOrNull { it.id == cid } }
             val em = emailFallback?.trim() ?: directAuth.pendingEmail ?: existing?.email
             if (em != null) sl.secrets.putString("withings.web.email", em)
+            val pass = directAuth.pendingPassword ?: sl.secrets.getString("withings.web.password")
+            if (!pass.isNullOrBlank()) sl.secrets.putString("withings.web.password", pass)
             completeWebLogin(
                 cookies = r.session.cookies,
                 primary = primary,

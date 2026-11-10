@@ -111,6 +111,8 @@ class WithingsDirectAuth(
 
     @Volatile var pendingEmail: String? = null
         private set
+    @Volatile var pendingPassword: String? = null
+        private set
     @Volatile var isAwaitingCode: Boolean = false
         private set
 
@@ -253,6 +255,7 @@ class WithingsDirectAuth(
         cookieJar.clear()
         val em = email.trim()
         pendingEmail = em
+        pendingPassword = password
 
         return try {
             val loginUrl = "https://account.withings.com/new_workflow/login?r=https%3A%2F%2Fapp.withings.com%2F"

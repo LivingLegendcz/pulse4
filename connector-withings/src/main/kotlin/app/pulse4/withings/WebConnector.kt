@@ -373,16 +373,14 @@ class WithingsWebClient(
             "apppfm" to config.appPfm,
             "appliver" to config.appLiver,
         )
-        val token = explicitToken?.takeIf { it.isNotBlank() }
+        val sid = explicitToken?.takeIf { it.isNotBlank() }
+            ?: extractCookieValue(cookies, "sessionid")
             ?: extractCookieValue(cookies, "session_token")
             ?: extractCookieValue(cookies, "session_key")
-        if (!token.isNullOrBlank()) {
-            map["session_token"] = token
-        } else {
-            val sid = extractCookieValue(cookies, "sessionid")
-            if (!sid.isNullOrBlank()) {
-                map["sessionid"] = sid
-            }
+
+        if (!sid.isNullOrBlank()) {
+            map["sessionid"] = sid
+            map["session_token"] = sid
         }
         return map
     }

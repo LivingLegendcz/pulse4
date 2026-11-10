@@ -1786,7 +1786,7 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                         }
                     }
                 } else {
-                    AccountCard("Přihlášení Withings účtem", "Na pozadí · Google / Apple / Heslo") {
+                    AccountCard("Přihlášení Withings účtem", "E-mail a heslo · Trvalé šifrované spojení") {
                         WithingsNativeLoginForm(
                             sl = sl,
                             onLoggedIn = { res ->

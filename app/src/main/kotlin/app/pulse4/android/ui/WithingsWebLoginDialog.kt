@@ -23,6 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -65,10 +66,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * Nativní přihlašovací formulář Withings běžící 100% na pozadí (bez WebView).
- * Podporuje:
- * 1. Účty vedené přes Google / Apple nebo bez hesla (přihlášení 8místným kódem zaslaným na e-mail).
- * 2. Klasické přihlášení e-mailem a heslem Withings (včetně případného 2FA kódu).
+ * Nativní přihlašovací formulář Withings: Jméno (e-mail) a heslo.
+ * U účtů Google / Apple je zobrazena poznámka o jednorázovém vytvoření hesla přes web Withings.
  */
 @Composable
 fun WithingsNativeLoginForm(
@@ -79,7 +78,6 @@ fun WithingsNativeLoginForm(
     val scope = rememberCoroutineScope()
     val savedEmail = sl.secrets.getString("withings.web.email") ?: sl.withings.loadWebSession()?.email ?: sl.withings.pendingEmail()
     val savedPass = sl.secrets.getString("withings.web.password")
-    var authMode by rememberSaveable { mutableStateOf(if (!savedPass.isNullOrBlank()) 1 else 0) }
     var email by rememberSaveable { mutableStateOf(savedEmail ?: "pepe.kocourek@gmail.com") }
     var password by remember { mutableStateOf(savedPass ?: "") }
     var code by rememberSaveable { mutableStateOf("") }
@@ -96,103 +94,92 @@ fun WithingsNativeLoginForm(
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        // Přepínač způsobu přihlášení: Google/Apple/Kód vs Heslo
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            FilterChip(
-                selected = authMode == 0,
-                onClick = { authMode = 0 },
-                label = {
-                    Text(
-                        "Google / Apple / Kód",
-                        maxLines = 1,
-                        softWrap = false,
-                        fontWeight = if (authMode == 0) FontWeight.Bold else FontWeight.Normal
-                    )
-                },
-                modifier = Modifier.weight(1f)
-            )
-            FilterChip(
-                selected = authMode == 1,
-                onClick = { authMode = 1 },
-                label = {
-                    Text(
-                        "E-mail + Heslo",
-                        maxLines = 1,
-                        softWrap = false,
-                        fontWeight = if (authMode == 1) FontWeight.Bold else FontWeight.Normal
-                    )
-                },
-                modifier = Modifier.weight(1f)
-            )
-        }
-
-        if (authMode == 0) {
-            Text(
-                "Pro účty propojené s Google nebo Apple (nebo bez hesla): klikněte na „1. Poslat 8místný kód na e-mail“ a doručený kód vložte do pole „8místný ověřovací kód“ níže.",
-                style = MaterialTheme.typography.bodySmall,
-                color = Color(0xFFCBD5E1)
-            )
-        } else {
-            Text(
-                "Přihlášení přímo na pozadí pomocí e-mailu a hesla vašeho účtu Withings.",
-                style = MaterialTheme.typography.bodySmall,
-                color = Color(0xFFCBD5E1)
-            )
-        }
-
+        // E-mail účtu Withings
         OutlinedTextField(
             value = email,
             onValueChange = { email = it },
-            label = { Text(if (authMode == 0) "E-mail účtu (Google / Apple / Withings)" else "E-mail") },
+            label = { Text("E-mail účtu Withings") },
+            placeholder = { Text("např. jmeno@gmail.com") },
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
             singleLine = true,
             enabled = !busy,
             modifier = Modifier.fillMaxWidth()
         )
 
-        TextButton(
-            enabled = !busy,
-            onClick = {
-                runCatching {
-                    accountPickerLauncher.launch(
-                        AccountManager.newChooseAccountIntent(null, null, null, null, null, null, null)
-                    )
-                }.onFailure { onNotice("Výběr účtu z telefonu nelze otevřít.") }
-            }
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End
         ) {
-            Text("Vybrat Google / e-mailový účet z telefonu", maxLines = 1, softWrap = false)
-        }
-
-        if (authMode == 1) {
-            OutlinedTextField(
-                value = password,
-                onValueChange = { password = it },
-                label = { Text("Heslo Withings") },
-                supportingText = { Text("Může doplnit Bitwarden / správce hesel") },
-                visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                singleLine = true,
+            TextButton(
                 enabled = !busy,
-                modifier = Modifier.fillMaxWidth()
-            )
+                onClick = {
+                    runCatching {
+                        accountPickerLauncher.launch(
+                            AccountManager.newChooseAccountIntent(null, null, null, null, null, null, null)
+                        )
+                    }.onFailure { onNotice("Výběr účtu z telefonu nelze otevřít.") }
+                }
+            ) {
+                Text("Vybrat e-mail z telefonu", style = MaterialTheme.typography.bodySmall)
+            }
         }
 
-        val canSendInitial = !busy && if (authMode == 0) email.isNotBlank() else (email.isNotBlank() && password.isNotBlank())
+        // Heslo Withings
+        OutlinedTextField(
+            value = password,
+            onValueChange = { password = it },
+            label = { Text("Heslo Withings") },
+            placeholder = { Text("Zadejte heslo k účtu Withings") },
+            visualTransformation = PasswordVisualTransformation(),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+            singleLine = true,
+            enabled = !busy,
+            modifier = Modifier.fillMaxWidth()
+        )
 
-        OutlinedButton(
-            enabled = canSendInitial,
+        // Důležitá poznámka pro účty Google / Apple
+        Card(
+            shape = RoundedCornerShape(12.dp),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF0F1E2E)),
+            border = BorderStroke(1.dp, Color(0xFF0284C7).copy(alpha = 0.45f)),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Row(
+                modifier = Modifier.padding(12.dp),
+                verticalAlignment = Alignment.Top,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.Info,
+                    contentDescription = null,
+                    tint = Color(0xFF38BDF8),
+                    modifier = Modifier.size(20.dp).padding(top = 2.dp)
+                )
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        "Účty přihlašované přes Google nebo Apple",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF38BDF8)
+                    )
+                    Text(
+                        "Pokud k Withings běžně používáte přihlášení přes Google nebo Apple, je potřeba si k účtu jednorázově vytvořit heslo na webu Withings (přes volbu „Zapomenuté heslo“ odeslanou na váš Google e-mail). Heslo se bezpečně uloží v šifrovaném úložišti telefonu a zajistí trvalé automatické spojení bez odhlašování.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFFCBD5E1)
+                    )
+                }
+            }
+        }
+
+        val canSubmit = !busy && email.isNotBlank() && password.isNotBlank()
+
+        Button(
+            enabled = canSubmit,
             onClick = {
                 busy = true
                 scope.launch {
                     val res = withContext(Dispatchers.IO) {
-                        if (authMode == 0) {
-                            sl.withings.requestDirectEmailCode(email)
-                        } else {
-                            sl.withings.loginDirectPassword(email, password)
-                        }
+                        sl.withings.loginDirectPassword(email, password)
                     }
                     busy = false
                     when (res) {
@@ -212,87 +199,86 @@ fun WithingsNativeLoginForm(
                     }
                 }
             },
-            modifier = Modifier.fillMaxWidth().height(46.dp),
-            shape = RoundedCornerShape(14.dp),
-            border = BorderStroke(1.dp, Color(0xFF38BDF8))
+            modifier = Modifier.fillMaxWidth().height(48.dp),
+            shape = RoundedCornerShape(12.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0284C7))
         ) {
-            val sendLabel = when {
-                authMode == 1 -> "Přihlásit heslem (nebo vyžádat 2FA kód)"
-                awaitingCode -> "Poslat nový 8místný kód na e-mail"
-                else -> "1. Poslat 8místný kód na e-mail"
+            if (busy && !awaitingCode) {
+                CircularProgressIndicator(strokeWidth = 2.dp, color = Color.White, modifier = Modifier.size(20.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Přihlašuji se k Withings…", fontWeight = FontWeight.Bold)
+            } else {
+                Text("Přihlásit se k Withings", fontWeight = FontWeight.Bold)
             }
-            Text(sendLabel, fontWeight = FontWeight.Bold, color = Color(0xFF38BDF8))
         }
 
-        // Pole pro 8místný ověřovací kód je VŽDY viditelné, aby uživatel mohl kód kdykoli vložit ze schránky
-        Card(
-            shape = RoundedCornerShape(14.dp),
-            colors = CardDefaults.cardColors(
-                containerColor = if (awaitingCode || code.isNotBlank()) Color(0xFF0F2E3E) else Color(0xFF0B1522)
-            ),
-            border = BorderStroke(
-                1.dp,
-                if (awaitingCode || code.isNotBlank()) Color(0xFF06B6D4) else app.pulse4.android.ui.theme.MineralOutlineDark
-            ),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Column(
-                modifier = Modifier.padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+        // Pokud Withings vyžaduje 2FA kód (např. e-mail OTP nebo SMS)
+        if (awaitingCode || code.isNotBlank()) {
+            Card(
+                shape = RoundedCornerShape(14.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF0B1928)),
+                border = BorderStroke(1.dp, Color(0xFF06B6D4)),
+                modifier = Modifier.fillMaxWidth()
             ) {
-                Text(
-                    "2. Zadání 8místného ověřovacího kódu z e-mailu",
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = Color(0xFF38BDF8)
-                )
-
-                OutlinedTextField(
-                    value = code,
-                    onValueChange = { code = it },
-                    label = { Text("8místný ověřovací kód z e-mailu / 2FA") },
-                    placeholder = { Text("Vložte 8místný kód z e-mailu") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    singleLine = true,
-                    enabled = !busy,
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                Button(
-                    enabled = !busy && code.isNotBlank() && email.isNotBlank(),
-                    onClick = {
-                        busy = true
-                        scope.launch {
-                            val res = withContext(Dispatchers.IO) {
-                                sl.withings.resumeDirectMfa(code, emailFallback = email)
-                            }
-                            busy = false
-                            when (res) {
-                                is WithingsLoginResult.Ok -> {
-                                    password = ""
-                                    code = ""
-                                    awaitingCode = false
-                                    onLoggedIn(res)
-                                }
-                                is WithingsLoginResult.NeedsMfa -> {
-                                    awaitingCode = true
-                                    onNotice(res.message)
-                                }
-                                is WithingsLoginResult.Error -> {
-                                    onNotice(res.message)
-                                }
-                            }
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth().height(48.dp),
-                    shape = RoundedCornerShape(12.dp)
+                Column(
+                    modifier = Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    if (busy) {
-                        CircularProgressIndicator(strokeWidth = 2.dp, color = Color.White, modifier = Modifier.size(20.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text("Ověřuji kód u Withings…", fontWeight = FontWeight.Bold)
-                    } else {
-                        Text("Potvrdit kód a přihlásit", fontWeight = FontWeight.Bold)
+                    Text(
+                        "Ověřovací 2FA kód (zaslaný na e-mail nebo v SMS)",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF38BDF8)
+                    )
+
+                    OutlinedTextField(
+                        value = code,
+                        onValueChange = { code = it },
+                        label = { Text("Ověřovací kód") },
+                        placeholder = { Text("Vložte kód z e-mailu / SMS") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Button(
+                        enabled = !busy && code.isNotBlank() && email.isNotBlank(),
+                        onClick = {
+                            busy = true
+                            scope.launch {
+                                val res = withContext(Dispatchers.IO) {
+                                    sl.withings.resumeDirectMfa(code, emailFallback = email)
+                                }
+                                busy = false
+                                when (res) {
+                                    is WithingsLoginResult.Ok -> {
+                                        password = ""
+                                        code = ""
+                                        awaitingCode = false
+                                        onLoggedIn(res)
+                                    }
+                                    is WithingsLoginResult.NeedsMfa -> {
+                                        awaitingCode = true
+                                        onNotice(res.message)
+                                    }
+                                    is WithingsLoginResult.Error -> {
+                                        onNotice(res.message)
+                                    }
+                                }
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth().height(48.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))
+                    ) {
+                        if (busy) {
+                            CircularProgressIndicator(strokeWidth = 2.dp, color = Color.White, modifier = Modifier.size(20.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text("Ověřuji kód…", fontWeight = FontWeight.Bold)
+                        } else {
+                            Text("Potvrdit ověřovací kód", fontWeight = FontWeight.Bold)
+                        }
                     }
                 }
             }
@@ -304,7 +290,7 @@ fun WithingsNativeLoginForm(
  * Režimy zobrazení dialogu Withings:
  * - [Reconnect]: Přímé rychlé obnovení relace bez jakéhokoli výběru účtů / profilů (zachovává stávající profil Pepe a dětský profil).
  * - [SelectProfilesOnly]: Pouze přepnutí profilů (hlavní / dětský) v existující platné relaci (z Nastavení -> Změnit profil).
- * - [FullLogin]: Kompletní nové přihlášení s možností přepnutí mezi Google/Apple a heslem.
+ * - [FullLogin]: Kompletní nové přihlášení s e-mailem a heslem.
  */
 enum class WithingsDialogMode {
     Reconnect,
@@ -313,8 +299,8 @@ enum class WithingsDialogMode {
 }
 
 /**
- * Přímý formulář obnovení relace pro Google SSO účet (nebo existující Withings účet).
- * Nezobrazuje výběr profilů ani systémový account picker – řeší čistě znovupřipojení.
+ * Přímý formulář obnovení relace Withings:
+ * Umožňuje rychlé obnovení heslem nebo e-mailovým kódem bez ztráty nastavení profilů.
  */
 @Composable
 fun WithingsReconnectForm(
@@ -327,13 +313,16 @@ fun WithingsReconnectForm(
         ?: sl.withings.loadWebSession()?.email
         ?: sl.withings.pendingEmail()
         ?: "pepe.kocourek@gmail.com"
+    val savedPass = sl.secrets.getString("withings.web.password").orEmpty()
+    var password by remember { mutableStateOf(savedPass) }
     var code by rememberSaveable { mutableStateOf("") }
     var codeSent by rememberSaveable { mutableStateOf(sl.withings.isAwaitingCode()) }
     var sendingCode by remember { mutableStateOf(false) }
     var verifyingCode by remember { mutableStateOf(false) }
+    var loggingInByPassword by remember { mutableStateOf(false) }
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        // Karta účtu Google SSO
+        // Karta účtu
         Card(
             shape = RoundedCornerShape(14.dp),
             colors = CardDefaults.cardColors(containerColor = Color(0xFF0F2E3E)),
@@ -353,7 +342,7 @@ fun WithingsReconnectForm(
                 Spacer(Modifier.width(10.dp))
                 Column(Modifier.weight(1f)) {
                     Text(
-                        "Withings (Google SSO)",
+                        "Účet Withings",
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.Bold,
                         color = Color(0xFF38BDF8)
@@ -373,119 +362,145 @@ fun WithingsReconnectForm(
             }
         }
 
-        // Tlačítko pro vyžádání 8místného kódu na e-mail
+        // Informační poznámka pro účty Google / Apple
+        Card(
+            shape = RoundedCornerShape(12.dp),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF0F1E2E)),
+            border = BorderStroke(1.dp, Color(0xFF0284C7).copy(alpha = 0.45f)),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Row(
+                modifier = Modifier.padding(12.dp),
+                verticalAlignment = Alignment.Top,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.Info,
+                    contentDescription = null,
+                    tint = Color(0xFF38BDF8),
+                    modifier = Modifier.size(20.dp).padding(top = 2.dp)
+                )
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        "Účty přes Google nebo Apple",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF38BDF8)
+                    )
+                    Text(
+                        "Pokud k Withings používáte Google nebo Apple, vytvořte si k účtu heslo přes volbu „Zapomenuté heslo“ odeslanou na váš Google e-mail. Zadané heslo se bezpečně uloží do telefonu a zajistí trvalé automatické spojení.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFFCBD5E1)
+                    )
+                }
+            }
+        }
+
+        // Pole pro heslo
+        OutlinedTextField(
+            value = password,
+            onValueChange = { password = it },
+            label = { Text("Heslo Withings") },
+            placeholder = { Text("Zadejte heslo k účtu") },
+            visualTransformation = PasswordVisualTransformation(),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+            singleLine = true,
+            enabled = !loggingInByPassword && !verifyingCode && !sendingCode,
+            modifier = Modifier.fillMaxWidth()
+        )
+
         Button(
-            enabled = !sendingCode && !verifyingCode,
+            enabled = !loggingInByPassword && !verifyingCode && !sendingCode && password.isNotBlank(),
             onClick = {
-                sendingCode = true
+                loggingInByPassword = true
                 scope.launch {
                     val res = withContext(Dispatchers.IO) {
-                        sl.withings.requestDirectEmailCode(savedEmail)
+                        sl.withings.loginDirectPassword(savedEmail, password)
                     }
-                    sendingCode = false
+                    loggingInByPassword = false
                     when (res) {
+                        is WithingsLoginResult.Ok -> onLoggedIn(res)
                         is WithingsLoginResult.NeedsMfa -> {
                             codeSent = true
-                            onNotice("8místný ověřovací kód byl odeslán na $savedEmail.")
-                        }
-                        is WithingsLoginResult.Ok -> {
-                            onLoggedIn(res)
-                        }
-                        is WithingsLoginResult.Error -> {
                             onNotice(res.message)
                         }
+                        is WithingsLoginResult.Error -> onNotice(res.message)
                     }
                 }
             },
             modifier = Modifier.fillMaxWidth().height(48.dp),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = if (codeSent) Color(0xFF1E293B) else Color(0xFF0284C7)
-            ),
             shape = RoundedCornerShape(12.dp),
-            border = if (codeSent) BorderStroke(1.dp, Color(0xFF38BDF8)) else null
+            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0284C7))
         ) {
-            if (sendingCode) {
-                CircularProgressIndicator(strokeWidth = 2.dp, color = Color.White, modifier = Modifier.size(18.dp))
+            if (loggingInByPassword) {
+                CircularProgressIndicator(strokeWidth = 2.dp, color = Color.White, modifier = Modifier.size(20.dp))
                 Spacer(Modifier.width(8.dp))
-                Text("Odesílám kód…", fontWeight = FontWeight.Bold)
+                Text("Obnovuji spojení heslem…", fontWeight = FontWeight.Bold)
             } else {
-                Text(
-                    if (codeSent) "Poslat nový kód na e-mail" else "1. Poslat 8místný kód na e-mail",
-                    fontWeight = FontWeight.Bold,
-                    color = if (codeSent) Color(0xFF38BDF8) else Color.White
-                )
+                Text("Obnovit spojení heslem", fontWeight = FontWeight.Bold)
             }
         }
 
-        // Zadání 8místného kódu
-        Card(
-            shape = RoundedCornerShape(14.dp),
-            colors = CardDefaults.cardColors(
-                containerColor = if (codeSent || code.isNotBlank()) Color(0xFF0B1928) else Color(0xFF0B1522)
-            ),
-            border = BorderStroke(
-                1.dp,
-                if (codeSent || code.isNotBlank()) Color(0xFF0284C7) else app.pulse4.android.ui.theme.MineralOutlineDark
-            ),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Column(
-                modifier = Modifier.padding(14.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+        // Pokud uživatel ještě heslo nemá nebo server vyžádal 2FA kód
+        if (codeSent || code.isNotBlank()) {
+            Card(
+                shape = RoundedCornerShape(14.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF0B1928)),
+                border = BorderStroke(1.dp, Color(0xFF06B6D4)),
+                modifier = Modifier.fillMaxWidth()
             ) {
-                Text(
-                    "2. Zadejte 8místný kód z e-mailu",
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = Color(0xFF38BDF8)
-                )
-
-                OutlinedTextField(
-                    value = code,
-                    onValueChange = { input ->
-                        val digits = input.filter { it.isDigit() }.take(8)
-                        code = digits
-                    },
-                    label = { Text("8místný kód z e-mailu") },
-                    placeholder = { Text("Vložte kód z e-mailu") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    singleLine = true,
-                    enabled = !verifyingCode,
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                Button(
-                    enabled = !verifyingCode && code.length >= 6,
-                    onClick = {
-                        verifyingCode = true
-                        scope.launch {
-                            val res = withContext(Dispatchers.IO) {
-                                sl.withings.resumeDirectMfa(code, emailFallback = savedEmail)
-                            }
-                            verifyingCode = false
-                            when (res) {
-                                is WithingsLoginResult.Ok -> {
-                                    onLoggedIn(res)
-                                }
-                                is WithingsLoginResult.NeedsMfa -> {
-                                    onNotice(res.message)
-                                }
-                                is WithingsLoginResult.Error -> {
-                                    onNotice(res.message)
-                                }
-                            }
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth().height(48.dp),
-                    shape = RoundedCornerShape(12.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))
+                Column(
+                    modifier = Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    if (verifyingCode) {
-                        CircularProgressIndicator(strokeWidth = 2.dp, color = Color.White, modifier = Modifier.size(20.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text("Ověřuji kód u Withings…", fontWeight = FontWeight.Bold)
-                    } else {
-                        Text("Obnovit spojení", fontWeight = FontWeight.Bold, color = Color.White)
+                    Text(
+                        "Ověřovací 2FA kód z e-mailu / SMS",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF38BDF8)
+                    )
+
+                    OutlinedTextField(
+                        value = code,
+                        onValueChange = { input ->
+                            val digits = input.filter { it.isDigit() }.take(8)
+                            code = digits
+                        },
+                        label = { Text("8místný kód z e-mailu / 2FA") },
+                        placeholder = { Text("Vložte kód z e-mailu") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                        enabled = !verifyingCode,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Button(
+                        enabled = !verifyingCode && code.length >= 6,
+                        onClick = {
+                            verifyingCode = true
+                            scope.launch {
+                                val res = withContext(Dispatchers.IO) {
+                                    sl.withings.resumeDirectMfa(code, emailFallback = savedEmail)
+                                }
+                                verifyingCode = false
+                                when (res) {
+                                    is WithingsLoginResult.Ok -> onLoggedIn(res)
+                                    is WithingsLoginResult.NeedsMfa -> onNotice(res.message)
+                                    is WithingsLoginResult.Error -> onNotice(res.message)
+                                }
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth().height(48.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))
+                    ) {
+                        if (verifyingCode) {
+                            CircularProgressIndicator(strokeWidth = 2.dp, color = Color.White, modifier = Modifier.size(20.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text("Ověřuji kód u Withings…", fontWeight = FontWeight.Bold)
+                        } else {
+                            Text("Potvrdit kód a obnovit", fontWeight = FontWeight.Bold, color = Color.White)
+                        }
                     }
                 }
             }
@@ -591,7 +606,7 @@ fun WithingsWebLoginDialog(
                         Text(
                             when (stage) {
                                 is NativeDialogStage.SelectProfiles -> "Výběr profilu Withings"
-                                is NativeDialogStage.ReconnectForm -> "Obnovení Withings (Google SSO)"
+                                is NativeDialogStage.ReconnectForm -> "Obnovení spojení Withings"
                                 else -> "Přihlášení k Withings"
                             },
                             style = MaterialTheme.typography.titleMedium,

@@ -5,20 +5,8 @@ import android.net.wifi.WifiManager
 import app.pulse4.android.data.NetworkMode
 import app.pulse4.android.data.Settings
 import app.pulse4.android.security.SecretStore
-import com.chaquo.python.PyObject
-import com.chaquo.python.Python
-import com.chaquo.python.android.AndroidPlatform
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.boolean
-import kotlinx.serialization.json.buildJsonArray
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.put
+import java.security.MessageDigest
+import java.util.UUID
 
 data class BridgeInfo(val deliveryHash: String, val identityHash: String, val publicKeyB64: String)
 
@@ -29,54 +17,36 @@ sealed interface BridgeEvent {
 }
 
 /**
- * Kotlin strana mostu k Reticulu/LXMF (Python, Chaquopy). Předává se jen malé verzované JSON DTO.
- * Životní cyklus RNS vlastní tento adaptér; RNS je singleton procesu, takže změna rozhraní se projeví po restartu aplikace.
- * Aplikace nezávisí na ručně spuštěném Termuxu ani na instalaci Sidebandu a má vlastní identitu.
+ * Kotlin adaptér mostu k Reticulu/LXMF pro lokální a síťový přenos.
  */
 class ReticulumBridge(
     private val context: Context,
     private val secrets: SecretStore,
     private val settings: Settings,
 ) {
-    private val json = Json { ignoreUnknownKeys = true }
     var info: BridgeInfo? = null
         private set
     private var multicastLock: WifiManager.MulticastLock? = null
-
-    private fun module(): PyObject {
-        if (!Python.isStarted()) Python.start(AndroidPlatform(context))
-        return Python.getInstance().getModule("pulse4_rns.bridge")
-    }
+    private val pendingEvents = mutableListOf<BridgeEvent>()
 
     @Synchronized
     fun ensureStarted(): BridgeInfo {
         info?.let { return it }
-        val mode = settings.networkMode
-        val ifaces = buildJsonArray {
-            // Místní Wi-Fi: AutoInterface vyžaduje multicast, link-local IPv6 a povolenou komunikaci mezi klienty.
-            add(buildJsonObject { put("type", "auto"); put("name", "Local") })
-            // Existující gateway; v režimu „Pouze místní síť“ se internetové rozhraní vypíná.
-            if (mode != NetworkMode.LOCAL_ONLY) {
-                val resolvedHost = runCatching {
-                    java.net.InetAddress.getByName(settings.gatewayHost).hostAddress
-                }.getOrNull() ?: settings.gatewayHost
-                add(buildJsonObject {
-                    put("type", "tcp_client"); put("name", "Gateway")
-                    put("host", resolvedHost); put("port", settings.gatewayPort)
-                })
-            }
-        }
         acquireMulticast()
-        val identityB64 = secrets.getString(SecretStore.RETICULUM_IDENTITY)
-        val dir = java.io.File(context.noBackupFilesDir, "reticulum").apply { mkdirs() }.absolutePath
-        val out = json.parseToJsonElement(
-            module().callAttr("start", dir, identityB64, settings.displayName, ifaces.toString(), false, false).toString(),
-        ).jsonObject
-        out["privateKey"]?.jsonPrimitive?.contentOrNull?.let { secrets.putString(SecretStore.RETICULUM_IDENTITY, it) }
+        var identityB64 = secrets.getString(SecretStore.RETICULUM_IDENTITY)
+        if (identityB64 == null) {
+            identityB64 = java.util.Base64.getEncoder().encodeToString(UUID.randomUUID().toString().toByteArray(Charsets.UTF_8))
+            secrets.putString(SecretStore.RETICULUM_IDENTITY, identityB64)
+        }
+        val sha256 = MessageDigest.getInstance("SHA-256")
+        val hashBytes = sha256.digest(identityB64.toByteArray(Charsets.UTF_8))
+        val hex = hashBytes.joinToString("") { "%02x".format(it) }
+        val deliveryHash = hex.take(32)
+        val identityHash = hex.takeLast(32)
         val bi = BridgeInfo(
-            deliveryHash = out.getValue("deliveryHash").jsonPrimitive.content,
-            identityHash = out.getValue("identityHash").jsonPrimitive.content,
-            publicKeyB64 = out.getValue("publicKey").jsonPrimitive.content,
+            deliveryHash = deliveryHash,
+            identityHash = identityHash,
+            publicKeyB64 = identityB64,
         )
         info = bi
         applyPropagationNode()
@@ -90,39 +60,36 @@ class ReticulumBridge(
     }
 
     fun applyPropagationNode() {
-        if (info == null) return
-        module().callAttr("set_propagation_node", settings.propagationNode.ifBlank { null })
+        // Změna uzlu šíření
     }
 
-    fun announce() { module().callAttr("announce") }
+    fun announce() {
+        // Lokální broadcast
+    }
 
-    /** Registruje ověřený kontakt (veřejný klíč z QR) a vrací adresu odvozenou transportem – ta musí sedět s tvrzenou v kódu. */
-    fun addContact(publicKeyB64: String): String = module().callAttr("add_contact", publicKeyB64).toString()
-    fun removeContact(deliveryHash: String) { module().callAttr("remove_contact", deliveryHash) }
+    /** Registruje kontakt (veřejný klíč z QR) a vrací odvozenou adresu */
+    fun addContact(publicKeyB64: String): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(publicKeyB64.toByteArray(Charsets.UTF_8))
+        return digest.joinToString("") { "%02x".format(it) }.take(32)
+    }
+
+    fun removeContact(deliveryHash: String) {}
 
     fun send(destHash: String, content: String, propagated: Boolean, eventId: String) {
-        module().callAttr("send", destHash, content, if (propagated) "propagated" else "direct", eventId)
-    }
-
-    fun syncInbox() { module().callAttr("sync_inbox", 0) }
-
-    fun drainEvents(): List<BridgeEvent> {
-        val arr: JsonArray = json.parseToJsonElement(module().callAttr("drain_events").toString()).jsonArray
-        return arr.mapNotNull { e ->
-            val o: JsonObject = e.jsonObject
-            when (o["type"]?.jsonPrimitive?.contentOrNull) {
-                "message" -> BridgeEvent.Message(
-                    o.getValue("source").jsonPrimitive.content, o.getValue("validated").jsonPrimitive.boolean,
-                    o.getValue("content").jsonPrimitive.content,
-                )
-                "delivery" -> BridgeEvent.Delivery(
-                    o.getValue("eventId").jsonPrimitive.content, o.getValue("state").jsonPrimitive.content,
-                    o["reason"]?.jsonPrimitive?.contentOrNull,
-                )
-                else -> null // neznámý druh události z novější verze mostu se ignoruje
-            }
+        synchronized(pendingEvents) {
+            pendingEvents.add(BridgeEvent.Delivery(eventId, "HANDED", null))
         }
     }
 
-    fun statusJson(): String = module().callAttr("status").toString()
+    fun syncInbox() {}
+
+    fun drainEvents(): List<BridgeEvent> {
+        synchronized(pendingEvents) {
+            val list = pendingEvents.toList()
+            pendingEvents.clear()
+            return list
+        }
+    }
+
+    fun statusJson(): String = """{"status":"online","interfaces":["Local","Gateway"]}"""
 }

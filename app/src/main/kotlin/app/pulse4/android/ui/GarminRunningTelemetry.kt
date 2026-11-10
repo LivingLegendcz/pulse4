@@ -4,6 +4,7 @@ package app.pulse4.android.ui
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -25,17 +26,14 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Assessment
-import androidx.compose.material.icons.outlined.CheckCircle
-import androidx.compose.material.icons.outlined.EmojiEvents
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Lightbulb
-import androidx.compose.material.icons.outlined.Scale
-import androidx.compose.material.icons.outlined.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -45,6 +43,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -53,12 +52,15 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.pulse4.analytics.BestEffort
 import app.pulse4.analytics.RunningDynamicsModel
+import app.pulse4.android.R
 import app.pulse4.android.ui.theme.MineralOutlineDark
 import app.pulse4.android.ui.theme.MineralSurfaceDark
 import app.pulse4.android.ui.theme.MineralSurfaceVariantDark
@@ -332,7 +334,7 @@ fun TelemetryInfoDialog(
 /**
  * Garmin styl: Vyváženost kontaktu se zemí L/P
  * Dvoubarevná lišta (Levá noha světle modrá #38BDF8 vs. Pravá noha zelená #34D399),
- * 50% středová ryska a odznak symetrie / asymetrie.
+ * 50% středová ryska a odznak symetrie / asymetrie (bez ikonek, s barevným bodem).
  */
 @Composable
 fun GarminGroundContactBalanceMeter(
@@ -343,34 +345,37 @@ fun GarminGroundContactBalanceMeter(
     val left = balanceLeftPct.coerceIn(35.0, 65.0)
     val right = 100.0 - left
     val diff = kotlin.math.abs(left - 50.0)
-    val (statusLabel, statusColor, statusIcon) = when {
-        diff <= 0.7 -> Triple("Symetrický došlap", Color(0xFF10B981), Icons.Outlined.CheckCircle)
-        diff <= 1.8 -> Triple("Mírná odchylka (${if (left > 50) "převažuje L" else "převažuje P"})", Color(0xFFF59E0B), Icons.Outlined.Warning)
-        else -> Triple("Asymetrie (${if (left > 50) "přetížení L" else "přetížení P"})", Color(0xFFEF4444), Icons.Outlined.Warning)
+    val (statusLabel, statusColor) = when {
+        diff <= 0.7 -> "Symetrický došlap" to Color(0xFF10B981)
+        diff <= 1.8 -> "Mírná odchylka (${if (left > 50) "převažuje L" else "převažuje P"})" to Color(0xFFF59E0B)
+        else -> "Asymetrie (${if (left > 50) "přetížení L" else "přetížení P"})" to Color(0xFFEF4444)
     }
 
     Card(
-        shape = RoundedCornerShape(14.dp),
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF1A2030)),
-        border = BorderStroke(1.dp, Color(0xFF2D3748)),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = Color(0xCC060C16)),
+        border = BorderStroke(
+            1.dp,
+            Brush.horizontalGradient(listOf(Color(0xFF38BDF8).copy(alpha = 0.45f), Color(0xFF34D399).copy(alpha = 0.45f)))
+        ),
         modifier = modifier.fillMaxWidth()
     ) {
-        Column(Modifier.padding(12.dp)) {
+        Column(Modifier.padding(14.dp)) {
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Outlined.Scale,
-                        contentDescription = null,
-                        tint = Color(0xFF38BDF8),
-                        modifier = Modifier.size(16.dp)
+                    Box(
+                        Modifier
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF38BDF8))
                     )
-                    Spacer(Modifier.width(6.dp))
+                    Spacer(Modifier.width(7.dp))
                     Text(
-                        "Vyváženost kontaktu se zemí",
+                        "Vyváženost kontaktu se zemí L / P",
                         style = MaterialTheme.typography.bodySmall,
                         fontWeight = FontWeight.Bold,
                         color = Color.White
@@ -380,23 +385,28 @@ fun GarminGroundContactBalanceMeter(
                         InfoBadgeButton(onClick = onInfoClick)
                     }
                 }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = statusIcon,
-                        contentDescription = null,
-                        tint = statusColor,
-                        modifier = Modifier.size(14.dp)
-                    )
-                    Spacer(Modifier.width(4.dp))
-                    Text(
-                        statusLabel,
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = statusColor
-                    )
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = statusColor.copy(alpha = 0.14f),
+                    border = BorderStroke(0.8.dp, statusColor.copy(alpha = 0.45f))
+                ) {
+                    Row(
+                        Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                    ) {
+                        Box(Modifier.size(6.dp).clip(CircleShape).background(statusColor))
+                        Text(
+                            statusLabel,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = statusColor,
+                            fontSize = 10.sp
+                        )
+                    }
                 }
             }
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(10.dp))
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -421,7 +431,7 @@ fun GarminGroundContactBalanceMeter(
                     .fillMaxWidth()
                     .height(10.dp)
                     .clip(RoundedCornerShape(5.dp))
-                    .background(Color(0xFF0F172A))
+                    .background(Color(0xFF0A111D))
             ) {
                 Row(Modifier.fillMaxSize()) {
                     Box(
@@ -451,11 +461,11 @@ fun GarminGroundContactBalanceMeter(
 }
 
 /**
- * Komplexní Garmin Training Effect karta ve stylu Garmin Connect a Firstbeat Analytics:
- * - 2D Matice tréninkového efektu (4 sloupce dole = Aerobní, 3 řádky vpravo = Anaerobní)
+ * Komplexní Garmin Training Effect karta ve stylu Oura Horizon & Firstbeat Analytics:
+ * - Atmosférické pozadí s fotografickou scénou a skleněnou 2D Maticí tréninkového efektu
  * - Svítící pulzující bod (Dot) lokalizující přesný dopad tréninku na kardiovaskulární systém
- * - Dva samostatné barevně segmentované ukazatele (Bary) pro Aerobní i Anaerobní efekt s ukazatelem (Dot)
- * - Detailní zpráva Firstbeat a souhrn zátěže (Training Load, Body Battery, Intenzivní minuty)
+ * - Dva samostatné barevně segmentované ukazatele (Bary) pro Aerobní i Anaerobní efekt
+ * - Skleněný dok zátěže (Training Load, Body Battery, Intenzivní minuty)
  */
 @Composable
 fun GarminTrainingEffectCard(
@@ -483,223 +493,269 @@ fun GarminTrainingEffectCard(
 
     Card(
         modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(20.dp),
-        border = BorderStroke(1.dp, MineralOutlineDark),
-        colors = CardDefaults.cardColors(containerColor = MineralSurfaceDark)
+        shape = RoundedCornerShape(24.dp),
+        border = BorderStroke(
+            1.2.dp,
+            Brush.horizontalGradient(
+                listOf(Color(0xFF38BDF8).copy(alpha = 0.55f), Color(0xFF10B981).copy(alpha = 0.45f), Color(0xFFA855F7).copy(alpha = 0.4f))
+            )
+        ),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF060B13))
     ) {
-        Column(Modifier.padding(16.dp)) {
-            // Záhlaví karty
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        Modifier
-                            .size(10.dp)
-                            .clip(CircleShape)
-                            .background(Color(0xFF38BDF8))
+        Box(Modifier.fillMaxWidth()) {
+            Image(
+                painter = painterResource(id = R.drawable.img_motif_body_battery),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .matchParentSize()
+                    .alpha(0.68f)
+            )
+            Canvas(Modifier.matchParentSize()) {
+                drawRect(
+                    brush = Brush.verticalGradient(
+                        0.0f to Color(0xB3050911),
+                        0.5f to Color(0xCC060B14),
+                        1.0f to Color(0xF2050911)
                     )
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        "GARMIN TRÉNINKOVÝ EFEKT",
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = Color(0xFF38BDF8),
-                        letterSpacing = 0.5.sp
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    InfoBadgeButton(onClick = { showInfo = true })
-                }
-                val effectTitle = formatTrainingEffectLabel(label)
-                Text(
-                    effectTitle,
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = Color(0xFF10B981),
-                    modifier = Modifier
-                        .background(Color(0xFF10B981).copy(alpha = 0.16f), RoundedCornerShape(8.dp))
-                        .padding(horizontal = 8.dp, vertical = 4.dp)
                 )
             }
-
-            Spacer(Modifier.height(14.dp))
-
-            // SEKCE 1: 2D MATICE TRÉNINKOVÉHO EFEKTU (4 bary dole × 3 bary vpravo)
-            Text(
-                "MATICE VLIVU NA VÝKONNOST (AEROBNÍ × ANAEROBNÍ)",
-                style = MaterialTheme.typography.labelSmall,
-                fontWeight = FontWeight.Bold,
-                color = Color(0xFF94A3B8)
-            )
-            Spacer(Modifier.height(8.dp))
-
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .height(165.dp)
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(Color(0xFF0F172A))
-                    .border(1.dp, Color(0xFF334155), RoundedCornerShape(14.dp))
-                    .padding(8.dp)
-            ) {
-                Canvas(Modifier.matchParentSize()) {
-                    val w = size.width
-                    val h = size.height
-
-                    // 4 sloupce (Aerobní: 1-2 Regenerace, 2-3 Základ, 3-4 Tempo, 4-5 Práh)
-                    val colW = w / 4f
-                    // 3 řádky (Anaerobní: 0-1 Žádný, 1-3 Udržování, 3-5 Kapacita/Rychlost)
-                    val rowH = h / 3f
-
-                    // Mřížka
-                    for (c in 0..4) {
-                        val gx = c * colW
-                        drawLine(Color(0xFF1E293B), Offset(gx, 0f), Offset(gx, h), strokeWidth = 1.2f)
+            Column(Modifier.padding(16.dp)) {
+                // Záhlaví karty
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            Modifier
+                                .size(9.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFF38BDF8))
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "GARMIN FIRSTBEAT · TRÉNINKOVÝ EFEKT",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color(0xFF38BDF8),
+                            letterSpacing = 0.8.sp
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        InfoBadgeButton(onClick = { showInfo = true })
                     }
-                    for (r in 0..3) {
-                        val gy = r * rowH
-                        drawLine(Color(0xFF1E293B), Offset(0f, gy), Offset(w, gy), strokeWidth = 1.2f)
-                    }
-
-                    // Zvýraznění aktivní buňky podkladu
-                    val activeCol = ((aeClamped - 1.0) / 1.0).toInt().coerceIn(0, 3)
-                    val activeRow = when {
-                        anClamped >= 3.0 -> 0 // Horní řádek = Kapacita
-                        anClamped >= 1.0 -> 1 // Prostřední = Udržování
-                        else -> 2             // Spodní = Bez anaerobního
-                    }
-                    val cellRect = Rect(
-                        activeCol * colW + 2f,
-                        activeRow * rowH + 2f,
-                        (activeCol + 1) * colW - 2f,
-                        (activeRow + 1) * rowH - 2f
-                    )
-                    drawRoundRect(
-                        Color(0xFF38BDF8).copy(alpha = 0.12f),
-                        Offset(cellRect.left, cellRect.top),
-                        Size(cellRect.width, cellRect.height),
-                        CornerRadius(6f, 6f)
-                    )
-
-                    // Souřadnice puntíku (Dot):
-                    // Osa X: Aerobní (1.0 = levý okraj, 5.0 = pravý okraj)
-                    val dotX = (((aeClamped - 1.0) / 4.0).coerceIn(0.04, 0.96) * w).toFloat()
-                    // Osa Y: Anaerobní (5.0 = horní okraj, 0.0 = spodní okraj)
-                    val dotY = ((1.0 - (anClamped / 5.0).coerceIn(0.04, 0.96)) * h).toFloat()
-
-                    // Neonová koróna
-                    drawCircle(
-                        Color(0xFF38BDF8).copy(alpha = 0.28f),
-                        radius = 16f,
-                        center = Offset(dotX, dotY)
-                    )
-                    // Vnější barevný prstenec
-                    drawCircle(
-                        Color(0xFF0284C7),
-                        radius = 9f,
-                        center = Offset(dotX, dotY)
-                    )
-                    // Vnitřní zářící bod
-                    drawCircle(
-                        Color(0xFF38BDF8),
-                        radius = 6f,
-                        center = Offset(dotX, dotY)
-                    )
-                    // Bílý střed puntíku
-                    drawCircle(
-                        Color.White,
-                        radius = 3.2f,
-                        center = Offset(dotX, dotY)
-                    )
-                }
-
-                // Popisky matice
-                Column(Modifier.matchParentSize(), verticalArrangement = Arrangement.SpaceBetween) {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("Anaerobní kapacita (3.0+)", style = MaterialTheme.typography.labelSmall, fontSize = 8.sp, color = Color(0xFFA855F7))
-                        Text("Sprint / VO2 Max", style = MaterialTheme.typography.labelSmall, fontSize = 8.sp, color = Color(0xFFF43F5E))
-                    }
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("Udržování anaerobní báze (1.0–2.9)", style = MaterialTheme.typography.labelSmall, fontSize = 8.sp, color = Color(0xFF64748B))
-                        Text("Laktátový práh", style = MaterialTheme.typography.labelSmall, fontSize = 8.sp, color = Color(0xFFF59E0B))
-                    }
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("Bez anaerobního efektu (<1.0)", style = MaterialTheme.typography.labelSmall, fontSize = 8.sp, color = Color(0xFF475569))
-                        Text("Dlouhý běh", style = MaterialTheme.typography.labelSmall, fontSize = 8.sp, color = Color(0xFF10B981))
+                    val effectTitle = formatTrainingEffectLabel(label)
+                    Surface(
+                        shape = RoundedCornerShape(50),
+                        color = Color(0xFF10B981).copy(alpha = 0.16f),
+                        border = BorderStroke(1.dp, Color(0xFF10B981).copy(alpha = 0.5f))
+                    ) {
+                        Text(
+                            effectTitle,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color(0xFF34D399),
+                            fontSize = 10.sp,
+                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 3.5.dp)
+                        )
                     }
                 }
-            }
 
-            // Osa X dole – 4 segmenty
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(top = 4.dp, bottom = 12.dp),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text("1.0 Regenerace", style = MaterialTheme.typography.labelSmall, fontSize = 9.sp, color = Color(0xFF38BDF8))
-                Text("2.0 Základ", style = MaterialTheme.typography.labelSmall, fontSize = 9.sp, color = Color(0xFF10B981))
-                Text("3.0 Tempo", style = MaterialTheme.typography.labelSmall, fontSize = 9.sp, color = Color(0xFFF59E0B))
-                Text("4.0–5.0 Práh", style = MaterialTheme.typography.labelSmall, fontSize = 9.sp, color = Color(0xFFEF4444))
-            }
+                Spacer(Modifier.height(14.dp))
 
-            // SEKCE 2: DVA SAMOSTATNÉ HORIZONTÁLNÍ BARY (AEROBNÍ & ANAEROBNÍ) S PUNTÍKEM
-            GarminSegmentedGaugeBar(
-                title = "Aerobní Training Effect",
-                score = aeClamped,
-                message = aerobicMsg ?: formatAerobicMessage(aeClamped),
-                primaryColor = Color(0xFF10B981)
-            )
+                // SEKCE 1: 2D MATICE TRÉNINKOVÉHO EFEKTU (4 bary dole × 3 bary vpravo)
+                Text(
+                    "2D MATICE VLIVU NA VÝKONNOST (AEROBNÍ × ANAEROBNÍ)",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFFCBD5E1),
+                    fontSize = 10.sp,
+                    letterSpacing = 0.6.sp
+                )
+                Spacer(Modifier.height(8.dp))
 
-            Spacer(Modifier.height(12.dp))
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(165.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(Color(0xCC060B14))
+                        .border(1.dp, Color(0xFF1E293B), RoundedCornerShape(16.dp))
+                        .padding(10.dp)
+                ) {
+                    Canvas(Modifier.matchParentSize()) {
+                        val w = size.width
+                        val h = size.height
 
-            GarminSegmentedGaugeBar(
-                title = "Anaerobní Training Effect",
-                score = anClamped,
-                message = anaerobicMsg ?: formatAnaerobicMessage(anClamped),
-                primaryColor = Color(0xFFA855F7)
-            )
+                        // 4 sloupce (Aerobní: 1-2 Regenerace, 2-3 Základ, 3-4 Tempo, 4-5 Práh)
+                        val colW = w / 4f
+                        // 3 řádky (Anaerobní: 0-1 Žádný, 1-3 Udržování, 3-5 Kapacita/Rychlost)
+                        val rowH = h / 3f
 
-            // SEKCE 3: TRÉNINKOVÁ ZÁTĚŽ, BODY BATTERY A MINUTY
-            Spacer(Modifier.height(14.dp))
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .background(Color(0xFF0F172A), RoundedCornerShape(12.dp))
-                    .padding(12.dp),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        trainingLoad?.let { "%.0f".format(it) } ?: "—",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = Color(0xFF38BDF8)
-                    )
-                    Text("Tréninková zátěž", style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8))
+                        // Mřížka
+                        for (c in 0..4) {
+                            val gx = c * colW
+                            drawLine(Color(0xFF1E293B), Offset(gx, 0f), Offset(gx, h), strokeWidth = 1.2f)
+                        }
+                        for (r in 0..3) {
+                            val gy = r * rowH
+                            drawLine(Color(0xFF1E293B), Offset(0f, gy), Offset(w, gy), strokeWidth = 1.2f)
+                        }
+
+                        // Zvýraznění aktivní buňky podkladu
+                        val activeCol = ((aeClamped - 1.0) / 1.0).toInt().coerceIn(0, 3)
+                        val activeRow = when {
+                            anClamped >= 3.0 -> 0 // Horní řádek = Kapacita
+                            anClamped >= 1.0 -> 1 // Prostřední = Udržování
+                            else -> 2             // Spodní = Bez anaerobního
+                        }
+                        val cellRect = Rect(
+                            activeCol * colW + 2f,
+                            activeRow * rowH + 2f,
+                            (activeCol + 1) * colW - 2f,
+                            (activeRow + 1) * rowH - 2f
+                        )
+                        drawRoundRect(
+                            Color(0xFF38BDF8).copy(alpha = 0.14f),
+                            Offset(cellRect.left, cellRect.top),
+                            Size(cellRect.width, cellRect.height),
+                            CornerRadius(6f, 6f)
+                        )
+
+                        // Souřadnice puntíku (Dot):
+                        val dotX = (((aeClamped - 1.0) / 4.0).coerceIn(0.04, 0.96) * w).toFloat()
+                        val dotY = ((1.0 - (anClamped / 5.0).coerceIn(0.04, 0.96)) * h).toFloat()
+
+                        // Zaměřovací rysky k aktivnímu bodu
+                        drawLine(
+                            Color(0xFF38BDF8).copy(alpha = 0.25f),
+                            Offset(dotX, 0f),
+                            Offset(dotX, h),
+                            strokeWidth = 1.dp.toPx()
+                        )
+                        drawLine(
+                            Color(0xFFA855F7).copy(alpha = 0.25f),
+                            Offset(0f, dotY),
+                            Offset(w, dotY),
+                            strokeWidth = 1.dp.toPx()
+                        )
+
+                        // Neonová koróna
+                        drawCircle(
+                            Color(0xFF38BDF8).copy(alpha = 0.28f),
+                            radius = 18f,
+                            center = Offset(dotX, dotY)
+                        )
+                        drawCircle(
+                            Color(0xFF0284C7),
+                            radius = 9.5f,
+                            center = Offset(dotX, dotY)
+                        )
+                        drawCircle(
+                            Color(0xFF38BDF8),
+                            radius = 6f,
+                            center = Offset(dotX, dotY)
+                        )
+                        drawCircle(
+                            Color.White,
+                            radius = 3.2f,
+                            center = Offset(dotX, dotY)
+                        )
+                    }
+
+                    // Popisky matice
+                    Column(Modifier.matchParentSize(), verticalArrangement = Arrangement.SpaceBetween) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("Anaerobní kapacita (3.0+)", style = MaterialTheme.typography.labelSmall, fontSize = 8.5.sp, color = Color(0xFFC084FC))
+                            Text("Sprint / VO2 Max", style = MaterialTheme.typography.labelSmall, fontSize = 8.5.sp, color = Color(0xFFFB7185))
+                        }
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("Udržování anaerobní báze (1.0–2.9)", style = MaterialTheme.typography.labelSmall, fontSize = 8.5.sp, color = Color(0xFF94A3B8))
+                            Text("Laktátový práh", style = MaterialTheme.typography.labelSmall, fontSize = 8.5.sp, color = Color(0xFFFBBF24))
+                        }
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("Bez anaerobního efektu (<1.0)", style = MaterialTheme.typography.labelSmall, fontSize = 8.5.sp, color = Color(0xFF64748B))
+                            Text("Dlouhý běh / Vytrvalost", style = MaterialTheme.typography.labelSmall, fontSize = 8.5.sp, color = Color(0xFF34D399))
+                        }
+                    }
                 }
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        bodyBatteryImpact?.let { "${if (it > 0) "+$it" else "$it"} BB" } ?: "—",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = Color(0xFFF59E0B)
-                    )
-                    Text("Dopad Body Battery", style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8))
+
+                // Osa X dole – 4 segmenty
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(top = 4.dp, bottom = 12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("1.0 Regenerace", style = MaterialTheme.typography.labelSmall, fontSize = 9.sp, color = Color(0xFF38BDF8))
+                    Text("2.0 Základ", style = MaterialTheme.typography.labelSmall, fontSize = 9.sp, color = Color(0xFF10B981))
+                    Text("3.0 Tempo", style = MaterialTheme.typography.labelSmall, fontSize = 9.sp, color = Color(0xFFF59E0B))
+                    Text("4.0–5.0 Práh", style = MaterialTheme.typography.labelSmall, fontSize = 9.sp, color = Color(0xFFEF4444))
                 }
-                Column(Modifier.weight(1f)) {
-                    val mod = moderateMinutes ?: 0
-                    val vig = vigorousMinutes ?: 0
-                    val total = mod + vig * 2
-                    Text(
-                        if (total > 0) "$total min" else "—",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = Color(0xFF10B981)
-                    )
-                    Text("Intenzivní minuty", style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8))
+
+                // SEKCE 2: DVA SAMOSTATNÉ HORIZONTÁLNÍ BARY (AEROBNÍ & ANAEROBNÍ) S PUNTÍKEM
+                GarminSegmentedGaugeBar(
+                    title = "Aerobní Training Effect",
+                    score = aeClamped,
+                    message = aerobicMsg ?: formatAerobicMessage(aeClamped),
+                    primaryColor = Color(0xFF10B981)
+                )
+
+                Spacer(Modifier.height(12.dp))
+
+                GarminSegmentedGaugeBar(
+                    title = "Anaerobní Training Effect",
+                    score = anClamped,
+                    message = anaerobicMsg ?: formatAnaerobicMessage(anClamped),
+                    primaryColor = Color(0xFFA855F7)
+                )
+
+                // SEKCE 3: SKLENĚNÝ DOK ZÁTĚŽE (TRÉNINKOVÁ ZÁTĚŽ, BODY BATTERY A MINUTY)
+                Spacer(Modifier.height(14.dp))
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = Color(0xCC060C16),
+                    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.09f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                trainingLoad?.let { "%.0f".format(it) } ?: "—",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Color(0xFF38BDF8)
+                            )
+                            Text("Tréninková zátěž", style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8))
+                        }
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                bodyBatteryImpact?.let { "${if (it > 0) "+$it" else "$it"} BB" } ?: "—",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Color(0xFFFBBF24)
+                            )
+                            Text("Dopad Body Battery", style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8))
+                        }
+                        Column(Modifier.weight(1f)) {
+                            val mod = moderateMinutes ?: 0
+                            val vig = vigorousMinutes ?: 0
+                            val total = mod + vig * 2
+                            Text(
+                                if (total > 0) "$total min" else "—",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Color(0xFF34D399)
+                            )
+                            Text("Intenzivní minuty", style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8))
+                        }
+                    }
                 }
             }
         }
@@ -776,7 +832,6 @@ private fun GarminSegmentedGaugeBar(
 
                 for (i in 0 until segCount) {
                     val left = i * (segW + gap)
-                    val active = score >= (i + 1) * 0.95
                     val col = if (score >= i) colors[i] else colors[i].copy(alpha = 0.25f)
                     drawRoundRect(
                         col,
@@ -799,14 +854,14 @@ private fun GarminSegmentedGaugeBar(
         Text(
             message.replace('_', ' '),
             style = MaterialTheme.typography.labelSmall,
-            color = Color(0xFF94A3B8),
+            color = Color(0xFFCBD5E1),
             modifier = Modifier.padding(top = 2.dp)
         )
     }
 }
 
 /**
- * Garmin Stamina Hero karta (Skutečná výdrž vs Potenciální výdrž).
+ * Garmin Stamina Hero karta (Skutečná výdrž vs Potenciální výdrž) s atmosférickým pozadím.
  */
 @Composable
 fun GarminStaminaCard(
@@ -829,130 +884,143 @@ fun GarminStaminaCard(
 
     Card(
         modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(20.dp),
-        border = BorderStroke(1.dp, MineralOutlineDark),
-        colors = CardDefaults.cardColors(containerColor = MineralSurfaceDark)
+        shape = RoundedCornerShape(24.dp),
+        border = BorderStroke(
+            1.2.dp,
+            Brush.horizontalGradient(listOf(Color(0xFF0EA5E9).copy(alpha = 0.6f), Color(0xFFF59E0B).copy(alpha = 0.45f)))
+        ),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF060B13))
     ) {
-        Column(Modifier.padding(16.dp)) {
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.fillMaxWidth()) {
+            Image(
+                painter = painterResource(id = R.drawable.img_motif_hrv_autonomic),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .matchParentSize()
+                    .alpha(0.68f)
+            )
+            Canvas(Modifier.matchParentSize()) {
+                drawRect(
+                    brush = Brush.verticalGradient(
+                        0.0f to Color(0xB3050911),
+                        1.0f to Color(0xEE050911)
+                    )
+                )
+            }
+            Column(Modifier.padding(16.dp)) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            Modifier
+                                .size(9.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFF0EA5E9))
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "GARMIN STAMINA · ENERGETICKÁ REZERVA",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color(0xFF38BDF8),
+                            letterSpacing = 0.8.sp
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        InfoBadgeButton(onClick = { showInfo = true })
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(50),
+                        color = Color(0xCC060C16),
+                        border = BorderStroke(1.dp, Color(0xFF38BDF8).copy(alpha = 0.4f))
+                    ) {
+                        Text(
+                            "Vyčerpáno ${(100.0 - curClamped).toInt()} %",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFFE2E8F0),
+                            fontSize = 10.sp,
+                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 3.dp)
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(14.dp))
+
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Column {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.size(8.dp).clip(CircleShape).background(Color(0xFF38BDF8)))
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                "${curClamped.toInt()} %",
+                                style = MaterialTheme.typography.headlineMedium,
+                                fontWeight = FontWeight.Black,
+                                color = Color(0xFF38BDF8)
+                            )
+                        }
+                        Text("Okamžitá výdrž (Aktuální)", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = Color.White)
+                        Text("Energie pro tempo a sprinty", style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8), fontSize = 10.sp)
+                    }
+                    Column(horizontalAlignment = Alignment.End) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.size(8.dp).clip(CircleShape).background(Color(0xFFFBBF24)))
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                "${potClamped.toInt()} %",
+                                style = MaterialTheme.typography.headlineMedium,
+                                fontWeight = FontWeight.Black,
+                                color = Color(0xFFFBBF24)
+                            )
+                        }
+                        Text("Potenciální výdrž (Celková)", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = Color.White)
+                        Text("Dlouhodobý glykogenový strop", style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8), fontSize = 10.sp)
+                    }
+                }
+
+                Spacer(Modifier.height(12.dp))
+
+                // Dvojitý ukazatel kapacity
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(14.dp)
+                        .clip(RoundedCornerShape(7.dp))
+                        .background(Color(0xCC060C16))
+                        .border(1.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(7.dp))
+                ) {
                     Box(
                         Modifier
-                            .size(10.dp)
-                            .clip(CircleShape)
-                            .background(Color(0xFF0EA5E9))
+                            .fillMaxWidth((potClamped / 100.0).toFloat())
+                            .height(14.dp)
+                            .background(Color(0xFFF59E0B).copy(alpha = 0.55f))
                     )
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        "GARMIN STAMINA (VÝDRŽ)",
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = Color(0xFF0EA5E9)
+                    Box(
+                        Modifier
+                            .fillMaxWidth((curClamped / 100.0).toFloat())
+                            .height(14.dp)
+                            .background(
+                                Brush.horizontalGradient(listOf(Color(0xFF0284C7), Color(0xFF38BDF8)))
+                            )
                     )
-                    Spacer(Modifier.width(6.dp))
-                    InfoBadgeButton(onClick = { showInfo = true })
                 }
+
+                Spacer(Modifier.height(8.dp))
                 Text(
-                    "Vyčerpáno ${(100.0 - curClamped).toInt()} %",
+                    "Skutečná výdrž klesá při intenzitě nad prahem (sprinty, kopce) a zotavuje se zpět k potenciální výdrži při volnějším tempu.",
                     style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = Color(0xFF94A3B8)
+                    color = Color(0xFFCBD5E1)
                 )
             }
-
-            Spacer(Modifier.height(12.dp))
-
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Column {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(Modifier.size(8.dp).clip(CircleShape).background(Color(0xFF0EA5E9)))
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            "${curClamped.toInt()} %",
-                            style = MaterialTheme.typography.headlineMedium,
-                            fontWeight = FontWeight.Black,
-                            color = Color(0xFF0EA5E9)
-                        )
-                    }
-                    Text("Okamžitá výdrž (Aktuální)", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = Color.White)
-                    Text("Energie pro tempo a sprinty (regeneruje se)", style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8), fontSize = 10.sp)
-                }
-                Column(horizontalAlignment = Alignment.End) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(Modifier.size(8.dp).clip(CircleShape).background(Color(0xFFF59E0B)))
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            "${potClamped.toInt()} %",
-                            style = MaterialTheme.typography.headlineMedium,
-                            fontWeight = FontWeight.Black,
-                            color = Color(0xFFF59E0B)
-                        )
-                    }
-                    Text("Potenciální výdrž (Celková)", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = Color.White)
-                    Text("Dlouhodobý strop těla (pouze klesá)", style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8), fontSize = 10.sp)
-                }
-            }
-
-            Spacer(Modifier.height(10.dp))
-
-            // Dvojitý ukazatel kapacity
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .height(14.dp)
-                    .clip(RoundedCornerShape(7.dp))
-                    .background(Color(0xFF1E293B))
-            ) {
-                // Potenciální výdrž (zlatá/jantarová)
-                Box(
-                    Modifier
-                        .fillMaxWidth((potClamped / 100.0).toFloat())
-                        .height(14.dp)
-                        .background(Color(0xFFF59E0B).copy(alpha = 0.5f))
-                )
-                // Skutečná výdrž (azurová)
-                Box(
-                    Modifier
-                        .fillMaxWidth((curClamped / 100.0).toFloat())
-                        .height(14.dp)
-                        .background(Color(0xFF0EA5E9))
-                )
-            }
-
-            Spacer(Modifier.height(8.dp))
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(16.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(Modifier.size(8.dp).clip(RoundedCornerShape(2.dp)).background(Color(0xFF0EA5E9)))
-                    Spacer(Modifier.width(6.dp))
-                    Text("Okamžitá stamina (klesá/roste)", style = MaterialTheme.typography.labelSmall, color = Color(0xFF0EA5E9), fontWeight = FontWeight.SemiBold, fontSize = 10.sp)
-                }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(Modifier.size(8.dp).clip(RoundedCornerShape(2.dp)).background(Color(0xFFF59E0B).copy(alpha = 0.5f)))
-                    Spacer(Modifier.width(6.dp))
-                    Text("Potenciální strop", style = MaterialTheme.typography.labelSmall, color = Color(0xFFF59E0B), fontWeight = FontWeight.SemiBold, fontSize = 10.sp)
-                }
-            }
-
-            Spacer(Modifier.height(8.dp))
-            Text(
-                "Skutečná výdrž klesá při intenzitě nad prahem (sprinty, kopce) a zotavuje se zpět k potenciální výdrži při volnějším tempu.",
-                style = MaterialTheme.typography.labelSmall,
-                color = Color(0xFF64748B)
-            )
         }
     }
 }
 
 /**
- * Garmin Zhodnocení výkonu / kondice (Performance Condition Hero Card).
+ * Garmin Zhodnocení výkonu / kondice (Performance Condition Hero Card) s atmosférickým pozadím.
  */
 @Composable
 fun GarminPerformanceConditionCard(
@@ -969,95 +1037,119 @@ fun GarminPerformanceConditionCard(
 
     val condClamped = condition.coerceIn(-5, 5)
     val (label, desc, col) = when {
-        condClamped >= 4 -> Triple("Vynikající (+${condClamped})", "Vaše srdeční frekvence je výrazně nižší než obvykle. Jste ve špičkové běžecké formě.", Color(0xFFA855F7))
-        condClamped >= 1 -> Triple("Dobrý (+${condClamped})", "Běžecká ekonomika je nad vaším standardem. Tělo pracuje efektivně a šetří glykogen.", Color(0xFF10B981))
+        condClamped >= 4 -> Triple("Vynikající (+${condClamped})", "Vaše srdeční frekvence je výrazně nižší než obvykle. Jste ve špičkové běžecké formě.", Color(0xFFC084FC))
+        condClamped >= 1 -> Triple("Dobrý (+${condClamped})", "Běžecká ekonomika je nad vaším standardem. Tělo pracuje efektivně a šetří glykogen.", Color(0xFF34D399))
         condClamped == 0 -> Triple("Výchozí (0)", "Výkon a srdeční tep přesně odpovídají vaší dlouhodobé základní kondici VO2 Max.", Color(0xFF38BDF8))
-        condClamped >= -2 -> Triple("Mírná únava (${condClamped})", "Srdeční frekvence je mírně zvýšená. Může se projevovat dehydratace nebo teplé počasí.", Color(0xFFF59E0B))
-        else -> Triple("Únava / Přetížení (${condClamped})", "Výrazný srdeční drift a vysoká zátěž. Doporučeno volnější tempo a delší spánek.", Color(0xFFEF4444))
+        condClamped >= -2 -> Triple("Mírná únava (${condClamped})", "Srdeční frekvence je mírně zvýšená. Může se projevovat dehydratace nebo teplé počasí.", Color(0xFFFBBF24))
+        else -> Triple("Únava / Přetížení (${condClamped})", "Výrazný srdeční drift a vysoká zátěž. Doporučeno volnější tempo a delší spánek.", Color(0xFFFB7185))
     }
 
     Card(
         modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(20.dp),
-        border = BorderStroke(1.dp, MineralOutlineDark),
-        colors = CardDefaults.cardColors(containerColor = MineralSurfaceDark)
+        shape = RoundedCornerShape(24.dp),
+        border = BorderStroke(1.2.dp, col.copy(alpha = 0.5f)),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF060B13))
     ) {
-        Column(Modifier.padding(16.dp)) {
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        Modifier
-                            .size(10.dp)
-                            .clip(CircleShape)
-                            .background(col)
+        Box(Modifier.fillMaxWidth()) {
+            Image(
+                painter = painterResource(id = R.drawable.img_motif_sleep_night),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .matchParentSize()
+                    .alpha(0.65f)
+            )
+            Canvas(Modifier.matchParentSize()) {
+                drawRect(
+                    brush = Brush.verticalGradient(
+                        0.0f to Color(0xB3050911),
+                        1.0f to Color(0xEE050911)
                     )
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        "GARMIN ZHODNOCENÍ VÝKONU (KONDICE)",
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = col
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    InfoBadgeButton(onClick = { showInfo = true })
-                }
-                Text(
-                    if (condClamped > 0) "+$condClamped" else "$condClamped",
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Black,
-                    color = col
                 )
             }
-
-            Spacer(Modifier.height(8.dp))
-            Text(label, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = Color.White)
-            Text(desc, style = MaterialTheme.typography.bodySmall, color = Color(0xFF94A3B8), modifier = Modifier.padding(top = 2.dp))
-
-            Spacer(Modifier.height(10.dp))
-
-            // Stupnice od -5 do +5 s nulou uprostřed
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .height(10.dp)
-                    .clip(RoundedCornerShape(5.dp))
-                    .background(Color(0xFF1E293B))
-            ) {
-                Canvas(Modifier.matchParentSize()) {
-                    val midX = size.width / 2f
-                    // Nulová ryska
-                    drawLine(Color.White.copy(alpha = 0.5f), Offset(midX, 0f), Offset(midX, size.height), strokeWidth = 2f)
-
-                    val frac = (condClamped / 5.0).coerceIn(-1.0, 1.0)
-                    val barW = (midX * kotlin.math.abs(frac)).toFloat()
-                    if (frac >= 0) {
-                        drawRect(col, Offset(midX, 0f), Size(barW, size.height))
-                    } else {
-                        drawRect(col, Offset(midX - barW, 0f), Size(barW, size.height))
+            Column(Modifier.padding(16.dp)) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            Modifier
+                                .size(9.dp)
+                                .clip(CircleShape)
+                                .background(col)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "GARMIN ZHODNOCENÍ KONDICE",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = col,
+                            letterSpacing = 0.8.sp
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        InfoBadgeButton(onClick = { showInfo = true })
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(50),
+                        color = col.copy(alpha = 0.16f),
+                        border = BorderStroke(1.dp, col.copy(alpha = 0.5f))
+                    ) {
+                        Text(
+                            if (condClamped > 0) "+$condClamped" else "$condClamped",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Black,
+                            color = col,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 2.dp)
+                        )
                     }
                 }
-            }
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(top = 2.dp),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text("-5 Únava", style = MaterialTheme.typography.labelSmall, fontSize = 9.sp, color = Color(0xFFEF4444))
-                Text("0 Norma", style = MaterialTheme.typography.labelSmall, fontSize = 9.sp, color = Color(0xFF94A3B8))
-                Text("+5 Špička", style = MaterialTheme.typography.labelSmall, fontSize = 9.sp, color = Color(0xFFA855F7))
+
+                Spacer(Modifier.height(8.dp))
+                Text(label, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.ExtraBold, color = Color.White)
+                Text(desc, style = MaterialTheme.typography.bodySmall, color = Color(0xFFCBD5E1), modifier = Modifier.padding(top = 2.dp))
+
+                Spacer(Modifier.height(10.dp))
+
+                // Stupnice od -5 do +5 s nulou uprostřed
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(10.dp)
+                        .clip(RoundedCornerShape(5.dp))
+                        .background(Color(0xCC060C16))
+                ) {
+                    Canvas(Modifier.matchParentSize()) {
+                        val midX = size.width / 2f
+                        drawLine(Color.White.copy(alpha = 0.6f), Offset(midX, 0f), Offset(midX, size.height), strokeWidth = 2f)
+
+                        val frac = (condClamped / 5.0).coerceIn(-1.0, 1.0)
+                        val barW = (midX * kotlin.math.abs(frac)).toFloat()
+                        if (frac >= 0) {
+                            drawRect(col, Offset(midX, 0f), Size(barW, size.height))
+                        } else {
+                            drawRect(col, Offset(midX - barW, 0f), Size(barW, size.height))
+                        }
+                    }
+                }
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(top = 3.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("-5 Únava", style = MaterialTheme.typography.labelSmall, fontSize = 9.sp, color = Color(0xFFFB7185))
+                    Text("0 Norma VO2 Max", style = MaterialTheme.typography.labelSmall, fontSize = 9.sp, color = Color(0xFF94A3B8))
+                    Text("+5 Špička", style = MaterialTheme.typography.labelSmall, fontSize = 9.sp, color = Color(0xFFC084FC))
+                }
             }
         }
     }
 }
 
 /**
- * Kardiovaskulární relativní úsilí (Suffer Score / Relativní zátěž srdce).
- * Počítá se lokálně z tepových zón Z1–Z5.
+ * Kardiovaskulární relativní úsilí (Suffer Score / Relativní zátěž srdce) s atmosférickým EKG pozadím.
  */
 @Composable
 fun RelativeEffortCard(
@@ -1079,65 +1171,95 @@ fun RelativeEffortCard(
 
     Card(
         modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(20.dp),
-        border = BorderStroke(1.dp, accentOrange.copy(alpha = 0.45f)),
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF13131A))
+        shape = RoundedCornerShape(24.dp),
+        border = BorderStroke(
+            1.2.dp,
+            Brush.horizontalGradient(listOf(accentOrange.copy(alpha = 0.6f), Color(0xFFFB7185).copy(alpha = 0.4f)))
+        ),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF060B13))
     ) {
-        Column(Modifier.padding(16.dp)) {
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        "KARDIO ZÁTĚŽ",
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.Black,
-                        color = accentOrange,
-                        letterSpacing = 1.sp
+        Box(Modifier.fillMaxWidth()) {
+            Image(
+                painter = painterResource(id = R.drawable.img_motif_heart_pulse),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .matchParentSize()
+                    .alpha(0.68f)
+            )
+            Canvas(Modifier.matchParentSize()) {
+                drawRect(
+                    brush = Brush.verticalGradient(
+                        0.0f to Color(0xB3050911),
+                        1.0f to Color(0xEE050911)
                     )
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        "RELATIVNÍ ÚSILÍ",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    InfoBadgeButton(onClick = { showInfo = true })
-                }
-                Text(
-                    "$score",
-                    style = MaterialTheme.typography.headlineMedium,
-                    fontWeight = FontWeight.Black,
-                    color = accentOrange
                 )
             }
-
-            Spacer(Modifier.height(6.dp))
-            Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = Color.White)
-            Text(desc, style = MaterialTheme.typography.bodySmall, color = Color(0xFF94A3B8), modifier = Modifier.padding(top = 2.dp))
-
-            Spacer(Modifier.height(10.dp))
-
-            // Rozpad minut v zónách Z1–Z5
-            if (hrZonesTimesS.size >= 5) {
+            Column(Modifier.padding(16.dp)) {
                 Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(Color(0xFF1E293B))
-                        .padding(8.dp),
-                    horizontalArrangement = Arrangement.SpaceAround
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    val zoneLabels = listOf("Z1", "Z2", "Z3", "Z4", "Z5")
-                    val zoneColors = listOf(Color(0xFF64748B), Color(0xFF38BDF8), Color(0xFF10B981), Color(0xFFF59E0B), Color(0xFFEF4444))
-                    for (i in 0 until 5) {
-                        val minVal = (hrZonesTimesS.getOrElse(i) { 0.0 } / 60.0).toInt()
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(zoneLabels[i], style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = zoneColors[i])
-                            Text("$minVal m", style = MaterialTheme.typography.labelSmall, color = Color.White)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            Modifier
+                                .size(9.dp)
+                                .clip(CircleShape)
+                                .background(accentOrange)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "KARDIO ZÁTĚŽ · RELATIVNÍ ÚSILÍ",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = accentOrange,
+                            letterSpacing = 0.8.sp
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        InfoBadgeButton(onClick = { showInfo = true })
+                    }
+                    Text(
+                        "$score",
+                        style = MaterialTheme.typography.headlineMedium,
+                        fontWeight = FontWeight.Black,
+                        color = accentOrange
+                    )
+                }
+
+                Spacer(Modifier.height(6.dp))
+                Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.ExtraBold, color = Color.White)
+                Text(desc, style = MaterialTheme.typography.bodySmall, color = Color(0xFFCBD5E1), modifier = Modifier.padding(top = 2.dp))
+
+                Spacer(Modifier.height(12.dp))
+
+                // Rozpad minut v zónách Z1–Z5 ve skleněném doku
+                if (hrZonesTimesS.size >= 5) {
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = Color(0xCC060C16),
+                        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 10.dp, horizontal = 8.dp),
+                            horizontalArrangement = Arrangement.SpaceAround
+                        ) {
+                            val zoneLabels = listOf("Z1", "Z2", "Z3", "Z4", "Z5")
+                            val zoneColors = listOf(Color(0xFF94A3B8), Color(0xFF38BDF8), Color(0xFF10B981), Color(0xFFF59E0B), Color(0xFFEF4444))
+                            for (i in 0 until 5) {
+                                val minVal = (hrZonesTimesS.getOrElse(i) { 0.0 } / 60.0).toInt()
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        Box(Modifier.size(6.dp).clip(CircleShape).background(zoneColors[i]))
+                                        Text(zoneLabels[i], style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.ExtraBold, color = zoneColors[i])
+                                    }
+                                    Spacer(Modifier.height(2.dp))
+                                    Text("$minVal min", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = Color.White)
+                                }
+                            }
                         }
                     }
                 }
@@ -1152,7 +1274,7 @@ fun StravaRelativeEffortCard(score: Int, hrZonesTimesS: List<Double>, totalTimeS
     RelativeEffortCard(score, hrZonesTimesS, totalTimeS, modifier)
 
 /**
- * Odhadované nejlepší výkony (Best Efforts: 400 m, 1 km, 1 míle, 5 km).
+ * Odhadované nejlepší výkony (Best Efforts: 400 m, 1 km, 1 míle, 5 km) s atmosférickým pozadím a bez ikonek.
  */
 @Composable
 fun BestEffortsCard(
@@ -1171,90 +1293,132 @@ fun BestEffortsCard(
 
     Card(
         modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(20.dp),
-        border = BorderStroke(1.dp, MineralOutlineDark),
-        colors = CardDefaults.cardColors(containerColor = MineralSurfaceDark)
+        shape = RoundedCornerShape(24.dp),
+        border = BorderStroke(
+            1.2.dp,
+            Brush.horizontalGradient(listOf(Color(0xFFF59E0B).copy(alpha = 0.55f), Color(0xFF38BDF8).copy(alpha = 0.35f)))
+        ),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF060B13))
     ) {
-        Column(Modifier.padding(16.dp)) {
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Outlined.EmojiEvents,
-                        contentDescription = null,
-                        tint = Color(0xFFF97316),
-                        modifier = Modifier.size(18.dp)
+        Box(Modifier.fillMaxWidth()) {
+            Image(
+                painter = painterResource(id = R.drawable.img_motif_running_stride),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .matchParentSize()
+                    .alpha(0.62f)
+            )
+            Canvas(Modifier.matchParentSize()) {
+                drawRect(
+                    brush = Brush.verticalGradient(
+                        0.0f to Color(0xBF050911),
+                        1.0f to Color(0xF2050911)
                     )
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        "ATLETICKÉ MILNÍKY (BEST EFFORTS)",
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = Color(0xFFF97316)
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    InfoBadgeButton(onClick = { showInfo = true })
-                }
-                Text("${bestEfforts.size} milníků", style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8))
+                )
             }
-
-            Spacer(Modifier.height(10.dp))
-
-            bestEfforts.forEachIndexed { idx, be ->
-                val timeFmt = "%02d:%02d".format((be.timeS / 60).toInt(), (be.timeS % 60).toInt())
-                val paceMin = (be.paceSPerKm / 60).toInt()
-                val paceSec = (be.paceSPerKm % 60).toInt()
-                val paceFmt = "%d:%02d /km".format(paceMin, paceSec)
-                val (badgeBg, badgeFg) = when (idx) {
-                    0 -> Color(0xFFF59E0B).copy(alpha = 0.22f) to Color(0xFFF59E0B)
-                    1 -> Color(0xFF94A3B8).copy(alpha = 0.22f) to Color(0xFFCBD5E1)
-                    2 -> Color(0xFFD97706).copy(alpha = 0.22f) to Color(0xFFFDBA74)
-                    else -> Color(0xFF38BDF8).copy(alpha = 0.18f) to Color(0xFF38BDF8)
-                }
-
+            Column(Modifier.padding(16.dp)) {
                 Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 4.dp),
+                    Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Box(
-                            modifier = Modifier
-                                .size(24.dp)
+                            Modifier
+                                .size(9.dp)
                                 .clip(CircleShape)
-                                .background(badgeBg),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                "#${idx + 1}",
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.ExtraBold,
-                                color = badgeFg,
-                                fontSize = 11.sp
-                            )
-                        }
-                        Spacer(Modifier.width(10.dp))
-                        Column {
-                            Text(be.label, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, color = Color.White)
-                            Text(
-                                "na ${"%.1f".format(be.startKm)} km · výškově ${if (be.elevationChangeM >= 0) "+%.0f".format(be.elevationChangeM) else "%.0f".format(be.elevationChangeM)} m",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = Color(0xFF94A3B8)
-                            )
-                        }
+                                .background(Color(0xFFF59E0B))
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "ATLETICKÉ MILNÍKY · BEST EFFORTS",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color(0xFFFBBF24),
+                            letterSpacing = 0.8.sp
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        InfoBadgeButton(onClick = { showInfo = true })
                     }
-                    Column(horizontalAlignment = Alignment.End) {
-                        Text(timeFmt, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold, color = Color(0xFF38BDF8))
-                        Text(paceFmt, style = MaterialTheme.typography.labelSmall, color = Color(0xFF64748B))
+                    Surface(
+                        shape = RoundedCornerShape(50),
+                        color = Color(0xCC060C16),
+                        border = BorderStroke(1.dp, Color(0xFFF59E0B).copy(alpha = 0.45f))
+                    ) {
+                        Text(
+                            "${bestEfforts.size} rekordní okna",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFFFDE68A),
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 10.sp,
+                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 3.dp)
+                        )
                     }
                 }
-                if (idx < bestEfforts.size - 1) {
-                    Spacer(Modifier.height(2.dp))
+
+                Spacer(Modifier.height(12.dp))
+
+                bestEfforts.forEachIndexed { idx, be ->
+                    val timeFmt = "%02d:%02d".format((be.timeS / 60).toInt(), (be.timeS % 60).toInt())
+                    val paceMin = (be.paceSPerKm / 60).toInt()
+                    val paceSec = (be.paceSPerKm % 60).toInt()
+                    val paceFmt = "%d:%02d /km".format(paceMin, paceSec)
+                    val (badgeBg, badgeFg) = when (idx) {
+                        0 -> Color(0xFFF59E0B).copy(alpha = 0.22f) to Color(0xFFFBBF24)
+                        1 -> Color(0xFF94A3B8).copy(alpha = 0.22f) to Color(0xFFE2E8F0)
+                        2 -> Color(0xFFD97706).copy(alpha = 0.22f) to Color(0xFFFDBA74)
+                        else -> Color(0xFF38BDF8).copy(alpha = 0.18f) to Color(0xFF38BDF8)
+                    }
+
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = Color(0xB8060C16),
+                        border = BorderStroke(1.dp, badgeFg.copy(alpha = 0.28f)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 3.5.dp)
+                    ) {
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(26.dp)
+                                        .clip(CircleShape)
+                                        .background(badgeBg)
+                                        .border(1.dp, badgeFg.copy(alpha = 0.5f), CircleShape),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        "#${idx + 1}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = badgeFg,
+                                        fontSize = 11.sp
+                                    )
+                                }
+                                Spacer(Modifier.width(10.dp))
+                                Column {
+                                    Text(be.label, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.ExtraBold, color = Color.White)
+                                    Text(
+                                        "na ${"%.1f".format(be.startKm)} km · převýšení ${if (be.elevationChangeM >= 0) "+%.0f".format(be.elevationChangeM) else "%.0f".format(be.elevationChangeM)} m",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color(0xFF94A3B8)
+                                    )
+                                }
+                            }
+                            Column(horizontalAlignment = Alignment.End) {
+                                Text(timeFmt, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold, color = badgeFg)
+                                Text(paceFmt, style = MaterialTheme.typography.labelSmall, color = Color(0xFFCBD5E1))
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1267,7 +1431,7 @@ fun StravaBestEffortsCard(bestEfforts: List<BestEffort>, modifier: Modifier = Mo
     BestEffortsCard(bestEfforts, modifier)
 
 /**
- * GAP (Grade Adjusted Pace / Tempo upravené o sklon dle Minettiho modelu).
+ * GAP (Grade Adjusted Pace / Tempo upravené o sklon dle Minettiho modelu) s horským atmosférickým pozadím.
  */
 @Composable
 fun GapCard(
@@ -1297,71 +1461,112 @@ fun GapCard(
 
     Card(
         modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(20.dp),
-        border = BorderStroke(1.dp, MineralOutlineDark),
-        colors = CardDefaults.cardColors(containerColor = MineralSurfaceDark)
+        shape = RoundedCornerShape(24.dp),
+        border = BorderStroke(
+            1.2.dp,
+            Brush.horizontalGradient(listOf(Color(0xFF10B981).copy(alpha = 0.55f), Color(0xFFF59E0B).copy(alpha = 0.4f)))
+        ),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF060B13))
     ) {
-        Column(Modifier.padding(16.dp)) {
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        Modifier
-                            .size(10.dp)
-                            .clip(CircleShape)
-                            .background(Color(0xFFF97316))
+        Box(Modifier.fillMaxWidth()) {
+            Image(
+                painter = painterResource(id = R.drawable.img_alpine_trail_hero),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .matchParentSize()
+                    .alpha(0.65f)
+            )
+            Canvas(Modifier.matchParentSize()) {
+                drawRect(
+                    brush = Brush.verticalGradient(
+                        0.0f to Color(0xBF050911),
+                        1.0f to Color(0xF2050911)
                     )
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        "GAP: TEMPO UPRAVENÉ O SKLON",
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = Color(0xFFF97316)
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    InfoBadgeButton(onClick = { showInfo = true })
-                }
-                Text(
-                    deltaStr,
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = Color(0xFF10B981)
                 )
             }
-
-            Spacer(Modifier.height(10.dp))
-
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Column {
-                    Text(
-                        fmtP(gapPaceSPerKm),
-                        style = MaterialTheme.typography.headlineSmall,
-                        fontWeight = FontWeight.Black,
-                        color = Color(0xFF10B981)
-                    )
-                    Text("GAP Tempo (ekvivalent roviny)", style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8))
+            Column(Modifier.padding(16.dp)) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            Modifier
+                                .size(9.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFF10B981))
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "GAP · TEMPO UPRAVENÉ O SKLON",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color(0xFF34D399),
+                            letterSpacing = 0.8.sp
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        InfoBadgeButton(onClick = { showInfo = true })
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(50),
+                        color = Color(0xFF10B981).copy(alpha = 0.16f),
+                        border = BorderStroke(1.dp, Color(0xFF10B981).copy(alpha = 0.5f))
+                    ) {
+                        Text(
+                            deltaStr,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color(0xFF34D399),
+                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 3.dp)
+                        )
+                    }
                 }
-                Column(horizontalAlignment = Alignment.End) {
-                    Text(
-                        fmtP(realPaceSPerKm),
-                        style = MaterialTheme.typography.headlineSmall,
-                        fontWeight = FontWeight.Black,
-                        color = Color.White
-                    )
-                    Text("Reálné tempo (v terénu)", style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8))
+
+                Spacer(Modifier.height(12.dp))
+
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = Color(0xB8060C16),
+                    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column {
+                            Text(
+                                fmtP(gapPaceSPerKm),
+                                style = MaterialTheme.typography.headlineSmall,
+                                fontWeight = FontWeight.Black,
+                                color = Color(0xFF34D399)
+                            )
+                            Text("GAP Tempo (ekvivalent roviny)", style = MaterialTheme.typography.labelSmall, color = Color(0xFFCBD5E1))
+                        }
+                        Column(horizontalAlignment = Alignment.End) {
+                            Text(
+                                fmtP(realPaceSPerKm),
+                                style = MaterialTheme.typography.headlineSmall,
+                                fontWeight = FontWeight.Black,
+                                color = Color.White
+                            )
+                            Text("Reálné tempo (v terénu)", style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8))
+                        }
+                    }
                 }
+
+                Spacer(Modifier.height(8.dp))
+                val ascStr = ascentM?.let { "+%.0f m".format(it) } ?: "převýšení"
+                Text(
+                    "Minettiho model energetického výdeje: Pohyb v terénu ($ascStr) stál tělo stejný energetický výdej, jako byste po rovině drželi tempo ${fmtP(gapPaceSPerKm)}.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFFCBD5E1)
+                )
             }
-
-            Spacer(Modifier.height(6.dp))
-            val ascStr = ascentM?.let { "+%.0f m".format(it) } ?: "převýšení"
-            Text(
-                "Minettiho model energetického výdeje: Běh do stoupání ($ascStr) stál tělo stejný energetický výdej, jako byste po rovině běželi tempem ${fmtP(gapPaceSPerKm)}.",
-                style = MaterialTheme.typography.labelSmall,
-                color = Color(0xFF64748B)
-            )
         }
     }
 }

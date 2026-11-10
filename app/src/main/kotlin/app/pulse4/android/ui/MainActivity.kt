@@ -6,19 +6,23 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.DirectionsRun
-import androidx.compose.material.icons.filled.CalendarToday
-import androidx.compose.material.icons.filled.Group
-import androidx.compose.material.icons.filled.QueryStats
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Timer
+import androidx.compose.material.icons.outlined.CalendarToday
+import androidx.compose.material.icons.outlined.Group
+import androidx.compose.material.icons.outlined.QueryStats
+import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Timer
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -80,6 +84,7 @@ private val navRequestFlow = MutableStateFlow<String?>(null)
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
         val sl = (application as Pulse4App).services
         CoroutineScope(Dispatchers.IO).launch {
             val u = sl.settings.unitSystem
@@ -440,12 +445,12 @@ private data class Dest(val route: String, val label: String, val icon: androidx
 private fun Root(sl: app.pulse4.android.di.ServiceLocator) {
     val nav = rememberNavController()
     val main = listOf(
-        Dest("today", "Dnes", Icons.Default.CalendarToday),
-        Dest("metrics", "Metriky", Icons.Default.QueryStats),
-        Dest("activities", "Aktivity", Icons.AutoMirrored.Filled.DirectionsRun),
-        Dest("training", "Tréninky", Icons.Default.Timer),
-        Dest("groups", "Skupiny", Icons.Default.Group),
-        Dest("settings", "Nastavení", Icons.Default.Settings)
+        Dest("today", "Dnes", Icons.Outlined.CalendarToday),
+        Dest("metrics", "Metriky", Icons.Outlined.QueryStats),
+        Dest("activities", "Aktivity", PulseIcons.Steps),
+        Dest("training", "Tréninky", Icons.Outlined.Timer),
+        Dest("groups", "Skupiny", Icons.Outlined.Group),
+        Dest("settings", "Nastavení", Icons.Outlined.Settings)
     )
     val entry by nav.currentBackStackEntryAsState()
     val units by sl.settings.unitSystemFlow.collectAsState()
@@ -465,61 +470,86 @@ private fun Root(sl: app.pulse4.android.di.ServiceLocator) {
 
     Scaffold(
         bottomBar = {
-            NavigationBar(
-                containerColor = MineralBackgroundDark,
-                contentColor = MineralOnSurfaceDark
-            ) {
-                val curRoute = entry?.destination?.route.orEmpty()
-                main.forEach { d ->
-                    val isSelected = when (d.route) {
-                        "today" -> curRoute == "today" || curRoute.startsWith("today_metric/")
-                        "activities" -> curRoute == "activities" || curRoute.startsWith("activity/") || curRoute.startsWith("compare/")
-                        else -> curRoute == d.route || curRoute.startsWith("${d.route}/")
-                    }
-                    NavigationBarItem(
-                        selected = isSelected,
-                        onClick = {
-                            nav.navigate(d.route) {
-                                popUpTo(nav.graph.findStartDestination().id) {
-                                    saveState = true
-                                }
-                                launchSingleTop = true
-                                restoreState = true
-                            }
-                        },
-                        icon = {
-                            Icon(
-                                imageVector = d.icon,
-                                contentDescription = d.label,
-                                modifier = Modifier.size(22.dp)
+            Column(Modifier.fillMaxWidth()) {
+                androidx.compose.foundation.layout.Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(1.dp)
+                        .background(
+                            Brush.horizontalGradient(
+                                listOf(
+                                    Color.Transparent,
+                                    SagePrimaryDark.copy(alpha = 0.35f),
+                                    GlacierSecondaryDark.copy(alpha = 0.35f),
+                                    Color.Transparent
+                                )
                             )
-                        },
-                        colors = NavigationBarItemDefaults.colors(
-                            selectedIconColor = SagePrimaryDark,
-                            selectedTextColor = SagePrimaryDark,
-                            unselectedIconColor = MineralOnSurfaceVariantDark,
-                            unselectedTextColor = MineralOnSurfaceVariantDark,
-                            indicatorColor = SageContainerDark
-                        ),
-                        label = {
-                            Text(
-                                d.label,
-                                maxLines = 1,
-                                softWrap = false,
-                                fontSize = 10.sp,
-                                fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal
-                            )
+                        )
+                )
+                NavigationBar(
+                    containerColor = Color(0xFF070C13),
+                    contentColor = MineralOnSurfaceDark,
+                    tonalElevation = 0.dp
+                ) {
+                    val curRoute = entry?.destination?.route.orEmpty()
+                    main.forEach { d ->
+                        val isSelected = when (d.route) {
+                            "today" -> curRoute == "today" || curRoute.startsWith("today_metric/")
+                            "activities" -> curRoute == "activities" || curRoute.startsWith("activity/") || curRoute.startsWith("compare/")
+                            else -> curRoute == d.route || curRoute.startsWith("${d.route}/")
                         }
-                    )
+                        NavigationBarItem(
+                            selected = isSelected,
+                            onClick = {
+                                nav.navigate(d.route) {
+                                    popUpTo(nav.graph.findStartDestination().id) {
+                                        saveState = true
+                                    }
+                                    launchSingleTop = true
+                                    restoreState = true
+                                }
+                            },
+                            icon = {
+                                Icon(
+                                    imageVector = d.icon,
+                                    contentDescription = d.label,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            },
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = SagePrimaryDark,
+                                selectedTextColor = Color.White,
+                                unselectedIconColor = Color(0xFF64748B),
+                                unselectedTextColor = Color(0xFF64748B),
+                                indicatorColor = SagePrimaryDark.copy(alpha = 0.16f)
+                            ),
+                            label = {
+                                Text(
+                                    d.label,
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    fontSize = 10.sp,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                                )
+                            }
+                        )
+                    }
                 }
             }
         },
     ) { pad ->
         NavHost(nav, "today", Modifier.padding(pad).fillMaxSize().background(MaterialTheme.colorScheme.background)) {
             composable("today") {
-                TodayScreen(sl) { mType ->
-                    nav.navigate("today_metric/${mType.name}")
-                }
+                TodayScreen(
+                    sl = sl,
+                    onOpenGroups = { nav.navigate("groups") },
+                    onOpenMetric = { mType ->
+                        nav.navigate("today_metric/${mType.name}")
+                    },
+                    onOpenActivity = { id ->
+                        nav.navigate("activity/${Uri.encode(id)}")
+                    }
+                )
             }
             composable("today_metric/{type}") { backStack ->
                 val tName = backStack.arguments?.getString("type").orEmpty()

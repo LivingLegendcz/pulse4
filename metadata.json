@@ -1,0 +1,6 @@
+{
+  "name": "Pulse4",
+  "description": "Fitness telemetry, biometric tracking, and workout analytics app.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -113,7 +113,21 @@ fun BodyScreen(sl: ServiceLocator) {
                 MetricType.VASCULAR_AGE to "Cévní věk",
                 MetricType.PULSE_WAVE_VELOCITY to "PWV"
             ).forEach { (t, l) ->
-                FilterChip(type == t, { type = t }, { Text(l) }, Modifier.padding(2.dp))
+                val mCfg = getMetricUiConfig(t)
+                FilterChip(
+                    selected = type == t,
+                    onClick = { type = t },
+                    leadingIcon = {
+                        androidx.compose.material3.Icon(
+                            imageVector = mCfg.icon,
+                            contentDescription = null,
+                            tint = mCfg.color,
+                            modifier = Modifier.padding(end = 2.dp)
+                        )
+                    },
+                    label = { Text(l) },
+                    modifier = Modifier.padding(2.dp)
+                )
             }
         }
         val pts = points

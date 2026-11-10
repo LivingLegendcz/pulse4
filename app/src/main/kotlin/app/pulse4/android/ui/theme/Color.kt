@@ -20,12 +20,12 @@ val SandOnTertiaryDark = Color(0xFF3B2500)
 val SandContainerDark = Color(0xFF4A3208)
 val SandOnContainerDark = Color(0xFFFEF3C7)
 
-val MineralBackgroundDark = Color(0xFF0D161E)
-val MineralSurfaceDark = Color(0xFF15232E)
-val MineralSurfaceVariantDark = Color(0xFF1E3140)
-val MineralOutlineDark = Color(0xFF284052)
+val MineralBackgroundDark = Color(0xFF060A10)
+val MineralSurfaceDark = Color(0xFF0D1520)
+val MineralSurfaceVariantDark = Color(0xFF162231)
+val MineralOutlineDark = Color(0xFF1F3044)
 val MineralOnSurfaceDark = Color(0xFFF8FAFC)
-val MineralOnSurfaceVariantDark = Color(0xFFB4C6D4)
+val MineralOnSurfaceVariantDark = Color(0xFF94A3B8)
 
 // Light Theme — Kámen a alpský kontrast
 val SagePrimaryLight = Color(0xFF0F766E)

@@ -11,8 +11,11 @@ interface ObservationDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE) fun upsert(rows: List<ObservationRow>)
     @Query("SELECT * FROM observation WHERE deleted = 0 AND localDate = :date ORDER BY startUtcMs") fun forDate(date: String): List<ObservationRow>
     @Query("SELECT * FROM observation WHERE deleted = 0 AND localDate BETWEEN :from AND :to ORDER BY startUtcMs") fun forRange(from: String, to: String): List<ObservationRow>
+    @Query("SELECT * FROM observation WHERE deleted = 0 AND type = :type AND localDate BETWEEN :from AND :to ORDER BY startUtcMs") fun forTypeInRange(type: String, from: String, to: String): List<ObservationRow>
     @Query("SELECT * FROM observation WHERE deleted = 0 AND type = :type ORDER BY startUtcMs DESC LIMIT 1") fun latest(type: String): ObservationRow?
     @Query("SELECT * FROM observation WHERE deleted = 0 AND type = :type ORDER BY startUtcMs DESC LIMIT :limit") fun latestRows(type: String, limit: Int): List<ObservationRow>
+    @Query("SELECT * FROM observation WHERE deleted = 0 AND type = :type ORDER BY startUtcMs DESC LIMIT :limit OFFSET :offset") fun pagedForType(type: String, limit: Int, offset: Int): List<ObservationRow>
+    @Query("SELECT COUNT(*) FROM observation WHERE deleted = 0 AND type = :type") fun countForType(type: String): Int
     @Query("SELECT * FROM observation WHERE deleted = 0 AND type = :type AND localDate BETWEEN :from AND :to ORDER BY startUtcMs") fun series(type: String, from: String, to: String): Flow<List<ObservationRow>>
     @Query("UPDATE observation SET deleted = 1 WHERE id IN (:ids)") fun markDeleted(ids: List<String>)
     @Query("SELECT id FROM observation WHERE provider = :provider AND deleted = 0 AND startUtcMs BETWEEN :from AND :to") fun idsIn(provider: String, from: Long, to: Long): List<String>

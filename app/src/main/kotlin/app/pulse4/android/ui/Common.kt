@@ -115,15 +115,23 @@ fun SinglestatCard(
     Card(
         modifier = modifier
             .fillMaxWidth()
-            .padding(vertical = 5.dp)
-            .clip(RoundedCornerShape(18.dp))
+            .padding(vertical = 6.dp)
+            .clip(RoundedCornerShape(22.dp))
             .clickable { onClick() },
-        shape = RoundedCornerShape(18.dp),
-        border = BorderStroke(1.dp, accentColor.copy(alpha = 0.28f)),
+        shape = RoundedCornerShape(22.dp),
+        border = BorderStroke(
+            1.dp,
+            Brush.horizontalGradient(
+                listOf(
+                    accentColor.copy(alpha = 0.45f),
+                    Color(0xFF1B2A3B).copy(alpha = 0.55f)
+                )
+            )
+        ),
         colors = CardDefaults.cardColors(containerColor = cardBg)
     ) {
         Box(Modifier.fillMaxWidth()) {
-            // 1. Fotografie / umělecký podklad (Oura styl)
+            // 1. Fotografie / umělecký podklad (Oura / Nordic wellness styl)
             if (artworkRes != null) {
                 Image(
                     painter = painterResource(id = artworkRes),
@@ -131,7 +139,7 @@ fun SinglestatCard(
                     contentScale = ContentScale.Crop,
                     modifier = Modifier
                         .matchParentSize()
-                        .alpha(0.35f)
+                        .alpha(0.82f)
                 )
             }
 
@@ -140,13 +148,13 @@ fun SinglestatCard(
                 val w = size.width
                 val h = size.height
 
-                // Ochranný gradient zleva doprava pro zachování vysokého kontrastu textů
+                // Jemný gradient zleva doprava — vlevo čitelný text, vpravo naplno prosvítá fotografie a motiv!
                 drawRect(
                     brush = Brush.horizontalGradient(
                         colors = listOf(
-                            cardBg.copy(alpha = 0.94f),
-                            cardBg.copy(alpha = 0.82f),
-                            cardBg.copy(alpha = 0.50f)
+                            Color(0xD9050911),
+                            cardBg.copy(alpha = 0.52f),
+                            Color(0x1A050911)
                         )
                     )
                 )
@@ -155,7 +163,7 @@ fun SinglestatCard(
                 drawCircle(
                     brush = Brush.radialGradient(
                         colors = listOf(
-                            accentColor.copy(alpha = 0.20f),
+                            accentColor.copy(alpha = 0.24f),
                             accentColor.copy(alpha = 0.05f),
                             Color.Transparent
                         ),
@@ -172,12 +180,12 @@ fun SinglestatCard(
                         motifKind = motifKind,
                         primaryColor = accentColor,
                         secondaryColor = Color.White,
-                        alphaMultiplier = 0.90f
+                        alphaMultiplier = 0.85f
                     )
                 }
             }
 
-            // 3. Graf na pozadí (Grafana Singlestat sparkline + area fill)
+            // 3. Graf na pozadí (Sparkline + area fill + svítící koncový bod)
             if (finite.size >= 2) {
                 Canvas(
                     modifier = Modifier
@@ -186,7 +194,7 @@ fun SinglestatCard(
                     val lo = finite.minOrNull() ?: 0.0
                     val hi = finite.maxOrNull() ?: 100.0
                     val span = (hi - lo).takeIf { it > 1e-9 } ?: 1.0
-                    val topPad = size.height * 0.32f
+                    val topPad = size.height * 0.34f
                     val botPad = 6f
                     val usableH = (size.height - topPad - botPad).coerceAtLeast(10f)
 
@@ -214,21 +222,32 @@ fun SinglestatCard(
                             fillPath.cubicTo(midX, py, midX, cy, cx, cy)
                         }
                         val lastX = x(pts.last().first)
+                        val lastY = y(pts.last().second)
                         fillPath.lineTo(lastX, size.height)
                         fillPath.close()
 
                         drawPath(
                             path = fillPath,
                             brush = Brush.verticalGradient(
-                                colors = listOf(accentColor.copy(alpha = 0.24f), accentColor.copy(alpha = 0.02f)),
+                                colors = listOf(accentColor.copy(alpha = 0.26f), accentColor.copy(alpha = 0.02f)),
                                 startY = topPad,
                                 endY = size.height
                             )
                         )
                         drawPath(
                             path = strokePath,
-                            color = accentColor.copy(alpha = 0.55f),
+                            color = accentColor.copy(alpha = 0.65f),
                             style = Stroke(width = 3.5f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                        )
+                        drawCircle(
+                            color = accentColor.copy(alpha = 0.35f),
+                            radius = 7.dp.toPx(),
+                            center = Offset(lastX, lastY)
+                        )
+                        drawCircle(
+                            color = Color.White,
+                            radius = 2.8.dp.toPx(),
+                            center = Offset(lastX, lastY)
                         )
                     }
                 }
@@ -457,9 +476,47 @@ fun formatDeltaMetric(diff: Double, unit: String): String {
     }
 }
 
+private fun inferChartArtworkRes(unit: String, title: String = ""): Int {
+    val u = unit.lowercase()
+    val t = title.lowercase()
+    return when {
+        t.contains("spánek") || t.contains("sleep") || u == "h" || u == "hod" -> app.pulse4.android.R.drawable.img_motif_sleep_night
+        t.contains("hrv") || u == "ms" -> app.pulse4.android.R.drawable.img_motif_hrv_autonomic
+        t.contains("ecg") || t.contains("ekg") -> app.pulse4.android.R.drawable.img_motif_ecg_signal
+        t.contains("tep") || u == "bpm" -> app.pulse4.android.R.drawable.img_motif_heart_real
+        t.contains("voda") || t.contains("hydr") -> app.pulse4.android.R.drawable.img_motif_body_water
+        t.contains("tuk") || t.contains("fat") -> app.pulse4.android.R.drawable.img_motif_body_fat
+        t.contains("kost") || t.contains("bone") -> app.pulse4.android.R.drawable.img_motif_bone_mass
+        t.contains("váh") || t.contains("sval") || u == "kg" || u == "lb" -> app.pulse4.android.R.drawable.img_motif_body_silhouette
+        t.contains("krok") || t.contains("běh") || t.contains("tempo") -> app.pulse4.android.R.drawable.img_alpine_trail_hero
+        t.contains("stres") -> app.pulse4.android.R.drawable.img_motif_brain_stress
+        t.contains("battery") || t.contains("energ") -> app.pulse4.android.R.drawable.img_motif_body_battery
+        else -> app.pulse4.android.R.drawable.img_nordic_wellness_hero
+    }
+}
+
+private fun inferChartMotifKind(unit: String, title: String = ""): MetricMotifKind {
+    val u = unit.lowercase()
+    val t = title.lowercase()
+    return when {
+        t.contains("spánek") || t.contains("sleep") || u == "h" || u == "hod" -> MetricMotifKind.SLEEP_NOCTURNAL
+        t.contains("hrv") || u == "ms" -> MetricMotifKind.HRV_AUTONOMIC
+        t.contains("ecg") || t.contains("ekg") -> MetricMotifKind.ECG_SIGNAL
+        t.contains("tep") || u == "bpm" -> MetricMotifKind.HEART_PULSE
+        t.contains("voda") || t.contains("hydr") -> MetricMotifKind.BODY_WATER
+        t.contains("tuk") || t.contains("fat") -> MetricMotifKind.BODY_FAT
+        t.contains("kost") || t.contains("bone") -> MetricMotifKind.BONE_MASS
+        t.contains("váh") || t.contains("sval") || u == "kg" || u == "lb" -> MetricMotifKind.BODY_COMPOSITION
+        t.contains("krok") || t.contains("běh") -> MetricMotifKind.STEPS_TRAIL
+        t.contains("stres") -> MetricMotifKind.AUTONOMIC_STRESS
+        else -> MetricMotifKind.RECOVERY_SUNRISE
+    }
+}
+
 /**
- * Vícenásobný srovnávací graf (Grafana styl) pro Skupinový Dashboard i Porovnání aktivit (Compare).
- * Podporuje zapínání/vypínání jednotlivých křivek v legendě a interaktivní odečet všech křivek najednou.
+ * Vícenásobný srovnávací graf (Grafana / Oura Biometric Observatory styl) pro Skupinový Dashboard,
+ * Korelace metrik i Porovnání aktivit (Compare).
+ * Podporuje zapínání/vypínání jednotlivých křivek v legendě, fotografické pozadí a interaktivní odečet.
  */
 @Composable
 fun MultiSeriesLineChart(
@@ -467,6 +524,8 @@ fun MultiSeriesLineChart(
     modifier: Modifier = Modifier,
     xLabels: List<String> = emptyList(),
     title: String = "Srovnávací graf",
+    artworkRes: Int? = null,
+    motifKind: MetricMotifKind? = null,
 ) {
     var hiddenIds by remember { mutableStateOf(setOf<String>()) }
     var selectedIdx by remember { mutableStateOf<Int?>(null) }
@@ -483,6 +542,15 @@ fun MultiSeriesLineChart(
         val units = visibleSeries.map { it.unit }.filter { it.isNotBlank() }.distinct()
         if (units.size == 1) units.first() else units.firstOrNull() ?: ""
     }
+    val leadColor = remember(visibleSeries, series) {
+        visibleSeries.firstOrNull()?.color ?: series.firstOrNull()?.color ?: Color(0xFF2DD4BF)
+    }
+    val effectiveArtwork = remember(artworkRes, primaryUnit, title, visibleSeries) {
+        artworkRes ?: inferChartArtworkRes(primaryUnit, visibleSeries.firstOrNull()?.label ?: title)
+    }
+    val effectiveMotif = remember(motifKind, primaryUnit, title, visibleSeries) {
+        motifKind ?: inferChartMotifKind(primaryUnit, visibleSeries.firstOrNull()?.label ?: title)
+    }
 
     // Výpočet rozsahů pro každou řadu zvlášť pro vysoké rozlišení změn (±100g až 500g)
     data class SeriesScale(val lo: Double, val hi: Double, val span: Double)
@@ -497,7 +565,7 @@ fun MultiSeriesLineChart(
                 val sMax = f.maxOrNull() ?: 1.0
                 val sRawSpan = sMax - sMin
                 val minSpanForUnit = when (s.unit) {
-                    "kg", "lb" -> 0.80 // 800g minimální vertikální rozsah -> 200g změna tvoří celých 25 % výšky grafu!
+                    "kg", "lb" -> 0.80
                     "%" -> 2.0
                     "bpm" -> 6.0
                     "ms" -> 6.0
@@ -523,265 +591,328 @@ fun MultiSeriesLineChart(
     val yTicksSpan = (yTicksHi - yTicksLo).takeIf { it > 1e-9 } ?: 1.0
     val yDecimals = if (primaryUnit == "kg" || primaryUnit == "lb" || yTicksSpan <= 4.0) 2 else 1
 
-    val gridColor = Color.White.copy(alpha = 0.08f)
+    val gridColor = Color.White.copy(alpha = 0.09f)
     val cursorColor = Color(0xFFE2E8F0)
 
     Card(
         modifier = modifier.fillMaxWidth().padding(vertical = 6.dp),
-        shape = RoundedCornerShape(18.dp),
-        border = BorderStroke(1.dp, MineralOutlineDark),
-        colors = CardDefaults.cardColors(containerColor = MineralSurfaceDark)
+        shape = RoundedCornerShape(22.dp),
+        border = BorderStroke(
+            1.dp,
+            Brush.horizontalGradient(
+                listOf(
+                    leadColor.copy(alpha = 0.55f),
+                    Color.White.copy(alpha = 0.16f),
+                    leadColor.copy(alpha = 0.28f)
+                )
+            )
+        ),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF070C15))
     ) {
-        Column(Modifier.padding(14.dp)) {
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        title,
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = Color(0xFFCBD5E1),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    selectedIdx?.let { idx ->
-                        val dateText = xLabels.getOrNull(idx) ?: "Bod #${idx + 1}"
-                        Text(
-                            "Odečet: $dateText (klepnutím zrušíte)",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Color(0xFF38BDF8),
-                            fontWeight = FontWeight.SemiBold
-                        )
-                    }
-                }
+        Box(Modifier.fillMaxWidth()) {
+            // 1. Fotografické pozadí
+            Image(
+                painter = painterResource(id = effectiveArtwork),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .matchParentSize()
+                    .alpha(0.64f)
+            )
 
-                Row(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(Color(0xFF1E2433))
-                        .clickable { independentScale = !independentScale }
-                        .padding(horizontal = 8.dp, vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        if (independentScale) "Detail křivek (±100g)" else "Společná osa Y",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = if (independentScale) Color(0xFF2DD4BF) else Color(0xFF94A3B8)
+            // 2. Atmosférický závoj a procedurální motiv
+            Canvas(modifier = Modifier.matchParentSize()) {
+                drawRect(
+                    brush = Brush.verticalGradient(
+                        colors = listOf(
+                            Color(0xCC060B14),
+                            Color(0x99060B14),
+                            Color(0xE6050911)
+                        )
                     )
-                }
+                )
+                drawCircle(
+                    brush = Brush.radialGradient(
+                        colors = listOf(
+                            leadColor.copy(alpha = 0.22f),
+                            leadColor.copy(alpha = 0.04f),
+                            Color.Transparent
+                        ),
+                        center = Offset(size.width * 0.82f, size.height * 0.25f),
+                        radius = size.width * 0.55f
+                    ),
+                    center = Offset(size.width * 0.82f, size.height * 0.25f),
+                    radius = size.width * 0.55f
+                )
+                drawMetricMotifIllustration(
+                    motifKind = effectiveMotif,
+                    primaryColor = leadColor,
+                    secondaryColor = Color.White,
+                    alphaMultiplier = 0.65f
+                )
             }
 
-            Spacer(Modifier.height(8.dp))
-
-            // Interaktivní Grafana legenda s okamžitým odečtem hodnot a přírůstků vs předchozí měření
-            FlowRow(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                series.forEach { s ->
-                    val enabled = s.id !in hiddenIds
-                    val activeIdx = selectedIdx ?: s.values.indexOfLast { it != null && it.isFinite() }.takeIf { it >= 0 }
-                    val curVal = activeIdx?.let { s.values.getOrNull(it) }
-                    val prevVal = activeIdx?.let { if (it > 0) s.values.getOrNull(it - 1) else null }
-                    val delta = if (curVal != null && prevVal != null) curVal - prevVal else null
-                    val deltaStr = if (delta != null) " (${formatDeltaMetric(delta, s.unit)})" else ""
-
-                    val decimals = when (s.unit) {
-                        "kg", "lb" -> 2
-                        "%", "m/s", "h" -> 1
-                        "bpm", "ms", "W", "kcal" -> 0
-                        else -> 1
+            Column(Modifier.padding(15.dp)) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            title,
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        selectedIdx?.let { idx ->
+                            val dateText = xLabels.getOrNull(idx) ?: "Bod #${idx + 1}"
+                            Text(
+                                "Odečet: $dateText (klepnutím zrušíte)",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFF38BDF8),
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
                     }
-                    val valStr = curVal?.let { "${fmt.number(it, decimals)}${if (s.unit.isNotBlank()) " ${s.unit}" else ""}$deltaStr" } ?: "—"
+
                     Row(
                         modifier = Modifier
                             .clip(RoundedCornerShape(10.dp))
-                            .background(
-                                if (enabled) s.color.copy(alpha = 0.16f)
-                                else Color(0xFF1E2433).copy(alpha = 0.5f)
-                            )
-                            .clickable {
-                                hiddenIds = if (enabled) hiddenIds + s.id else hiddenIds - s.id
-                            }
-                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                            .background(Color(0xCC0B1322))
+                            .clickable { independentScale = !independentScale }
+                            .padding(horizontal = 9.dp, vertical = 5.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Box(
-                            Modifier
-                                .size(8.dp)
-                                .background(if (enabled) s.color else Color.Gray, CircleShape)
-                        )
-                        Spacer(Modifier.width(6.dp))
                         Text(
-                            "${s.label}: $valStr",
+                            if (independentScale) "Detail křivek (±100g)" else "Společná osa Y",
                             style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.SemiBold,
-                            color = if (enabled) Color.White else Color.Gray,
-                            maxLines = 1,
-                            softWrap = false
+                            fontWeight = FontWeight.Bold,
+                            color = if (independentScale) Color(0xFF2DD4BF) else Color(0xFF94A3B8)
                         )
                     }
                 }
-            }
 
-            if (allFinite.size < 2 || maxPoints < 2) {
-                Box(
-                    Modifier
-                        .fillMaxWidth()
-                        .height(120.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        "Pro zobrazení křivek jsou potřeba alespoň 2 datové body.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color(0xFF64748B)
-                    )
-                }
-            } else {
-                Spacer(Modifier.height(6.dp))
-                Row(
+                Spacer(Modifier.height(8.dp))
+
+                // Interaktivní legenda s okamžitým odečtem hodnot a přírůstků vs předchozí měření
+                FlowRow(
                     Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    // Osa Y (5 úrovní s vysokým rozlišením pro odečet 200g změn)
-                    Column(
-                        modifier = Modifier
-                            .height(195.dp)
-                            .padding(end = 8.dp, top = 4.dp, bottom = 4.dp),
-                        verticalArrangement = Arrangement.SpaceBetween,
-                        horizontalAlignment = Alignment.End
-                    ) {
-                        for (step in 0..4) {
-                            val tickVal = yTicksHi - yTicksSpan * (step / 4.0)
-                            val suffix = if (primaryUnit.isNotBlank()) " $primaryUnit" else ""
+                    series.forEach { s ->
+                        val enabled = s.id !in hiddenIds
+                        val activeIdx = selectedIdx ?: s.values.indexOfLast { it != null && it.isFinite() }.takeIf { it >= 0 }
+                        val curVal = activeIdx?.let { s.values.getOrNull(it) }
+                        val prevVal = activeIdx?.let { if (it > 0) s.values.getOrNull(it - 1) else null }
+                        val delta = if (curVal != null && prevVal != null) curVal - prevVal else null
+                        val deltaStr = if (delta != null) " (${formatDeltaMetric(delta, s.unit)})" else ""
+
+                        val decimals = when (s.unit) {
+                            "kg", "lb" -> 2
+                            "%", "m/s", "h" -> 1
+                            "bpm", "ms", "W", "kcal" -> 0
+                            else -> 1
+                        }
+                        val valStr = curVal?.let { "${fmt.number(it, decimals)}${if (s.unit.isNotBlank()) " ${s.unit}" else ""}$deltaStr" } ?: "—"
+                        Row(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(
+                                    if (enabled) s.color.copy(alpha = 0.22f)
+                                    else Color(0x990F172A)
+                                )
+                                .clickable {
+                                    hiddenIds = if (enabled) hiddenIds + s.id else hiddenIds - s.id
+                                }
+                                .padding(horizontal = 9.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                Modifier
+                                    .size(8.dp)
+                                    .background(if (enabled) s.color else Color.Gray, CircleShape)
+                            )
+                            Spacer(Modifier.width(6.dp))
                             Text(
-                                "${fmt.number(tickVal, yDecimals)}$suffix",
+                                "${s.label}: $valStr",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = Color(0xFF94A3B8),
+                                fontWeight = FontWeight.SemiBold,
+                                color = if (enabled) Color.White else Color.Gray,
                                 maxLines = 1,
                                 softWrap = false
                             )
                         }
                     }
+                }
 
-                    Canvas(
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(195.dp)
-                            .padding(vertical = 6.dp)
-                            .pointerInput(maxPoints) {
-                                fun idx(x: Float) = ((x / size.width) * (maxPoints - 1)).toInt().coerceIn(0, maxPoints - 1)
-                                detectTapGestures { offset ->
-                                    val tapped = idx(offset.x)
-                                    selectedIdx = if (selectedIdx == tapped) null else tapped
-                                }
-                            }
-                            .pointerInput(maxPoints) {
-                                fun idx(x: Float) = ((x / size.width) * (maxPoints - 1)).toInt().coerceIn(0, maxPoints - 1)
-                                detectDragGestures(
-                                    onDragStart = { o -> selectedIdx = idx(o.x) },
-                                    onDrag = { change, _ -> selectedIdx = idx(change.position.x) }
-                                )
-                            }
+                if (allFinite.size < 2 || maxPoints < 2) {
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .height(120.dp),
+                        contentAlignment = Alignment.Center
                     ) {
-                        val padY = 10f
-                        val chartH = (size.height - padY * 2).coerceAtLeast(10f)
-
-                        fun x(i: Int, count: Int) = size.width * i / (count - 1).coerceAtLeast(1)
-
-                        // Mřížka (5 úrovní zarovnaných s osou Y)
-                        for (step in 0..4) {
-                            val gy = padY + chartH * (step / 4f)
-                            drawLine(gridColor, Offset(0f, gy), Offset(size.width, gy), strokeWidth = 1.2f)
-                        }
-
-                        // Vykreslení každé viditelné řady s vysokou amplitudou
-                        for (s in visibleSeries) {
-                            val scale = seriesScales[s.id] ?: SeriesScale(yTicksLo, yTicksHi, yTicksSpan)
-                            fun yVal(v: Double) = padY + (chartH * (1.0 - (v - scale.lo) / scale.span)).toFloat()
-
-                            val pts = mutableListOf<Pair<Int, Double>>()
-                            s.values.forEachIndexed { idx, v -> if (v != null && v.isFinite()) pts.add(idx to v) }
-                            if (pts.isEmpty()) continue
-                            val count = s.values.size.coerceAtLeast(maxPoints)
-                            if (pts.size == 1) {
-                                drawCircle(s.color, radius = 6f, center = Offset(x(pts[0].first, count), yVal(pts[0].second)))
-                                continue
-                            }
-
-                            val strokePath = Path()
-                            val fillPath = Path()
-                            val fx = x(pts[0].first, count)
-                            val fy = yVal(pts[0].second)
-                            strokePath.moveTo(fx, fy)
-                            fillPath.moveTo(fx, size.height)
-                            fillPath.lineTo(fx, fy)
-
-                            for (i in 1 until pts.size) {
-                                val px = x(pts[i - 1].first, count)
-                                val py = yVal(pts[i - 1].second)
-                                val cx = x(pts[i].first, count)
-                                val cy = yVal(pts[i].second)
-                                val midX = px + (cx - px) * 0.5f
-                                strokePath.cubicTo(midX, py, midX, cy, cx, cy)
-                                fillPath.cubicTo(midX, py, midX, cy, cx, cy)
-                            }
-                            val lx = x(pts.last().first, count)
-                            fillPath.lineTo(lx, size.height)
-                            fillPath.close()
-
-                            drawPath(
-                                fillPath,
-                                brush = Brush.verticalGradient(
-                                    colors = listOf(s.color.copy(alpha = if (visibleSeries.size == 1) 0.28f else 0.14f), Color.Transparent),
-                                    startY = padY,
-                                    endY = size.height
+                        Text(
+                            "Pro zobrazení křivek jsou potřeba alespoň 2 datové body.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFF94A3B8)
+                        )
+                    }
+                } else {
+                    Spacer(Modifier.height(6.dp))
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Osa Y (5 úrovní s vysokým rozlišením pro odečet 200g změn)
+                        Column(
+                            modifier = Modifier
+                                .height(195.dp)
+                                .padding(end = 8.dp, top = 4.dp, bottom = 4.dp),
+                            verticalArrangement = Arrangement.SpaceBetween,
+                            horizontalAlignment = Alignment.End
+                        ) {
+                            for (step in 0..4) {
+                                val tickVal = yTicksHi - yTicksSpan * (step / 4.0)
+                                val suffix = if (primaryUnit.isNotBlank()) " $primaryUnit" else ""
+                                Text(
+                                    "${fmt.number(tickVal, yDecimals)}$suffix",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFFCBD5E1),
+                                    maxLines = 1,
+                                    softWrap = false
                                 )
-                            )
-                            drawPath(
-                                strokePath,
-                                color = s.color,
-                                style = Stroke(width = 4.5f, cap = StrokeCap.Round, join = StrokeJoin.Round)
-                            )
-                            if (pts.size <= 35) {
-                                for (pt in pts) {
-                                    drawCircle(s.color, radius = 4f, center = Offset(x(pt.first, count), yVal(pt.second)))
-                                }
                             }
                         }
 
-                        // Kurzor s body pro každou křivku
-                        selectedIdx?.let { idx ->
-                            val cx = x(idx, maxPoints)
-                            drawLine(cursorColor.copy(alpha = 0.65f), Offset(cx, 0f), Offset(cx, size.height), strokeWidth = 2f)
+                        Canvas(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(195.dp)
+                                .padding(vertical = 6.dp)
+                                .pointerInput(maxPoints) {
+                                    fun idx(x: Float) = ((x / size.width) * (maxPoints - 1)).toInt().coerceIn(0, maxPoints - 1)
+                                    detectTapGestures { offset ->
+                                        val tapped = idx(offset.x)
+                                        selectedIdx = if (selectedIdx == tapped) null else tapped
+                                    }
+                                }
+                                .pointerInput(maxPoints) {
+                                    fun idx(x: Float) = ((x / size.width) * (maxPoints - 1)).toInt().coerceIn(0, maxPoints - 1)
+                                    detectDragGestures(
+                                        onDragStart = { o -> selectedIdx = idx(o.x) },
+                                        onDrag = { change, _ -> selectedIdx = idx(change.position.x) }
+                                    )
+                                }
+                        ) {
+                            val padY = 10f
+                            val chartH = (size.height - padY * 2).coerceAtLeast(10f)
+
+                            fun x(i: Int, count: Int) = size.width * i / (count - 1).coerceAtLeast(1)
+
+                            // Mřížka (5 úrovní zarovnaných s osou Y)
+                            for (step in 0..4) {
+                                val gy = padY + chartH * (step / 4f)
+                                drawLine(gridColor, Offset(0f, gy), Offset(size.width, gy), strokeWidth = 1.2f)
+                            }
+
+                            // Vykreslení každé viditelné řady se zářícím halo efektem
                             for (s in visibleSeries) {
                                 val scale = seriesScales[s.id] ?: SeriesScale(yTicksLo, yTicksHi, yTicksSpan)
-                                s.values.getOrNull(idx)?.let { v ->
-                                    val cy = padY + (chartH * (1.0 - (v - scale.lo) / scale.span)).toFloat()
-                                    drawCircle(s.color, radius = 7f, center = Offset(cx, cy))
-                                    drawCircle(Color.White, radius = 3.5f, center = Offset(cx, cy))
+                                fun yVal(v: Double) = padY + (chartH * (1.0 - (v - scale.lo) / scale.span)).toFloat()
+
+                                val pts = mutableListOf<Pair<Int, Double>>()
+                                s.values.forEachIndexed { idx, v -> if (v != null && v.isFinite()) pts.add(idx to v) }
+                                if (pts.isEmpty()) continue
+                                val count = s.values.size.coerceAtLeast(maxPoints)
+                                if (pts.size == 1) {
+                                    drawCircle(s.color, radius = 6f, center = Offset(x(pts[0].first, count), yVal(pts[0].second)))
+                                    continue
+                                }
+
+                                val strokePath = Path()
+                                val fillPath = Path()
+                                val fx = x(pts[0].first, count)
+                                val fy = yVal(pts[0].second)
+                                strokePath.moveTo(fx, fy)
+                                fillPath.moveTo(fx, size.height)
+                                fillPath.lineTo(fx, fy)
+
+                                for (i in 1 until pts.size) {
+                                    val px = x(pts[i - 1].first, count)
+                                    val py = yVal(pts[i - 1].second)
+                                    val cx = x(pts[i].first, count)
+                                    val cy = yVal(pts[i].second)
+                                    val midX = px + (cx - px) * 0.5f
+                                    strokePath.cubicTo(midX, py, midX, cy, cx, cy)
+                                    fillPath.cubicTo(midX, py, midX, cy, cx, cy)
+                                }
+                                val lx = x(pts.last().first, count)
+                                fillPath.lineTo(lx, size.height)
+                                fillPath.close()
+
+                                drawPath(
+                                    fillPath,
+                                    brush = Brush.verticalGradient(
+                                        colors = listOf(s.color.copy(alpha = if (visibleSeries.size == 1) 0.34f else 0.18f), Color.Transparent),
+                                        startY = padY,
+                                        endY = size.height
+                                    )
+                                )
+                                // Vnější jemná záře křivky
+                                drawPath(
+                                    strokePath,
+                                    color = s.color.copy(alpha = 0.24f),
+                                    style = Stroke(width = 11f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                                )
+                                // Ostré jádro křivky
+                                drawPath(
+                                    strokePath,
+                                    color = s.color,
+                                    style = Stroke(width = 4.5f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                                )
+                                if (pts.size <= 35) {
+                                    for (pt in pts) {
+                                        val ptCenter = Offset(x(pt.first, count), yVal(pt.second))
+                                        drawCircle(s.color.copy(alpha = 0.30f), radius = 7f, center = ptCenter)
+                                        drawCircle(s.color, radius = 4f, center = ptCenter)
+                                    }
+                                }
+                            }
+
+                            // Kurzor s body pro každou křivku
+                            selectedIdx?.let { idx ->
+                                val cx = x(idx, maxPoints)
+                                drawLine(cursorColor.copy(alpha = 0.75f), Offset(cx, 0f), Offset(cx, size.height), strokeWidth = 2f)
+                                for (s in visibleSeries) {
+                                    val scale = seriesScales[s.id] ?: SeriesScale(yTicksLo, yTicksHi, yTicksSpan)
+                                    s.values.getOrNull(idx)?.let { v ->
+                                        val cy = padY + (chartH * (1.0 - (v - scale.lo) / scale.span)).toFloat()
+                                        drawCircle(s.color.copy(alpha = 0.38f), radius = 12f, center = Offset(cx, cy))
+                                        drawCircle(s.color, radius = 7f, center = Offset(cx, cy))
+                                        drawCircle(Color.White, radius = 3.5f, center = Offset(cx, cy))
+                                    }
                                 }
                             }
                         }
                     }
-                }
-                if (xLabels.size >= 2) {
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .padding(start = 52.dp, top = 2.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(xLabels.first(), style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8), maxLines = 1, softWrap = false)
-                        if (xLabels.size >= 3) {
-                            Text(xLabels[xLabels.size / 2], style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8), maxLines = 1, softWrap = false)
+                    if (xLabels.size >= 2) {
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(start = 52.dp, top = 2.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(xLabels.first(), style = MaterialTheme.typography.labelSmall, color = Color(0xFFCBD5E1), maxLines = 1, softWrap = false)
+                            if (xLabels.size >= 3) {
+                                Text(xLabels[xLabels.size / 2], style = MaterialTheme.typography.labelSmall, color = Color(0xFFCBD5E1), maxLines = 1, softWrap = false)
+                            }
+                            Text(xLabels.last(), style = MaterialTheme.typography.labelSmall, color = Color(0xFFCBD5E1), maxLines = 1, softWrap = false)
                         }
-                        Text(xLabels.last(), style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8), maxLines = 1, softWrap = false)
                     }
                 }
             }
@@ -794,7 +925,8 @@ private class ChartSeries(val indices: IntArray, val values: DoubleArray) {
 }
 
 /**
- * Moderní plynulý graf zdravotních metrik s kubickými Bézier křivkami, osou Y s jednotkami, osou X s časem a automatickým přiblížením na změnu hodnot.
+ * Moderní plynulý graf zdravotních metrik s kubickými Bézier křivkami, fotografickým a procedurálním
+ * pozadím, osou Y s jednotkami, osou X s časem a automatickým přiblížením na změnu hodnot.
  */
 @Composable
 fun LineChart(
@@ -814,14 +946,23 @@ fun LineChart(
     secondaryColor: Color = Color(0xFFF59E0B),
     secondaryLabel: String = "",
     channel: Channel? = null,
+    artworkRes: Int? = null,
+    motifKind: MetricMotifKind? = null,
     onCursor: (Int) -> Unit = {},
     onRange: (IntRange?) -> Unit = {},
 ) {
-    val bandColor = color.copy(alpha = 0.12f)
+    val bandColor = color.copy(alpha = 0.16f)
     val selColor = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.22f)
     val cursorColor = Color(0xFFFF5252)
-    val gridColor = Color.White.copy(alpha = 0.08f)
+    val gridColor = Color.White.copy(alpha = 0.09f)
     var selectedIndex by remember { mutableStateOf<Int?>(null) }
+
+    val effectiveArtwork = remember(artworkRes, unit, secondaryLabel) {
+        artworkRes ?: inferChartArtworkRes(unit, secondaryLabel)
+    }
+    val effectiveMotif = remember(motifKind, unit, secondaryLabel) {
+        motifKind ?: inferChartMotifKind(unit, secondaryLabel)
+    }
 
     val strokePath = remember { Path() }
     val fillPath = remember { Path() }
@@ -886,369 +1027,431 @@ fun LineChart(
 
     Card(
         modifier = modifier.fillMaxWidth().padding(vertical = 6.dp),
-        shape = RoundedCornerShape(18.dp),
-        border = BorderStroke(1.dp, MineralOutlineDark),
-        colors = CardDefaults.cardColors(containerColor = MineralSurfaceDark)
+        shape = RoundedCornerShape(22.dp),
+        border = BorderStroke(
+            1.dp,
+            Brush.horizontalGradient(
+                listOf(
+                    color.copy(alpha = 0.52f),
+                    Color.White.copy(alpha = 0.15f),
+                    color.copy(alpha = 0.25f)
+                )
+            )
+        ),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF070C15))
     ) {
-        Column(Modifier.padding(14.dp)) {
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                val activeIdx = selectedIndex ?: cursor
-                val activeVal = activeIdx?.let { values.getOrNull(it) }
-                val activeSecVal = activeIdx?.let { secondaryValues?.getOrNull(it) }
-                val activeDate = activeIdx?.let { xLabels.getOrNull(it) }
-                val firstVal = values.firstOrNull { it != null && it.isFinite() }
-                if (activeVal != null) {
-                    val deltaVsStart = if (firstVal != null) activeVal - firstVal else null
-                    val deltaStr = deltaVsStart?.let { d ->
-                        val sign = if (d >= 0) "+" else ""
-                        " ($sign${fmt.number(d, effectiveDecimals)}$unitSuffix)"
-                    } ?: ""
-                    Column(Modifier.weight(1f)) {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text(
-                                "${fmt.number(activeVal, effectiveDecimals)}$unitSuffix$deltaStr",
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = color
-                            )
-                            if (activeSecVal != null && secondaryLabel.isNotBlank()) {
+        Box(Modifier.fillMaxWidth()) {
+            // 1. Fotografické pozadí
+            Image(
+                painter = painterResource(id = effectiveArtwork),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .matchParentSize()
+                    .alpha(0.62f)
+            )
+
+            // 2. Atmosférický závoj a procedurální motiv
+            Canvas(modifier = Modifier.matchParentSize()) {
+                drawRect(
+                    brush = Brush.verticalGradient(
+                        colors = listOf(
+                            Color(0xCC060B14),
+                            Color(0x99060B14),
+                            Color(0xE6050911)
+                        )
+                    )
+                )
+                drawCircle(
+                    brush = Brush.radialGradient(
+                        colors = listOf(
+                            color.copy(alpha = 0.22f),
+                            color.copy(alpha = 0.04f),
+                            Color.Transparent
+                        ),
+                        center = Offset(size.width * 0.85f, size.height * 0.28f),
+                        radius = size.width * 0.55f
+                    ),
+                    center = Offset(size.width * 0.85f, size.height * 0.28f),
+                    radius = size.width * 0.55f
+                )
+                drawMetricMotifIllustration(
+                    motifKind = effectiveMotif,
+                    primaryColor = color,
+                    secondaryColor = Color.White,
+                    alphaMultiplier = 0.65f
+                )
+            }
+
+            Column(Modifier.padding(15.dp)) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val activeIdx = selectedIndex ?: cursor
+                    val activeVal = activeIdx?.let { values.getOrNull(it) }
+                    val activeSecVal = activeIdx?.let { secondaryValues?.getOrNull(it) }
+                    val activeDate = activeIdx?.let { xLabels.getOrNull(it) }
+                    val firstVal = values.firstOrNull { it != null && it.isFinite() }
+                    if (activeVal != null) {
+                        val deltaVsStart = if (firstVal != null) activeVal - firstVal else null
+                        val deltaStr = deltaVsStart?.let { d ->
+                            val sign = if (d >= 0) "+" else ""
+                            " ($sign${fmt.number(d, effectiveDecimals)}$unitSuffix)"
+                        } ?: ""
+                        Column(Modifier.weight(1f)) {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Text(
-                                    "$secondaryLabel: ${fmt.number(activeSecVal, effectiveDecimals)}$unitSuffix",
-                                    style = MaterialTheme.typography.labelSmall,
+                                    "${fmt.number(activeVal, effectiveDecimals)}$unitSuffix$deltaStr",
+                                    style = MaterialTheme.typography.titleSmall,
                                     fontWeight = FontWeight.Bold,
-                                    color = secondaryColor
+                                    color = color
+                                )
+                                if (activeSecVal != null && secondaryLabel.isNotBlank()) {
+                                    Text(
+                                        "$secondaryLabel: ${fmt.number(activeSecVal, effectiveDecimals)}$unitSuffix",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = secondaryColor
+                                    )
+                                }
+                            }
+                            if (!activeDate.isNullOrBlank()) {
+                                Text(
+                                    "Datum / Poloha: $activeDate",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFFCBD5E1)
                                 )
                             }
                         }
-                        if (!activeDate.isNullOrBlank()) {
+                    } else {
+                        val netDelta = if (finite.size >= 2) finite.last() - finite.first() else null
+                        val netStr = netDelta?.let { d ->
+                            val sign = if (d >= 0) "+" else ""
+                            " · Δ $sign${fmt.number(d, effectiveDecimals)}$unitSuffix"
+                        } ?: ""
+                        Column(Modifier.weight(1f)) {
                             Text(
-                                "Datum / Poloha: $activeDate",
+                                "Rozpětí: ${fmt.number(dataLo, effectiveDecimals)} – ${fmt.number(dataHi, effectiveDecimals)}$unitSuffix$netStr",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color.White
+                            )
+                            Text(
+                                "Počet měření v grafu: ${finite.size}" + (if (isScatter) " (bodový rozptyl XY bez spojnic)" else " · klepnutím nebo tažením odečtete bod"),
                                 style = MaterialTheme.typography.labelSmall,
                                 color = Color(0xFF94A3B8)
                             )
                         }
                     }
-                } else {
-                    val netDelta = if (finite.size >= 2) finite.last() - finite.first() else null
-                    val netStr = netDelta?.let { d ->
-                        val sign = if (d >= 0) "+" else ""
-                        " · Δ $sign${fmt.number(d, effectiveDecimals)}$unitSuffix"
-                    } ?: ""
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            "Rozpětí: ${fmt.number(dataLo, effectiveDecimals)} – ${fmt.number(dataHi, effectiveDecimals)}$unitSuffix$netStr",
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.SemiBold,
-                            color = Color(0xFFCBD5E1)
-                        )
-                        Text(
-                            "Počet měření v grafu: ${finite.size}" + (if (isScatter) " (bodový rozptyl XY bez spojnic)" else ""),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Color(0xFF64748B)
-                        )
-                    }
-                }
-            }
-
-            Spacer(Modifier.height(6.dp))
-
-            Row(
-                Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                // Osa Y s jednotkou (5 horizontálních hladin)
-                if (finite.size >= 2) {
-                    Column(
-                        modifier = Modifier
-                            .height(185.dp)
-                            .padding(end = 8.dp, top = 4.dp, bottom = 4.dp),
-                        verticalArrangement = Arrangement.SpaceBetween,
-                        horizontalAlignment = Alignment.End
-                    ) {
-                        val span = (hi - lo).takeIf { it > 1e-9 } ?: 1.0
-                        for (step in 0..4) {
-                            val tickVal = hi - span * (step / 4.0)
-                            Text(
-                                "${fmt.number(tickVal, effectiveDecimals)}$unitSuffix",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = Color(0xFF94A3B8),
-                                maxLines = 1,
-                                softWrap = false
-                            )
-                        }
-                    }
                 }
 
-                Canvas(
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(185.dp)
-                        .padding(vertical = 6.dp)
-                        .pointerInput(values.size, selectMode) {
-                            if (values.size < 2) return@pointerInput
-                            fun idx(x: Float) = ((x / size.width) * (values.size - 1)).toInt().coerceIn(0, values.size - 1)
-                            detectTapGestures { o ->
-                                val i = idx(o.x)
-                                selectedIndex = i
-                                onCursor(i)
-                            }
-                        }
-                        .pointerInput(values.size, selectMode) {
-                            if (values.size < 2) return@pointerInput
-                            var anchor = 0
-                            fun idx(x: Float) = ((x / size.width) * (values.size - 1)).toInt().coerceIn(0, values.size - 1)
-                            detectHorizontalDragGestures(
-                                onDragStart = { o ->
-                                    anchor = idx(o.x)
-                                    selectedIndex = anchor
-                                    onCursor(anchor)
-                                    if (selectMode) onRange(anchor..anchor)
-                                },
-                                onHorizontalDrag = { _, dragAmount ->
-                                    val curIdx = selectedIndex ?: anchor
-                                    val nextIdx = (curIdx + if (dragAmount > 0) 1 else if (dragAmount < 0) -1 else 0).coerceIn(0, values.size - 1)
-                                    selectedIndex = nextIdx
-                                    onCursor(nextIdx)
-                                    if (selectMode) onRange(minOf(anchor, nextIdx)..maxOf(anchor, nextIdx))
-                                }
-                            )
-                        }
+                Spacer(Modifier.height(6.dp))
+
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    if (finite.size < 2) return@Canvas
-                    val curLo = lo
-                    val curHi = hi
-                    val paddingY = 10f
-                    val chartHeight = (size.height - (paddingY * 2)).coerceAtLeast(10f)
-                    val span = (curHi - curLo).takeIf { it > 1e-9 } ?: 1.0
-
-                    fun x(i: Int) = size.width * i / (values.size - 1).coerceAtLeast(1)
-                    fun y(v: Double) = paddingY + (chartHeight * (1 - (v - curLo) / span)).toFloat()
-
-                    for (step in 0..4) {
-                        val gridY = paddingY + chartHeight * (step / 4f)
-                        drawLine(gridColor, Offset(0f, gridY), Offset(size.width, gridY), strokeWidth = 1.2f)
-                    }
-
-                    band?.let {
-                        val top = y(it.endInclusive).coerceIn(0f, size.height)
-                        val bottom = y(it.start).coerceIn(0f, size.height)
-                        if (bottom > top) {
-                            drawRect(bandColor, Offset(0f, top), Size(size.width, (bottom - top).coerceAtLeast(4f)))
-                        }
-                    }
-
-                    range?.let {
-                        drawRect(selColor, Offset(x(it.first), 0f), Size(x(it.last) - x(it.first), size.height))
-                    }
-
-                    // Baseline pro Performance Condition na Y = 0.0
-                    if (channel == Channel.PERFORMANCE_CONDITION && 0.0 in lo..hi) {
-                        val zeroY = y(0.0)
-                        drawLine(Color.White.copy(alpha = 0.25f), Offset(0f, zeroY), Offset(size.width, zeroY), strokeWidth = 1.8f)
-                    }
-
-                    val ptsCount = series.size
-                    if (isScatter) {
-                        // Vykreslení XY bodového rozptylu bez spojovacích čar přesně podle Garmin Connect s decimováním na subpixelech
-                        val cRed = Color(0xFFEF4444)
-                        val cOrange = Color(0xFFF59E0B)
-                        val cGreen = Color(0xFF10B981)
-                        val cBlue = Color(0xFF38BDF8)
-                        val cPurple = Color(0xFFA855F7)
-                        var lastDrawnX = -100f
-                        val minDeltaX = if (ptsCount > 600) 2.5f else if (ptsCount > 250) 1.5f else 0.8f
-                        for (p in 0 until ptsCount) {
-                            val idx = series.indices[p]
-                            val cx = x(idx)
-                            if (p > 0 && p < ptsCount - 1 && kotlin.math.abs(cx - lastDrawnX) < minDeltaX) continue
-                            lastDrawnX = cx
-
-                            val v = series.values[p]
-                            val ptColor = scatterColorForValue?.invoke(v) ?: when (channel) {
-                                Channel.CADENCE -> when {
-                                    v < 153.0 -> cRed
-                                    v < 164.0 -> cOrange
-                                    v < 174.0 -> cGreen
-                                    v < 184.0 -> cBlue
-                                    else -> cPurple
-                                }
-                                Channel.GROUND_CONTACT_TIME -> when {
-                                    v < 208.0 -> cPurple
-                                    v < 241.0 -> cBlue
-                                    v < 273.0 -> cGreen
-                                    v < 305.0 -> cOrange
-                                    else -> cRed
-                                }
-                                Channel.VERTICAL_OSCILLATION, Channel.VERTICAL_RATIO -> when {
-                                    v < 6.1 -> cPurple
-                                    v < 7.5 -> cBlue
-                                    v < 8.7 -> cGreen
-                                    v < 10.1 -> cOrange
-                                    else -> cRed
-                                }
-                                Channel.PERFORMANCE_CONDITION -> when {
-                                    v > 0.0 -> cGreen
-                                    v == 0.0 -> cBlue
-                                    else -> cRed
-                                }
-                                else -> color
+                    // Osa Y s jednotkou (5 horizontálních hladin)
+                    if (finite.size >= 2) {
+                        Column(
+                            modifier = Modifier
+                                .height(185.dp)
+                                .padding(end = 8.dp, top = 4.dp, bottom = 4.dp),
+                            verticalArrangement = Arrangement.SpaceBetween,
+                            horizontalAlignment = Alignment.End
+                        ) {
+                            val span = (hi - lo).takeIf { it > 1e-9 } ?: 1.0
+                            for (step in 0..4) {
+                                val tickVal = hi - span * (step / 4.0)
+                                Text(
+                                    "${fmt.number(tickVal, effectiveDecimals)}$unitSuffix",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFFCBD5E1),
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
                             }
-                            val cy = y(v)
-                            drawCircle(ptColor, radius = 3.5f, center = Offset(cx, cy))
                         }
-                    } else if (ptsCount == 1) {
-                        val cx = x(series.indices[0])
-                        val cy = y(series.values[0])
-                        drawCircle(color, radius = 6f, center = Offset(cx, cy))
-                    } else if (ptsCount >= 2) {
-                        strokePath.reset()
-                        fillPath.reset()
+                    }
 
-                        val step = if (ptsCount > 200) maxOf(1, ptsCount / 160) else 1
-                        val firstX = x(series.indices[0])
-                        val firstY = y(series.values[0])
-                        strokePath.moveTo(firstX, firstY)
-                        fillPath.moveTo(firstX, size.height)
-                        fillPath.lineTo(firstX, firstY)
+                    Canvas(
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(185.dp)
+                            .padding(vertical = 6.dp)
+                            .pointerInput(values.size, selectMode) {
+                                if (values.size < 2) return@pointerInput
+                                fun idx(x: Float) = ((x / size.width) * (values.size - 1)).toInt().coerceIn(0, values.size - 1)
+                                detectTapGestures { o ->
+                                    val i = idx(o.x)
+                                    selectedIndex = i
+                                    onCursor(i)
+                                }
+                            }
+                            .pointerInput(values.size, selectMode) {
+                                if (values.size < 2) return@pointerInput
+                                var anchor = 0
+                                fun idx(x: Float) = ((x / size.width) * (values.size - 1)).toInt().coerceIn(0, values.size - 1)
+                                detectHorizontalDragGestures(
+                                    onDragStart = { o ->
+                                        anchor = idx(o.x)
+                                        selectedIndex = anchor
+                                        onCursor(anchor)
+                                        if (selectMode) onRange(anchor..anchor)
+                                    },
+                                    onHorizontalDrag = { _, dragAmount ->
+                                        val curIdx = selectedIndex ?: anchor
+                                        val nextIdx = (curIdx + if (dragAmount > 0) 1 else if (dragAmount < 0) -1 else 0).coerceIn(0, values.size - 1)
+                                        selectedIndex = nextIdx
+                                        onCursor(nextIdx)
+                                        if (selectMode) onRange(minOf(anchor, nextIdx)..maxOf(anchor, nextIdx))
+                                    }
+                                )
+                            }
+                    ) {
+                        if (finite.size < 2) return@Canvas
+                        val curLo = lo
+                        val curHi = hi
+                        val paddingY = 10f
+                        val chartHeight = (size.height - (paddingY * 2)).coerceAtLeast(10f)
+                        val span = (curHi - curLo).takeIf { it > 1e-9 } ?: 1.0
 
-                        var prevIdx = 0
-                        var i = step
-                        while (i < ptsCount) {
-                            val prevX = x(series.indices[prevIdx])
-                            val prevY = y(series.values[prevIdx])
-                            val currX = x(series.indices[i])
-                            val currY = y(series.values[i])
-                            val midX = prevX + (currX - prevX) * 0.5f
+                        fun x(i: Int) = size.width * i / (values.size - 1).coerceAtLeast(1)
+                        fun y(v: Double) = paddingY + (chartHeight * (1 - (v - curLo) / span)).toFloat()
 
-                            strokePath.cubicTo(midX, prevY, midX, currY, currX, currY)
-                            fillPath.cubicTo(midX, prevY, midX, currY, currX, currY)
-                            prevIdx = i
-                            i += step
+                        for (step in 0..4) {
+                            val gridY = paddingY + chartHeight * (step / 4f)
+                            drawLine(gridColor, Offset(0f, gridY), Offset(size.width, gridY), strokeWidth = 1.2f)
                         }
-                        if (prevIdx != ptsCount - 1) {
-                            val prevX = x(series.indices[prevIdx])
-                            val prevY = y(series.values[prevIdx])
-                            val currX = x(series.indices[ptsCount - 1])
-                            val currY = y(series.values[ptsCount - 1])
-                            val midX = prevX + (currX - prevX) * 0.5f
 
-                            strokePath.cubicTo(midX, prevY, midX, currY, currX, currY)
-                            fillPath.cubicTo(midX, prevY, midX, currY, currX, currY)
+                        band?.let {
+                            val top = y(it.endInclusive).coerceIn(0f, size.height)
+                            val bottom = y(it.start).coerceIn(0f, size.height)
+                            if (bottom > top) {
+                                drawRect(bandColor, Offset(0f, top), Size(size.width, (bottom - top).coerceAtLeast(4f)))
+                            }
                         }
 
-                        val lastX = x(series.indices[ptsCount - 1])
-                        fillPath.lineTo(lastX, size.height)
-                        fillPath.close()
+                        range?.let {
+                            drawRect(selColor, Offset(x(it.first), 0f), Size(x(it.last) - x(it.first), size.height))
+                        }
 
-                        val gradient = Brush.verticalGradient(
-                            colors = listOf(color.copy(alpha = 0.35f), color.copy(alpha = 0.02f)),
-                            startY = paddingY,
-                            endY = size.height
-                        )
-                        drawPath(fillPath, brush = gradient)
+                        // Baseline pro Performance Condition na Y = 0.0
+                        if (channel == Channel.PERFORMANCE_CONDITION && 0.0 in lo..hi) {
+                            val zeroY = y(0.0)
+                            drawLine(Color.White.copy(alpha = 0.25f), Offset(0f, zeroY), Offset(size.width, zeroY), strokeWidth = 1.8f)
+                        }
 
-                        drawPath(
-                            strokePath,
-                            color = color,
-                            style = Stroke(width = 4.5f, cap = StrokeCap.Round, join = StrokeJoin.Round)
-                        )
-
-                        if (ptsCount <= 45) {
+                        val ptsCount = series.size
+                        if (isScatter) {
+                            val cRed = Color(0xFFEF4444)
+                            val cOrange = Color(0xFFF59E0B)
+                            val cGreen = Color(0xFF10B981)
+                            val cBlue = Color(0xFF38BDF8)
+                            val cPurple = Color(0xFFA855F7)
+                            var lastDrawnX = -100f
+                            val minDeltaX = if (ptsCount > 600) 2.5f else if (ptsCount > 250) 1.5f else 0.8f
                             for (p in 0 until ptsCount) {
-                                drawCircle(color, radius = 4.5f, center = Offset(x(series.indices[p]), y(series.values[p])))
-                            }
-                        }
-                    }
+                                val idx = series.indices[p]
+                                val cx = x(idx)
+                                if (p > 0 && p < ptsCount - 1 && kotlin.math.abs(cx - lastDrawnX) < minDeltaX) continue
+                                lastDrawnX = cx
 
-                    // Vykreslení sekundární křivky (např. Potenciální výdrž u Staminy)
-                    secSeries?.let { sec ->
-                        val secCount = sec.size
-                        if (secCount >= 2) {
-                            secPath.reset()
-                            val step = if (secCount > 200) maxOf(1, secCount / 160) else 1
-                            secPath.moveTo(x(sec.indices[0]), y(sec.values[0]))
+                                val v = series.values[p]
+                                val ptColor = scatterColorForValue?.invoke(v) ?: when (channel) {
+                                    Channel.CADENCE -> when {
+                                        v < 153.0 -> cRed
+                                        v < 164.0 -> cOrange
+                                        v < 174.0 -> cGreen
+                                        v < 184.0 -> cBlue
+                                        else -> cPurple
+                                    }
+                                    Channel.GROUND_CONTACT_TIME -> when {
+                                        v < 208.0 -> cPurple
+                                        v < 241.0 -> cBlue
+                                        v < 273.0 -> cGreen
+                                        v < 305.0 -> cOrange
+                                        else -> cRed
+                                    }
+                                    Channel.VERTICAL_OSCILLATION, Channel.VERTICAL_RATIO -> when {
+                                        v < 6.1 -> cPurple
+                                        v < 7.5 -> cBlue
+                                        v < 8.7 -> cGreen
+                                        v < 10.1 -> cOrange
+                                        else -> cRed
+                                    }
+                                    Channel.PERFORMANCE_CONDITION -> when {
+                                        v > 0.0 -> cGreen
+                                        v == 0.0 -> cBlue
+                                        else -> cRed
+                                    }
+                                    else -> color
+                                }
+                                val cy = y(v)
+                                drawCircle(ptColor, radius = 3.5f, center = Offset(cx, cy))
+                            }
+                        } else if (ptsCount == 1) {
+                            val cx = x(series.indices[0])
+                            val cy = y(series.values[0])
+                            drawCircle(color, radius = 6f, center = Offset(cx, cy))
+                        } else if (ptsCount >= 2) {
+                            strokePath.reset()
+                            fillPath.reset()
+
+                            val step = if (ptsCount > 200) maxOf(1, ptsCount / 160) else 1
+                            val firstX = x(series.indices[0])
+                            val firstY = y(series.values[0])
+                            strokePath.moveTo(firstX, firstY)
+                            fillPath.moveTo(firstX, size.height)
+                            fillPath.lineTo(firstX, firstY)
+
                             var prevIdx = 0
                             var i = step
-                            while (i < secCount) {
-                                val prevX = x(sec.indices[prevIdx])
-                                val prevY = y(sec.values[prevIdx])
-                                val currX = x(sec.indices[i])
-                                val currY = y(sec.values[i])
+                            while (i < ptsCount) {
+                                val prevX = x(series.indices[prevIdx])
+                                val prevY = y(series.values[prevIdx])
+                                val currX = x(series.indices[i])
+                                val currY = y(series.values[i])
                                 val midX = prevX + (currX - prevX) * 0.5f
-                                secPath.cubicTo(midX, prevY, midX, currY, currX, currY)
+
+                                strokePath.cubicTo(midX, prevY, midX, currY, currX, currY)
+                                fillPath.cubicTo(midX, prevY, midX, currY, currX, currY)
                                 prevIdx = i
                                 i += step
                             }
-                            if (prevIdx != secCount - 1) {
-                                val prevX = x(sec.indices[prevIdx])
-                                val prevY = y(sec.values[prevIdx])
-                                val currX = x(sec.indices[secCount - 1])
-                                val currY = y(sec.values[secCount - 1])
+                            if (prevIdx != ptsCount - 1) {
+                                val prevX = x(series.indices[prevIdx])
+                                val prevY = y(series.values[prevIdx])
+                                val currX = x(series.indices[ptsCount - 1])
+                                val currY = y(series.values[ptsCount - 1])
                                 val midX = prevX + (currX - prevX) * 0.5f
-                                secPath.cubicTo(midX, prevY, midX, currY, currX, currY)
+
+                                strokePath.cubicTo(midX, prevY, midX, currY, currX, currY)
+                                fillPath.cubicTo(midX, prevY, midX, currY, currX, currY)
                             }
-                            drawPath(
-                                secPath,
-                                color = secondaryColor,
-                                style = Stroke(width = 2.8f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+
+                            val lastX = x(series.indices[ptsCount - 1])
+                            fillPath.lineTo(lastX, size.height)
+                            fillPath.close()
+
+                            val gradient = Brush.verticalGradient(
+                                colors = listOf(color.copy(alpha = 0.38f), color.copy(alpha = 0.03f)),
+                                startY = paddingY,
+                                endY = size.height
                             )
-                        }
-                    }
+                            drawPath(fillPath, brush = gradient)
 
-                    val active = selectedIndex ?: cursor
-                    active?.let { i ->
-                        val cx = x(i)
-                        drawLine(cursorColor, Offset(cx, 0f), Offset(cx, size.height), strokeWidth = 2.2f)
-                        values.getOrNull(i)?.let { valY ->
-                            drawCircle(cursorColor, radius = 7f, center = Offset(cx, y(valY)))
-                            drawCircle(Color.White, radius = 3.5f, center = Offset(cx, y(valY)))
+                            // Vnější záře křivky
+                            drawPath(
+                                strokePath,
+                                color = color.copy(alpha = 0.25f),
+                                style = Stroke(width = 11f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                            )
+                            // Ostrá hlavní křivka
+                            drawPath(
+                                strokePath,
+                                color = color,
+                                style = Stroke(width = 4.5f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                            )
+
+                            if (ptsCount <= 45) {
+                                for (p in 0 until ptsCount) {
+                                    val ptCenter = Offset(x(series.indices[p]), y(series.values[p]))
+                                    drawCircle(color.copy(alpha = 0.30f), radius = 7.5f, center = ptCenter)
+                                    drawCircle(color, radius = 4.5f, center = ptCenter)
+                                }
+                            }
                         }
-                        secondaryValues?.getOrNull(i)?.let { valSecY ->
-                            drawCircle(secondaryColor, radius = 6f, center = Offset(cx, y(valSecY)))
-                            drawCircle(Color.White, radius = 2.8f, center = Offset(cx, y(valSecY)))
+
+                        // Vykreslení sekundární křivky (např. Potenciální výdrž u Staminy)
+                        secSeries?.let { sec ->
+                            val secCount = sec.size
+                            if (secCount >= 2) {
+                                secPath.reset()
+                                val step = if (secCount > 200) maxOf(1, secCount / 160) else 1
+                                secPath.moveTo(x(sec.indices[0]), y(sec.values[0]))
+                                var prevIdx = 0
+                                var i = step
+                                while (i < secCount) {
+                                    val prevX = x(sec.indices[prevIdx])
+                                    val prevY = y(sec.values[prevIdx])
+                                    val currX = x(sec.indices[i])
+                                    val currY = y(sec.values[i])
+                                    val midX = prevX + (currX - prevX) * 0.5f
+                                    secPath.cubicTo(midX, prevY, midX, currY, currX, currY)
+                                    prevIdx = i
+                                    i += step
+                                }
+                                if (prevIdx != secCount - 1) {
+                                    val prevX = x(sec.indices[prevIdx])
+                                    val prevY = y(sec.values[prevIdx])
+                                    val currX = x(sec.indices[secCount - 1])
+                                    val currY = y(sec.values[secCount - 1])
+                                    val midX = prevX + (currX - prevX) * 0.5f
+                                    secPath.cubicTo(midX, prevY, midX, currY, currX, currY)
+                                }
+                                drawPath(
+                                    secPath,
+                                    color = secondaryColor,
+                                    style = Stroke(width = 2.8f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                                )
+                            }
+                        }
+
+                        val active = selectedIndex ?: cursor
+                        active?.let { i ->
+                            val cx = x(i)
+                            drawLine(cursorColor, Offset(cx, 0f), Offset(cx, size.height), strokeWidth = 2.2f)
+                            values.getOrNull(i)?.let { valY ->
+                                drawCircle(cursorColor.copy(alpha = 0.35f), radius = 12f, center = Offset(cx, y(valY)))
+                                drawCircle(cursorColor, radius = 7f, center = Offset(cx, y(valY)))
+                                drawCircle(Color.White, radius = 3.5f, center = Offset(cx, y(valY)))
+                            }
+                            secondaryValues?.getOrNull(i)?.let { valSecY ->
+                                drawCircle(secondaryColor, radius = 6f, center = Offset(cx, y(valSecY)))
+                                drawCircle(Color.White, radius = 2.8f, center = Offset(cx, y(valSecY)))
+                            }
                         }
                     }
                 }
-            }
 
-            if (xLabels.size >= 2) {
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(start = 52.dp, top = 2.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(xLabels.first(), style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8), maxLines = 1, softWrap = false)
-                    if (xLabels.size >= 3) {
-                        Text(xLabels[xLabels.size / 2], style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8), maxLines = 1, softWrap = false)
-                    }
-                    Text(xLabels.last(), style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8), maxLines = 1, softWrap = false)
-                }
-            }
-
-            // Garmin barevná stupnice / legenda pro běžeckou dynamiku a Staminu
-            channel?.let { ch ->
-                if (isScatter) {
-                    GarminZoneLegend(ch, Modifier.padding(start = 52.dp, top = 4.dp))
-                } else if (ch == Channel.STAMINA && secondaryValues != null) {
+                if (xLabels.size >= 2) {
                     Row(
-                        Modifier.padding(start = 52.dp, top = 6.dp),
-                        horizontalArrangement = Arrangement.spacedBy(16.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(start = 52.dp, top = 2.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Box(Modifier.size(8.dp).clip(CircleShape).background(Color(0xFF0EA5E9)))
-                            Spacer(Modifier.width(6.dp))
-                            Text("Okamžitá výdrž (Aktuální)", style = MaterialTheme.typography.labelSmall, color = Color(0xFF0EA5E9), fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                        Text(xLabels.first(), style = MaterialTheme.typography.labelSmall, color = Color(0xFFCBD5E1), maxLines = 1, softWrap = false)
+                        if (xLabels.size >= 3) {
+                            Text(xLabels[xLabels.size / 2], style = MaterialTheme.typography.labelSmall, color = Color(0xFFCBD5E1), maxLines = 1, softWrap = false)
                         }
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Box(Modifier.size(8.dp).clip(CircleShape).background(Color(0xFFF59E0B)))
-                            Spacer(Modifier.width(6.dp))
-                            Text("Potenciální výdrž (Strop)", style = MaterialTheme.typography.labelSmall, color = Color(0xFFF59E0B), fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                        Text(xLabels.last(), style = MaterialTheme.typography.labelSmall, color = Color(0xFFCBD5E1), maxLines = 1, softWrap = false)
+                    }
+                }
+
+                // Garmin barevná stupnice / legenda pro běžeckou dynamiku a Staminu
+                channel?.let { ch ->
+                    if (isScatter) {
+                        GarminZoneLegend(ch, Modifier.padding(start = 52.dp, top = 4.dp))
+                    } else if (ch == Channel.STAMINA && secondaryValues != null) {
+                        Row(
+                            Modifier.padding(start = 52.dp, top = 6.dp),
+                            horizontalArrangement = Arrangement.spacedBy(16.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box(Modifier.size(8.dp).clip(CircleShape).background(Color(0xFF0EA5E9)))
+                                Spacer(Modifier.width(6.dp))
+                                Text("Okamžitá výdrž (Aktuální)", style = MaterialTheme.typography.labelSmall, color = Color(0xFF0EA5E9), fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box(Modifier.size(8.dp).clip(CircleShape).background(Color(0xFFF59E0B)))
+                                Spacer(Modifier.width(6.dp))
+                                Text("Potenciální výdrž (Strop)", style = MaterialTheme.typography.labelSmall, color = Color(0xFFF59E0B), fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                            }
                         }
                     }
                 }

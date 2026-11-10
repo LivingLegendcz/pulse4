@@ -4598,14 +4598,18 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType = MetricType.HRV) 
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                Row(
+                                    modifier = Modifier.weight(1f, fill = false),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
                                     Icon(PulseIcons.BodyComposition, contentDescription = null, tint = Color(0xFF2DD4BF), modifier = Modifier.size(18.dp))
                                     Spacer(Modifier.width(6.dp))
                                     Text(
                                         "SKLÁDANÉ SLOŽENÍ HMOTNOSTI (VÁHA + SVALY + TUK)",
                                         style = MaterialTheme.typography.labelSmall,
                                         fontWeight = FontWeight.Bold,
-                                        color = Color(0xFF2DD4BF)
+                                        color = Color(0xFF2DD4BF),
+                                        maxLines = 1
                                     )
                                 }
                                 Text(

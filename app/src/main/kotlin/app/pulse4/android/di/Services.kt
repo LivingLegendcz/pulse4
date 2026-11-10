@@ -322,8 +322,492 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
     }
 
     fun ensureSampleActivityLoaded(nowMs: Long): Boolean {
-        // Již nevkládáme falešná ukázková data – uživatel má reálné účty a požaduje čistá data
-        return false
+        seedDemoData(nowMs)
+        return true
+    }
+
+    /**
+     * Vygeneruje realistická ukázková data pro prezentaci aplikace:
+     * 14 dní biometrických pozorování (HRV, klidový tep, spánek, Body Battery, kroky, stres, váha Withings),
+     * vzorové sportovní aktivity z Garmin FIT & JSON s GPS trasami a P2P sdílené kontakty.
+     */
+    fun seedDemoData(nowMs: Long = System.currentTimeMillis()) {
+        val zone = java.time.ZoneId.of(sl.settings.zoneId)
+        val today = java.time.LocalDate.now(zone)
+
+        val obsList = mutableListOf<app.pulse4.android.data.ObservationRow>()
+        val hrvBase = 55.0
+        val rhrBase = 49.0
+        val weightBase = 75.8
+
+        for (i in 13 downTo 0) {
+            val d = today.minusDays(i.toLong())
+            val dStr = d.toString()
+            val dayStartMs = d.atStartOfDay(zone).toInstant().toEpochMilli()
+
+            // HRV (ms)
+            val hrvVal = (hrvBase + kotlin.math.sin(i * 0.9) * 6.5 + (if (i == 0) 4.0 else 0.0)).coerceIn(42.0, 75.0)
+            obsList.add(
+                app.pulse4.domain.MetricObservation(
+                    id = "demo-hrv-$dStr",
+                    provider = Provider.GARMIN_PERSONAL,
+                    accountId = sl.settings.accountId,
+                    externalId = "demo-hrv-$dStr",
+                    type = app.pulse4.domain.MetricType.HRV,
+                    startUtcMs = dayStartMs + 6 * 3600_000L,
+                    endUtcMs = dayStartMs + 6 * 3600_000L,
+                    value = hrvVal,
+                    zoneId = sl.settings.zoneId,
+                    localDate = dStr
+                ).toRow()
+            )
+
+            // Resting Heart Rate (bpm)
+            val rhrVal = (rhrBase - kotlin.math.cos(i * 0.8) * 2.8 + (if (i % 4 == 0) 1.5 else -1.0)).coerceIn(44.0, 58.0)
+            obsList.add(
+                app.pulse4.domain.MetricObservation(
+                    id = "demo-rhr-$dStr",
+                    provider = Provider.GARMIN_PERSONAL,
+                    accountId = sl.settings.accountId,
+                    externalId = "demo-rhr-$dStr",
+                    type = app.pulse4.domain.MetricType.RESTING_HEART_RATE,
+                    startUtcMs = dayStartMs + 5 * 3600_000L,
+                    endUtcMs = dayStartMs + 5 * 3600_000L,
+                    value = rhrVal,
+                    zoneId = sl.settings.zoneId,
+                    localDate = dStr
+                ).toRow()
+            )
+
+            // Sleep Duration (s) & Sleep Score
+            val sleepHours = 7.5 + kotlin.math.sin(i * 1.1) * 0.7 + (if (i == 0) 0.3 else 0.0)
+            obsList.add(
+                app.pulse4.domain.MetricObservation(
+                    id = "demo-sleep-$dStr",
+                    provider = Provider.GARMIN_PERSONAL,
+                    accountId = sl.settings.accountId,
+                    externalId = "demo-sleep-$dStr",
+                    type = app.pulse4.domain.MetricType.SLEEP_DURATION,
+                    startUtcMs = dayStartMs + 6 * 3600_000L,
+                    endUtcMs = dayStartMs + 6 * 3600_000L,
+                    value = sleepHours * 3600.0,
+                    zoneId = sl.settings.zoneId,
+                    localDate = dStr
+                ).toRow()
+            )
+
+            val sleepScore = (sleepHours / 8.0 * 88.0 + kotlin.math.sin(i * 1.4) * 4.0).coerceIn(68.0, 95.0)
+            obsList.add(
+                app.pulse4.domain.MetricObservation(
+                    id = "demo-sleepscore-$dStr",
+                    provider = Provider.GARMIN_PERSONAL,
+                    accountId = sl.settings.accountId,
+                    externalId = "demo-sleepscore-$dStr",
+                    type = app.pulse4.domain.MetricType.SLEEP_SCORE,
+                    startUtcMs = dayStartMs + 6 * 3600_000L,
+                    endUtcMs = dayStartMs + 6 * 3600_000L,
+                    value = sleepScore,
+                    zoneId = sl.settings.zoneId,
+                    localDate = dStr
+                ).toRow()
+            )
+
+            // Body Battery
+            val bbVal = (84.0 + kotlin.math.sin(i * 0.7) * 12.0 + (if (i == 0) 6.0 else 0.0)).coerceIn(55.0, 98.0)
+            obsList.add(
+                app.pulse4.domain.MetricObservation(
+                    id = "demo-bb-$dStr",
+                    provider = Provider.GARMIN_PERSONAL,
+                    accountId = sl.settings.accountId,
+                    externalId = "demo-bb-$dStr",
+                    type = app.pulse4.domain.MetricType.BODY_BATTERY,
+                    startUtcMs = dayStartMs + 7 * 3600_000L,
+                    endUtcMs = dayStartMs + 7 * 3600_000L,
+                    value = bbVal,
+                    zoneId = sl.settings.zoneId,
+                    localDate = dStr
+                ).toRow()
+            )
+
+            // Steps
+            val stepsVal = (8800.0 + kotlin.math.cos(i * 1.2) * 2600.0 + (if (i % 3 == 0) 2000.0 else -400.0)).coerceIn(4800.0, 16000.0)
+            obsList.add(
+                app.pulse4.domain.MetricObservation(
+                    id = "demo-steps-$dStr",
+                    provider = Provider.GARMIN_PERSONAL,
+                    accountId = sl.settings.accountId,
+                    externalId = "demo-steps-$dStr",
+                    type = app.pulse4.domain.MetricType.STEPS,
+                    startUtcMs = dayStartMs + 21 * 3600_000L,
+                    endUtcMs = dayStartMs + 21 * 3600_000L,
+                    value = stepsVal,
+                    zoneId = sl.settings.zoneId,
+                    localDate = dStr
+                ).toRow()
+            )
+
+            // Stress
+            val stressVal = (25.0 - kotlin.math.sin(i * 0.8) * 8.0).coerceIn(16.0, 45.0)
+            obsList.add(
+                app.pulse4.domain.MetricObservation(
+                    id = "demo-stress-$dStr",
+                    provider = Provider.GARMIN_PERSONAL,
+                    accountId = sl.settings.accountId,
+                    externalId = "demo-stress-$dStr",
+                    type = app.pulse4.domain.MetricType.STRESS,
+                    startUtcMs = dayStartMs + 20 * 3600_000L,
+                    endUtcMs = dayStartMs + 20 * 3600_000L,
+                    value = stressVal,
+                    zoneId = sl.settings.zoneId,
+                    localDate = dStr
+                ).toRow()
+            )
+
+            // Withings Weight & Bioimpedance (každé 2 dny a dnes)
+            if (i % 2 == 0 || i == 0) {
+                val wVal = weightBase - (13 - i) * 0.06 + kotlin.math.sin(i.toDouble()) * 0.15
+                val wRound = kotlin.math.round(wVal * 10.0) / 10.0
+                obsList.add(
+                    app.pulse4.domain.MetricObservation(
+                        id = "demo-weight-$dStr",
+                        provider = Provider.WITHINGS_API,
+                        accountId = "withings-demo",
+                        externalId = "demo-w-$dStr",
+                        type = app.pulse4.domain.MetricType.WEIGHT,
+                        startUtcMs = dayStartMs + 7 * 3600_000L + 15 * 60_000L,
+                        endUtcMs = dayStartMs + 7 * 3600_000L + 15 * 60_000L,
+                        value = wRound,
+                        zoneId = sl.settings.zoneId,
+                        localDate = dStr
+                    ).toRow()
+                )
+
+                // Body Fat %
+                val bfVal = 14.3 - (13 - i) * 0.03
+                obsList.add(
+                    app.pulse4.domain.MetricObservation(
+                        id = "demo-bf-$dStr",
+                        provider = Provider.WITHINGS_API,
+                        accountId = "withings-demo",
+                        externalId = "demo-bf-$dStr",
+                        type = app.pulse4.domain.MetricType.BODY_FAT,
+                        startUtcMs = dayStartMs + 7 * 3600_000L + 15 * 60_000L,
+                        endUtcMs = dayStartMs + 7 * 3600_000L + 15 * 60_000L,
+                        value = kotlin.math.round(bfVal * 10.0) / 10.0,
+                        zoneId = sl.settings.zoneId,
+                        localDate = dStr
+                    ).toRow()
+                )
+
+                // Pulse Wave Velocity (m/s)
+                obsList.add(
+                    app.pulse4.domain.MetricObservation(
+                        id = "demo-pwv-$dStr",
+                        provider = Provider.WITHINGS_API,
+                        accountId = "withings-demo",
+                        externalId = "demo-pwv-$dStr",
+                        type = app.pulse4.domain.MetricType.PULSE_WAVE_VELOCITY,
+                        startUtcMs = dayStartMs + 7 * 3600_000L + 15 * 60_000L,
+                        endUtcMs = dayStartMs + 7 * 3600_000L + 15 * 60_000L,
+                        value = 6.3,
+                        zoneId = sl.settings.zoneId,
+                        localDate = dStr
+                    ).toRow()
+                )
+            }
+        }
+
+        // Dnešní EKG
+        obsList.add(
+            app.pulse4.domain.MetricObservation(
+                id = "demo-ecg-$today",
+                provider = Provider.WITHINGS_API,
+                accountId = "withings-demo",
+                externalId = "demo-ecg-$today",
+                type = app.pulse4.domain.MetricType.ECG,
+                startUtcMs = nowMs - 3600_000L,
+                endUtcMs = nowMs - 3600_000L,
+                value = 1.0,
+                zoneId = sl.settings.zoneId,
+                localDate = today.toString()
+            ).toRow()
+        )
+
+        sl.db.observations().upsert(obsList)
+
+        // 2. Import vzorových aktivit ze souboru FIT a JSON v assets + plné spektrum Garmin sportů
+        if (sl.db.activities().count() == 0) {
+            runCatching {
+                val fitBytes = context.assets.open("sample_activity.fit").use { it.readBytes() }
+                if (fitBytes.isNotEmpty()) {
+                    importFit(fitBytes, nowMs)
+                }
+            }
+
+            runCatching {
+                val jsonStr = context.assets.open("sample_activities.json").bufferedReader().use { it.readText() }
+                val rootArr = kotlinx.serialization.json.Json.parseToJsonElement(jsonStr) as? kotlinx.serialization.json.JsonArray
+                rootArr?.take(6)?.forEach { elem ->
+                    val obj = elem as? kotlinx.serialization.json.JsonObject ?: return@forEach
+                    val actId = obj["activityId"]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content } ?: return@forEach
+                    val actKey = "garmin-$actId"
+                    if (sl.db.activities().get(actKey) == null) {
+                        val act = buildActivityFromGarminAndFit(
+                            id = actKey,
+                            provider = Provider.GARMIN_PERSONAL,
+                            extId = actId,
+                            obj = obj,
+                            parsed = null,
+                            nowMs = nowMs
+                        )
+                        sl.db.activities().upsert(act.toRow(json.encodeToString(Activity.serializer(), act)))
+                        val synTrack = synthesizeTrackFromSummary(act)
+                        sl.db.activities().upsertTrack(
+                            TrackRow(
+                                actKey,
+                                json.encodeToString(
+                                    kotlinx.serialization.builtins.ListSerializer(app.pulse4.domain.TrackPoint.serializer()),
+                                    synTrack
+                                )
+                            )
+                        )
+                    }
+                }
+            }
+        }
+
+        // Doplnění reprezentativních Garmin Connect aktivit pro všechny hlavní sporty z API (Cyklistika, Turistika, Síla, Plavání)
+        runCatching {
+            val extraSpecs = listOf(
+                Activity(
+                    id = "garmin-demo-cycling-gravel",
+                    provider = Provider.GARMIN_PERSONAL,
+                    accountId = sl.settings.accountId,
+                    externalId = "2491020301",
+                    sport = app.pulse4.domain.Sport.CYCLING,
+                    startUtcMs = nowMs - 1 * 86_400_000L - 3 * 3600_000L,
+                    zoneId = sl.settings.zoneId,
+                    totalTimeS = 5420.0,
+                    movingTimeS = 5280.0,
+                    distanceM = 42650.0,
+                    ascentM = 645.0,
+                    descentM = 640.0,
+                    avgHeartRate = 148,
+                    maxHeartRate = 179,
+                    title = "Karlštejn Gravel Švih",
+                    locationName = "Český kras",
+                    tags = setOf("gravel_cycling"),
+                    avgSpeedMps = 8.07,
+                    maxSpeedMps = 15.8,
+                    caloriesKcal = 1140.0,
+                    avgCadence = 86.0,
+                    avgPowerW = 238.0,
+                    maxPowerW = 640.0,
+                    normPowerW = 254.0,
+                    aerobicTrainingEffect = 3.8,
+                    anaerobicTrainingEffect = 2.1,
+                    trainingEffectLabel = "TEMPO",
+                    trainingLoad = 148.0,
+                    bodyBatteryImpact = -34
+                ),
+                Activity(
+                    id = "garmin-demo-hiking-sumava",
+                    provider = Provider.GARMIN_PERSONAL,
+                    accountId = sl.settings.accountId,
+                    externalId = "2491020302",
+                    sport = app.pulse4.domain.Sport.HIKING,
+                    startUtcMs = nowMs - 3 * 86_400_000L - 5 * 3600_000L,
+                    zoneId = sl.settings.zoneId,
+                    totalTimeS = 14800.0,
+                    movingTimeS = 13200.0,
+                    distanceM = 18400.0,
+                    ascentM = 890.0,
+                    descentM = 875.0,
+                    avgHeartRate = 122,
+                    maxHeartRate = 156,
+                    title = "Šumava · Hřebenovka Poledník",
+                    locationName = "Šumava",
+                    tags = setOf("hiking"),
+                    avgSpeedMps = 1.39,
+                    caloriesKcal = 1320.0,
+                    steps = 24600,
+                    aerobicTrainingEffect = 3.2,
+                    anaerobicTrainingEffect = 0.4,
+                    trainingEffectLabel = "AEROBIC_BASE",
+                    trainingLoad = 96.0,
+                    bodyBatteryImpact = -38
+                ),
+                Activity(
+                    id = "garmin-demo-strength-upper",
+                    provider = Provider.GARMIN_PERSONAL,
+                    accountId = sl.settings.accountId,
+                    externalId = "2491020303",
+                    sport = app.pulse4.domain.Sport.STRENGTH,
+                    startUtcMs = nowMs - 2 * 86_400_000L - 2 * 3600_000L,
+                    zoneId = sl.settings.zoneId,
+                    totalTimeS = 3480.0,
+                    movingTimeS = 2420.0,
+                    distanceM = null,
+                    ascentM = null,
+                    avgHeartRate = 128,
+                    maxHeartRate = 166,
+                    title = "Silový trénink · Fullbody & Core",
+                    locationName = "Praha",
+                    tags = setOf("strength_training"),
+                    caloriesKcal = 465.0,
+                    aerobicTrainingEffect = 2.1,
+                    anaerobicTrainingEffect = 2.8,
+                    trainingEffectLabel = "ANAEROBIC_CAPACITY",
+                    trainingLoad = 78.0,
+                    totalVolumeKg = 6840.0,
+                    totalReps = 142,
+                    activeSetsCount = 16,
+                    bodyBatteryImpact = -21
+                ),
+                Activity(
+                    id = "garmin-demo-swimming-podoli",
+                    provider = Provider.GARMIN_PERSONAL,
+                    accountId = sl.settings.accountId,
+                    externalId = "2491020304",
+                    sport = app.pulse4.domain.Sport.SWIMMING,
+                    startUtcMs = nowMs - 4 * 86_400_000L - 4 * 3600_000L,
+                    zoneId = sl.settings.zoneId,
+                    totalTimeS = 2160.0,
+                    movingTimeS = 1980.0,
+                    distanceM = 1600.0,
+                    ascentM = null,
+                    avgHeartRate = 136,
+                    maxHeartRate = 161,
+                    title = "Podolí · Kraul vytrvalost 1600 m",
+                    locationName = "Praha Podolí",
+                    tags = setOf("lap_swimming"),
+                    avgSpeedMps = 0.81,
+                    caloriesKcal = 510.0,
+                    aerobicTrainingEffect = 3.1,
+                    anaerobicTrainingEffect = 1.2,
+                    trainingEffectLabel = "AEROBIC_BASE",
+                    trainingLoad = 84.0,
+                    totalStrokes = 1180,
+                    avgSwolf = 37,
+                    poolLengthM = 50.0,
+                    swimStroke = "FREESTYLE"
+                )
+            )
+            var addedAny = false
+            for (extra in extraSpecs) {
+                if (sl.db.activities().get(extra.id) == null) {
+                    sl.db.activities().upsert(extra.toRow(json.encodeToString(Activity.serializer(), extra)))
+                    val synTrack = synthesizeTrackFromSummary(extra)
+                    sl.db.activities().upsertTrack(
+                        TrackRow(
+                            extra.id,
+                            json.encodeToString(
+                                kotlinx.serialization.builtins.ListSerializer(app.pulse4.domain.TrackPoint.serializer()),
+                                synTrack
+                            )
+                        )
+                    )
+                    addedAny = true
+                }
+            }
+            if (addedAny) {
+                app.pulse4.android.ui.ScreenMemoryCache.activitySummaries = null
+            }
+        }
+
+        // 3. Spárování ukázkových kontaktů a zpráv v P2P mesh síti (Garmin & Withings kruhy)
+        if (sl.db.contacts().allNow().isEmpty()) {
+            val contactTereza = app.pulse4.android.data.ContactRow(
+                identity = "contact_tereza_garmin",
+                displayName = "Tereza (Garmin 265)",
+                publicKeyB64 = "dGVyZXphX2dhcm1pbl9wdWJrZXk=",
+                fingerprint = "TEREZA-RUN",
+                verifiedAtMs = nowMs
+            )
+            val contactTomas = app.pulse4.android.data.ContactRow(
+                identity = "contact_tomas_withings",
+                displayName = "Tomáš (Withings Scan)",
+                publicKeyB64 = "dG9tYXNfd2l0aGluZ3NfcHVia2V5",
+                fingerprint = "TOMAS-SCAN",
+                verifiedAtMs = nowMs
+            )
+            sl.db.contacts().upsert(contactTereza)
+            sl.db.contacts().upsert(contactTomas)
+
+            for (i in 6 downTo 0) {
+                val d = today.minusDays(i.toLong())
+                val dStr = d.toString()
+                val proj = app.pulse4.sharing.SharedProjection(
+                    ownerId = contactTereza.identity,
+                    grantId = "grant-tereza",
+                    date = dStr,
+                    fields = mapOf(
+                        app.pulse4.sharing.Field.WEIGHT to kotlinx.serialization.json.JsonPrimitive(58.4 - (6 - i) * 0.1),
+                        app.pulse4.sharing.Field.SLEEP_DURATION to kotlinx.serialization.json.JsonPrimitive(28800.0 + (i % 3) * 900.0),
+                        app.pulse4.sharing.Field.HRV_DAILY to kotlinx.serialization.json.JsonPrimitive(62.0 + (i % 4) * 2.5),
+                        app.pulse4.sharing.Field.BB_LAST to kotlinx.serialization.json.JsonPrimitive(88.0 + (i % 3) * 4.0),
+                        app.pulse4.sharing.Field.HR_DAILY to kotlinx.serialization.json.JsonPrimitive(48.0 - (i % 2) * 1.0)
+                    ),
+                    measuredAtUtcMs = nowMs - i * 86_400_000L,
+                    producedAtMs = nowMs - i * 86_400_000L
+                )
+                val payload = app.pulse4.sync.Wire.json.encodeToString(app.pulse4.sharing.SharedProjection.serializer(), proj)
+                sl.db.inbox().putObject(
+                    app.pulse4.android.data.ReceivedRow(
+                        author = contactTereza.identity,
+                        objectType = "daily",
+                        objectId = dStr,
+                        version = 1L,
+                        payload = payload
+                    )
+                )
+            }
+
+            val hrPoints = (0 until 40).map { s -> (s * 30_000L) to (148.0 + kotlin.math.sin(s / 4.0) * 12.0) }
+            val spdPoints = (0 until 40).map { s -> (s * 30_000L) to (3.45 + kotlin.math.cos(s / 5.0) * 0.3) }
+            val elePoints = (0 until 40).map { s -> (s * 30_000L) to (210.0 + s * 1.1) }
+            val routePoints = (0 until 40).map { s ->
+                app.pulse4.sharing.RoutePoint(50.0825 + s * 0.00035, 14.4280 + kotlin.math.sin(s / 6.0) * 0.0005)
+            }
+            val actProj = app.pulse4.sharing.ActivityProjection(
+                activityId = "tereza-trail-run",
+                sport = app.pulse4.domain.Sport.RUNNING.name,
+                localDate = today.toString(),
+                startUtcMs = nowMs - 14400_000L,
+                totalTimeS = 2160.0,
+                movingTimeS = 2110.0,
+                distanceM = 7420.0,
+                ascentM = 92.0,
+                avgHeartRate = 152,
+                charts = listOf(
+                    app.pulse4.sharing.ChartSeries("heartRate", hrPoints),
+                    app.pulse4.sharing.ChartSeries("speed", spdPoints),
+                    app.pulse4.sharing.ChartSeries("elevation", elePoints)
+                ),
+                route = routePoints
+            )
+            val actPayload = app.pulse4.sync.Wire.json.encodeToString(app.pulse4.sharing.ActivityProjection.serializer(), actProj)
+            sl.db.inbox().putObject(
+                app.pulse4.android.data.ReceivedRow(
+                    author = contactTereza.identity,
+                    objectType = "activity",
+                    objectId = "tereza-trail-run",
+                    version = 1L,
+                    payload = actPayload
+                )
+            )
+
+            val selfHash = sl.bridge.ensureStarted().deliveryHash
+            val demoGroup = app.pulse4.sharing.Group(
+                id = "group-sumava",
+                name = "Tým Šumava · Garmin & Withings",
+                ownerId = selfHash,
+                adminId = selfHash,
+                members = setOf(contactTereza.identity, contactTomas.identity, selfHash),
+                version = 1L
+            )
+            sl.shareService.saveGroup(demoGroup)
+        }
     }
 
     private fun synthesizeTrackFromSummary(act: Activity): List<app.pulse4.domain.TrackPoint> {
@@ -397,17 +881,31 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
         fun dbl(k: String): Double? = obj?.get(k)?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.doubleOrNull }?.takeIf { it.isFinite() }
         fun int(k: String): Int? = dbl(k)?.toInt()
 
-        val typeKey = obj?.get("activityType")?.let {
-            (it as? kotlinx.serialization.json.JsonObject)?.get("typeKey")?.let { tk -> (tk as? kotlinx.serialization.json.JsonPrimitive)?.content }
-        }
+        val activityTypeObj = obj?.get("activityType") as? kotlinx.serialization.json.JsonObject
+        val typeKey = activityTypeObj?.get("typeKey")?.let { tk -> (tk as? kotlinx.serialization.json.JsonPrimitive)?.content }
+        val parentTypeId = activityTypeObj?.get("parentTypeId")?.let { pt -> (pt as? kotlinx.serialization.json.JsonPrimitive)?.doubleOrNull?.toInt() }
         val sportFromObj = when (typeKey?.lowercase()) {
-            "running", "trail_running", "treadmill_running", "track_running" -> app.pulse4.domain.Sport.RUNNING
-            "cycling", "road_biking", "gravel_cycling", "mountain_biking", "indoor_cycling" -> app.pulse4.domain.Sport.CYCLING
-            "swimming", "lap_swimming", "open_water_swimming" -> app.pulse4.domain.Sport.SWIMMING
-            "walking", "casual_walking", "speed_walking" -> app.pulse4.domain.Sport.WALKING
-            "hiking" -> app.pulse4.domain.Sport.HIKING
-            "strength_training", "fitness_equipment", "hiit" -> app.pulse4.domain.Sport.STRENGTH
-            else -> null
+            "running", "trail_running", "treadmill_running", "track_running",
+            "street_running", "ultra_run", "virtual_run", "indoor_running", "obstacle_run" -> app.pulse4.domain.Sport.RUNNING
+            "cycling", "road_biking", "gravel_cycling", "mountain_biking", "indoor_cycling",
+            "virtual_ride", "cyclocross", "e_bike_mountain", "e_bike_fitness", "bmx",
+            "recumbent_cycling", "track_cycling" -> app.pulse4.domain.Sport.CYCLING
+            "swimming", "lap_swimming", "open_water_swimming", "pool_swimming",
+            "stand_up_paddleboarding_v2", "kayaking_v2", "rowing_v2", "indoor_rowing" -> app.pulse4.domain.Sport.SWIMMING
+            "walking", "casual_walking", "speed_walking", "indoor_walking" -> app.pulse4.domain.Sport.WALKING
+            "hiking", "mountaineering", "rock_climbing", "bouldering",
+            "snowshoe_ws", "backcountry_skiing_snowboarding_ws" -> app.pulse4.domain.Sport.HIKING
+            "strength_training", "fitness_equipment", "hiit", "indoor_cardio",
+            "cardio_training", "elliptical", "stair_climbing", "yoga", "pilates",
+            "breathwork", "mobility" -> app.pulse4.domain.Sport.STRENGTH
+            else -> when (parentTypeId) {
+                1 -> app.pulse4.domain.Sport.RUNNING
+                2 -> app.pulse4.domain.Sport.CYCLING
+                3 -> app.pulse4.domain.Sport.HIKING
+                26 -> app.pulse4.domain.Sport.SWIMMING
+                29 -> app.pulse4.domain.Sport.STRENGTH
+                else -> null
+            }
         }
         val sport = sportFromObj ?: parsed?.sport ?: app.pulse4.domain.Sport.OTHER
         val startMs = parsed?.startMs ?: runCatching {

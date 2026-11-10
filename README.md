@@ -1,114 +1,66 @@
-<div align="center">
-
 # Pulse4
 
-**Privacy-first, serverless personal fitness, biometric & activity hub for Android**
+Osobní Android aplikace pro čtyři lidi: data z Garminu v telefonu, dobrovolné sdílení vybraných údajů přes Reticulum/LXMF
+a plánování tréninků. **Žádný vlastní aplikační server** – úložiště, přihlášení, fronty i oprávnění žijí v telefonech.
+Implementace podle dokumentu *Architektonický návrh a technický posudek* (stav k 28. 10. 2026).
 
-[![English](https://img.shields.io/badge/English-0284C7?style=for-the-badge)](README.md)
-[![Čeština](https://img.shields.io/badge/Čeština-232A3B?style=for-the-badge)](README.cs.md)
-[![Deutsch](https://img.shields.io/badge/Deutsch-232A3B?style=for-the-badge)](README.de.md)
-[![Español](https://img.shields.io/badge/Español-232A3B?style=for-the-badge)](README.es.md)
-[![Français](https://img.shields.io/badge/Français-232A3B?style=for-the-badge)](README.fr.md)
-[![简体中文](https://img.shields.io/badge/简体中文-232A3B?style=for-the-badge)](README.zh.md)
+> **Stav: jádro, dosavadní konektor Withings a logika UI jsou hotové a otestované (173 testů). Android aplikace se sestavuje a běží na fyzickém telefonu (Xiaomi POCO X3 NFC, Android 16). Pro Withings nově ověřujeme webové připojení bez developer účtu: čtení dat je doloženo HAR, přihlášení a trvalá synchronizace ještě ne.**
+> Prostředí, ve kterém vznikla, nemělo Android SDK ani přístup na `dl.google.com` a `chaquo.com`. Přesný rozpis je v
+> [`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md). Garmin Personal API endpointy zde **nejsou vymyšlené** – viz
+> [`docs/garmin-endpoints.md`](docs/garmin-endpoints.md).
 
----
+Repozitář je jen lokální (`git init`, žádný remote, žádný commit ani push).
 
-[![Android](https://img.shields.io/badge/Platform-Android%2014%2B-3DDC84.svg?style=flat&logo=android&logoColor=white)](https://android.com)
-[![Kotlin](https://img.shields.io/badge/Kotlin-2.1.0-7F52FF.svg?style=flat&logo=kotlin&logoColor=white)](https://kotlinlang.org)
-[![Compose](https://img.shields.io/badge/UI-Jetpack%20Compose%20M3-4285F4.svg?style=flat&logo=jetpackcompose&logoColor=white)](https://developer.android.com/jetpack/compose)
-[![Tests](https://img.shields.io/badge/Unit%20Tests-173%20Passed-10B981.svg?style=flat)](app/src/test)
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg?style=flat)](LICENSE)
+## Struktura
 
-</div>
+| Modul | Obsah | Testy |
+|---|---|---|
+| `domain` | entity, jednotky, časová pásma a DST, deterministické klíče importu, propojení duplicit (váha Withings↔Garmin) | 7 |
+| `analytics` | pohybový čas, převýšení s hysterezí, čas v zónách, nejlepší úseky, downsampling se zachováním extrémů, osobní rozmezí | 7 |
+| `sharing-policy` | pozitivní seznam polí, projekce sestavená nově (ne „schování polí“), zóny soukromí, odvolání s popisem omezení, členství | 11 |
+| `sync-protocol` | obálka, příjem (autor = ověřený odesílatel, hash, schéma, oprávnění), ACK po commitu, odolný outbox, přílohy, párování, plánovač projekcí | 29 |
+| `provider-router` | mapa schopností bez skrytého přepínání, politika 401/403/429, kurzor až po uložení dávky, stav čerstvosti po oblastech | 8 |
+| `connector-garmin-personal` | konektor řízený konfigurací; neověřený endpoint se nevolá | 13 |
+| `connector-withings` | OAuth bez serveru (state, 30s kód, App Link), rotace tokenů, `getmeas`, tombstony, CSV, Health Connect mapování | 32 |
+| `training` | model a validace tréninků, revize plánu, oprávnění, konflikty, export do Garminu jako fronta kroků | 25 |
+| `fit-import` | oficiální Garmin FIT SDK, odolné vůči poškozeným souborům | 3 |
+| `backup` | šifrovaná záloha (PBKDF2 + AES-GCM, kontrolní součty) | 6 |
+| `ui-logic` | veškerá rozhodovací logika obrazovek: karty, agregace, graf↔trasa, editor, koncept sdílení, dashboard, stavy | 32 |
+| `app` | tenké Compose obrazovky nad `ui-logic`, Room + SQLCipher, Keystore, WorkManager, Health Connect, mosty do Pythonu (Chaquopy) | — |
+| `app/src/main/python` | `pulse4_rns` (Reticulum/LXMF), `pulse4_garmin` (python-garminconnect) | 8 + scénář |
 
-Pulse4 is an open-source, private Android application designed to unify body metrics, workouts, and autonomic recovery signals from the **Garmin** and **Withings** ecosystems. Built around the core principle of **Zero Cloud Dependency**, it eliminates central servers, accounts, tracking, and subscription fees. All sensitive health observations, encrypted databases (Room with SQLCipher), and credentials reside strictly on the user's phone.
+JVM moduly se sestaví a otestují bez Android SDK (`app` se do buildu zahrne jen s `ANDROID_HOME` nebo `local.properties`).
 
-Voluntary sharing of selected biometrics and workouts between family members or training groups is handled in a decentralized fashion using the cryptographic **Reticulum Mesh / LXMF** network.
+## Klíčová rozhodnutí
 
----
+- **Filtrace před odesláním.** `Projector` skládá odesílaný objekt jen z polí, která jsou v grantu *a* v datech; náhled ukazuje přesně tytéž bajty, které půjdou do fronty. Nová metrika se sama nezveřejní.
+- **Stavy doručení říkají jen to, co lze doložit.** „Potvrzeno příjemcem“ je pouze aplikační ACK; předání síti a uložení do schránky jsou zvláštní stavy.
+- **ACK po commitu.** Změna a záznam přijetí jsou v jedné transakci; ztracené ACK vyvolá opakování, které se znovu potvrdí, ale neaplikuje dvakrát.
+- **Export do Garminu nikdy neopakuje naslepo.** Po timeoutu se výsledek dohledá (značka v názvu); nejasný stav zastaví další zápis. Cizí tréninky se nemažou. Úprava přímo v Garmin Connect se porovná, nepřepíše.
+- **Oprávnění se posuzují při zpracování u vlastníka**, takže stará offline změna po odvolání práva neprojde.
+- **Tajemství.** Heslo Garminu se neukládá; tokeny, osobní API klíč a soukromá Reticulum identita jsou zapečetěné klíčem v Android Keystore, mimo zálohy. Python nezapisuje identitu ani tokeny na disk.
+- **Mosty jsou pull.** Kotlin čte události z Pythonu přes `drain_events()`; předává se jen malé verzované JSON DTO.
 
-## Core Highlights
+## Withings a UI
 
-### 1. Withings Ecosystem (Smart Scales & Health Sensors)
-- **Direct Web Connectivity:** Direct sync through Withings web session endpoints without requiring paid corporate developer accounts or hosting public OAuth callbacks.
-- **Full Body Composition Suite:** Total weight, muscle mass, body fat, total body water (hydration), bone mineral mass, and visceral fat index.
-- **Segmental Body Analysis:** Segmental muscle and fat distribution across extremities and trunk (right/left arm, torso, right/left leg), percentage breakdown, and bilateral limb symmetry analysis (% discrepancy).
-- **Electrocardiogram (ECG):** 1-lead and 6-lead ECG recordings from Withings Body Scan and ScanWatch devices, sinus rhythm classification vs. Atrial Fibrillation (AFib), recorded heart rate, and corrected QTc interval measurement in milliseconds.
-- **Automated Silent Session Keepalive:** Background session extension and one-click rapid session renewal without multi-profile picker confusion.
+- **Withings** (`docs/withings.md`): nový směr je přihlášený web bez developer účtu, secretu a vlastního serveru. HAR potvrzuje čtení obou profilů, celého složení těla a EKG;
+  získání a životnost webové relace zbývá ověřit. Současný konektor umí jen váhu a tuk; Health Connect a CSV zůstávají alternativami s omezeným rozsahem. Stejné vážení přes víc cest
+  je jeden bod trendu; nejednoznačné měření (jiná osoba) do trendu nevstupuje, dokud je uživatel nepotvrdí; chybné lze označit a přežije re-import.
+  Statická callback stránka a `assetlinks.json` v `docs/withings-applink/` patří k původnímu OAuth návrhu.
+- **UI**: obrazovky Dnes, Metriky, Aktivity (+ detail s propojeným grafem/trasou a osou čas/vzdálenost), Tréninky, Skupiny (kontakty, sdílení s náhledem, dashboard),
+  Tělo, Připojení, Soukromí. Rozhodování je v `ui-logic` (testováno), Compose kód je jen tenká vrstva. Compose artefakty nebyly dostupné, takže **UI nebylo
+  zkompilováno proti skutečnému Compose ani vykresleno**; `tools/kotlin-typecheck` ověřuje aspoň Kotlin a volání do vlastních modulů proti stubům.
 
-### 2. Garmin Ecosystem (Activities & Recovery)
-- **Deep Biometric Telemetry:** Overnight Heart Rate Variability (HRV / rMSSD), nocturnal resting heart rate (RHR), Garmin Body Battery (0–100), all-day stress scores, SpO2, and respiration rate.
-- **Advanced Running & Endurance Analytics:** Real-time & potential Stamina metrics, complete Running Dynamics (cadence, vertical oscillation, vertical ratio, ground contact time GCT, ground contact time balance L/R), heart rate zones, and Performance Condition baseline tracking.
-- **Structured Workout Engine:** Visual step & interval workout planner with direct upload to Garmin sports watches.
+## Co v této verzi není
 
-### 3. High-Resolution Modern UI (Jetpack Compose Material 3)
-- **High-Granularity Curve Scaling (±100g to 500g):** Multi-series line charts (`MultiSeriesLineChart`) feature independent dynamic scaling with a minimum 0.80 kg window, ensuring small ±200 g fluctuations occupy 25% of the chart canvas rather than flattening into invisible single-pixel ribbons.
-- **Physical Gram Delta Readout:** Precise day-to-day changes formatted in grams (`+200 g`, `-500 g`, `±0 g`) with touch-scrubbing interactive HUD tooltips.
-- **Stacked Weight Composition Area Chart:** Layered area chart showing total body mass stacked with muscle and fat strata under the curve, with quick toggles to expand individual metric cards.
-- **Compact Multi-Select Dropdowns:** Unified filter bar featuring multi-checkbox metric selection, preset combinations (*Recovery*, *Heart & ECG*, *Body Comp*), and time window selection (7 to 365 days).
-- **Clean Clutter-Free Visuals:** Technical metric explanations and physiological interpretations are placed inside dedicated dialogs triggered via `ⓘ` info buttons.
-- **Atmospheric Visual Motifs:** Photorealistic thematic background cards for Today dashboard singlestats and activity types (running, walking, hiking, swimming, strength, cycling).
+Aplikační import aktivit z oficiálního API (kvůli chybějícím endpointům jde zatím ručně přes FIT), offline mapové balíčky, Bluetooth transport,
+silové tréninky, více zařízení na osobu, iOS. Editor tréninků umí běžný krok a intervalový blok (N× práce → odpočinek); obecné vnořené opakování
+v UI není. Dashboard čte denní projekce (`daily`); sdílené aktivity se zobrazují surově.
 
-### 4. Decentralized Mesh Sharing (Reticulum Mesh & LXMF)
-- **Serverless P2P Architecture:** Zero external application servers or third-party cloud aggregators.
-- **End-to-End Cryptography:** Asymmetric Curve25519/Ed25519 identity keys ensure message authenticity and encryption.
-- **Granular Field Permissions:** Users selectively grant specific metric visibility on a per-contact basis (e.g. sharing only recovery metrics with a coach, while sharing full telemetry with family).
+## Než poprvé sestavíte `app`
 
----
-
-## Modular Architecture
-
-Pulse4 is designed as a clean modular monorepo isolating business rules from Android-specific SDKs:
-
-```
-pulse4/
-├── domain/                      # Pure Kotlin domain entities, units, timezones, import deduplication
-├── analytics/                   # Running dynamics, stamina algorithms, elevation hysteresis, P25/P75 bands
-├── connector-garmin-personal/   # Garmin Connect sync engine, session management, FIT download
-├── connector-withings/          # Withings Web sync engine, body composition, segmental values, ECG
-├── sync-protocol/               # Reticulum / LXMF encrypted envelope, idempotence, outbox queue, ACK
-├── sharing-policy/              # Granular permissions engine, privacy zones, sharing projections
-├── ui-logic/                    # Framework-independent screen logic and viewmodels (JVM testable)
-├── app/                         # Android application (Compose M3, Room SQLCipher, Keystore, Chaquopy)
-└── pulse4-vault/                # Developer logs, Obsidian knowledge base, architectural records
-```
-
----
-
-## Prerequisites & Building
-
-- **Android Studio:** Ladybug / Meerkat or later
-- **JDK:** OpenJDK 17
-- **Android SDK:** API 34+ (Targeting Android 14/15/16)
-- **Target Device:** 64-bit ARM (`arm64-v8a`) required for native cryptography libraries.
-
-### Command Line Build:
-
-```bash
-# Configure paths for JDK 17 and Android SDK
-export JAVA_HOME=/path/to/jdk-17
-export ANDROID_HOME=/path/to/android-sdk
-
-# Execute comprehensive test suite (173 unit tests)
-./gradlew testDebugUnitTest
-
-# Assemble debug APK
-./gradlew assembleDebug
-
-# Deploy to connected physical device
-adb install -r app/build/outputs/apk/debug/app-debug.apk
-```
-
----
-
-## Security & Privacy Architecture
-
-1. **At-Rest Encryption:** Local SQLite database is encrypted via **SQLCipher** (AES-256). Cryptographic keys are generated with secure random entropy and sealed inside the hardware-backed **Android Keystore** (TEE / StrongBox).
-2. **Zero Tracking:** No telemetry, Firebase, Crashlytics, or analytics SDKs are incorporated into the codebase.
-3. **Decentralized Networking:** Reticulum peer-to-peer communications use no phone numbers, emails, or static IP addresses.
-
----
-
-## License
-
-This project is licensed under the [Apache 2.0 License](LICENSE).
+1. Doplňte endpointy podle `docs/garmin-endpoints.md`.
+2. Pro Withings projděte aktuální stav v `docs/withings.md`. Nový webový konektor ještě není implementován; `-Ppulse4.withingsHost` se týká pouze původního OAuth režimu.
+3. Ověřte a zvyšte verze v `app/build.gradle.kts` (AGP, KSP – musí sedět s Kotlinem, Compose BOM, Room, WorkManager, Chaquopy). Verze jsem volil podle znalostí, ne podle dostupných repozitářů.
+4. Uzamkněte Python závislosti i s hashi (`pip install` v `chaquopy {}` je pro vývoj) a ověřte, že `curl_cffi` wheel funguje v Chaquopy a na 16KB stránkách.
+5. Spusťte přejímací brány z `docs/ACCEPTANCE.md` na skutečných telefonech a hodinkách.

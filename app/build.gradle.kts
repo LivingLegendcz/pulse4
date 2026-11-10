@@ -6,7 +6,6 @@ plugins {
     kotlin("plugin.serialization")
     id("org.jetbrains.kotlin.plugin.compose") version "2.4.21"
     id("com.google.devtools.ksp")
-    id("com.chaquo.python") version "17.2.0"
 }
 
 android {
@@ -29,7 +28,19 @@ android {
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }
 
+    signingConfigs {
+        create("debugConfig") {
+            storeFile = file("${rootDir}/debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("debugConfig")
+        }
         release {
             isMinifyEnabled = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
@@ -48,18 +59,6 @@ android {
 
 kotlin { compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) } }
 
-chaquopy {
-    defaultConfig {
-        version = "3.12"
-        pip {
-            // Verze a hashe se před vydáním uzamknou (requirements.lock s --hash); Python kód se dynamicky nestahuje.
-            install("rns")
-            install("lxmf")
-            install("garminconnect")
-            install("pydantic")
-        }
-    }
-}
 
 dependencies {
     implementation(project(":domain"))

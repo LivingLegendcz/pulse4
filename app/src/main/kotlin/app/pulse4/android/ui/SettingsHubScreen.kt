@@ -6,8 +6,11 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,6 +25,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -57,15 +61,24 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import app.pulse4.android.R
+import app.pulse4.android.ui.theme.JetBrainsMonoFamily
 import app.pulse4.android.data.MapProvider
 import app.pulse4.android.data.NetworkMode
 import app.pulse4.android.data.toRow
@@ -106,32 +119,181 @@ import kotlinx.coroutines.withContext
 fun SettingsHubScreen(sl: ServiceLocator, initialTab: Int = 0) {
     var selectedTab by remember { mutableStateOf(initialTab) }
     val tabs = listOf(
-        "Jednotky & Mapy" to 0,
-        "Globální Sdílení" to 1,
-        "Garmin & Withings" to 2,
-        "Reticulum P2P" to 3,
-        "Soukromí & Záloha" to 4
+        Triple("Jednotky & Mapy", "KALIBRACE", 0),
+        Triple("Globální Sdílení", "P2P MATICE", 1),
+        Triple("Garmin & Withings", "SENZORY", 2),
+        Triple("Reticulum P2P", "MESH UZEL", 3),
+        Triple("Soukromí & Záloha", "TREZOR", 4)
     )
 
+    val heroMeta = when (selectedTab) {
+        0 -> Triple(
+            R.drawable.img_alpine_trail_hero,
+            Color(0xFF38BDF8),
+            "Kalibrace Telemetrie & Map" to "Soustava jednotek, kartografické vrstvy a lokální profil uzlu."
+        )
+        1 -> Triple(
+            R.drawable.img_nordic_wellness_hero,
+            Color(0xFF2DD4BF),
+            "Globální P2P Matice Sdílení" to "Určete, které biometrické domény mohou opustit vaše zařízení."
+        )
+        2 -> Triple(
+            R.drawable.img_motif_heart_real,
+            Color(0xFF10B981),
+            "Biometrické Zdroje & Integrace" to "Přímé napojení na Garmin Connect, Personal API a váhy Withings."
+        )
+        3 -> Triple(
+            R.drawable.img_motif_hrv_autonomic,
+            Color(0xFFA855F7),
+            "Suverénní Uzel Reticulum P2P" to "Topologie šifrované sítě, propojovací brány a odchozí fronta."
+        )
+        else -> Triple(
+            R.drawable.img_sport_tactical_hero,
+            Color(0xFFF59E0B),
+            "Geofencing Soukromí & Trezor" to "Automatické ořezávání GPS u bydliště a šifrovaná záloha .p4bk."
+        )
+    }
+
+    val (heroBgRes, heroAccent, heroTexts) = heroMeta
+
     Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.background)) {
-        ScrollableTabRow(
-            selectedTabIndex = selectedTab,
-            edgePadding = 12.dp,
-            containerColor = app.pulse4.android.ui.theme.MineralBackgroundDark,
-            modifier = Modifier.fillMaxWidth()
+        // ─── AMBITIOUS DYNAMIC OBSERVATORY HEADER & GLASS TAB CONSOLE ───
+        Card(
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF070C14)),
+            border = BorderStroke(1.dp, heroAccent.copy(alpha = 0.42f)),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 8.dp)
         ) {
-            tabs.forEach { (label, index) ->
-                Tab(
-                    selected = selectedTab == index,
-                    onClick = { selectedTab = index },
-                    text = {
-                        Text(
-                            label,
-                            fontWeight = if (selectedTab == index) FontWeight.Bold else FontWeight.Normal,
-                            color = if (selectedTab == index) Color(0xFF38BDF8) else Color(0xFF94A3B8)
+            Box(Modifier.fillMaxWidth()) {
+                Image(
+                    painter = painterResource(id = heroBgRes),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .matchParentSize()
+                        .alpha(0.45f)
+                )
+                Canvas(Modifier.matchParentSize()) {
+                    drawRect(
+                        brush = Brush.verticalGradient(
+                            listOf(Color(0x99050911), Color(0xD9070C14), Color(0xF5070C14))
+                        )
+                    )
+                    val cx = size.width * 0.88f
+                    val cy = size.height * 0.28f
+                    drawCircle(
+                        brush = Brush.radialGradient(
+                            colors = listOf(heroAccent.copy(alpha = 0.30f), Color.Transparent),
+                            center = Offset(cx, cy),
+                            radius = size.width * 0.5f
+                        ),
+                        center = Offset(cx, cy),
+                        radius = size.width * 0.5f
+                    )
+                    listOf(28.dp.toPx(), 54.dp.toPx(), 82.dp.toPx()).forEachIndexed { idx, r ->
+                        drawCircle(
+                            color = heroAccent.copy(alpha = 0.16f - idx * 0.04f),
+                            radius = r,
+                            center = Offset(cx, cy),
+                            style = Stroke(width = 1.dp.toPx())
                         )
                     }
-                )
+                }
+
+                Column(Modifier.padding(16.dp)) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(50))
+                                .background(Color(0xFF0A1624).copy(alpha = 0.85f))
+                                .padding(horizontal = 10.dp, vertical = 4.dp)
+                        ) {
+                            Box(Modifier.size(7.dp).background(heroAccent, CircleShape))
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                "SOVEREIGN BIOMETRIC NODE · NASTAVENÍ",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = heroAccent,
+                                letterSpacing = 1.2.sp,
+                                fontSize = 9.sp
+                            )
+                        }
+                        Text(
+                            "SEKCE 0${selectedTab + 1}/05",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = JetBrainsMonoFamily,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFFCBD5E1),
+                            fontSize = 10.sp
+                        )
+                    }
+
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        heroTexts.first,
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Color.White
+                    )
+                    Text(
+                        heroTexts.second,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFFCBD5E1)
+                    )
+
+                    Spacer(Modifier.height(12.dp))
+
+                    // Horizontální skleněná konzole záložek
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        tabs.forEach { (label, badge, index) ->
+                            val isSelected = selectedTab == index
+                            Card(
+                                shape = RoundedCornerShape(14.dp),
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (isSelected) heroAccent else Color(0xFF1E293B)
+                                ),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = if (isSelected) heroAccent.copy(alpha = 0.20f) else Color(0xFF0B121E).copy(alpha = 0.82f)
+                                ),
+                                modifier = Modifier.clickable { selectedTab = index }
+                            ) {
+                                Column(
+                                    Modifier.padding(horizontal = 12.dp, vertical = 7.dp)
+                                ) {
+                                    Text(
+                                        badge,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontFamily = JetBrainsMonoFamily,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isSelected) heroAccent else Color(0xFF64748B),
+                                        fontSize = 8.5.sp
+                                    )
+                                    Text(
+                                        label,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium,
+                                        color = if (isSelected) Color.White else Color(0xFF94A3B8),
+                                        maxLines = 1
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -168,59 +330,77 @@ private fun GeneralAndUnitsSection(sl: ServiceLocator) {
     ) {
         // Výběr Metrické vs Imperiální jednotky
         Card(
-            shape = RoundedCornerShape(18.dp),
-            border = BorderStroke(1.dp, app.pulse4.android.ui.theme.MineralOutlineDark),
-            colors = CardDefaults.cardColors(containerColor = app.pulse4.android.ui.theme.MineralSurfaceDark),
+            shape = RoundedCornerShape(22.dp),
+            border = BorderStroke(1.dp, Color(0xFF38BDF8).copy(alpha = 0.35f)),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF0A101B)),
             modifier = Modifier.fillMaxWidth()
         ) {
-            Column(Modifier.padding(16.dp)) {
-                Text(
-                    "SOUSTAVA JEDNOTEK (METRICKÉ VS. IMPERIÁLNÍ)",
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = Color(0xFF94A3B8)
+            Box(Modifier.fillMaxWidth()) {
+                Image(
+                    painter = painterResource(id = R.drawable.img_motif_running_stride),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.matchParentSize().alpha(0.22f)
                 )
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    "Zvolená soustava okamžitě přepočítá vzdálenosti, tempo, převýšení i tělesnou hmotnost napříč celou aplikací.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFF94A3B8)
-                )
-                Spacer(Modifier.height(10.dp))
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(Color(0xD9080E18), Color(0xF20A101B))
+                            )
+                        )
+                        .padding(16.dp)
+                ) {
+                    Text(
+                        "SOUSTAVA JEDNOTEK (METRICKÉ VS. IMPERIÁLNÍ)",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Color(0xFF38BDF8),
+                        letterSpacing = 0.8.sp
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "Zvolená soustava okamžitě přepočítá vzdálenosti, tempo, převýšení i tělesnou hmotnost napříč celou aplikací.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFFCBD5E1)
+                    )
+                    Spacer(Modifier.height(10.dp))
 
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FilterChip(
-                        selected = currentUnits == UnitSystem.METRIC,
-                        onClick = {
-                            scope.launch(Dispatchers.IO) {
-                                sl.settings.unitSystem = UnitSystem.METRIC
-                                activeFmt = Fmt(ZoneId.of(sl.settings.zoneId), units = UnitSystem.METRIC)
-                                feedback = "Nastaveny metrické jednotky (km, m, kg, min/km)."
-                                tick++
-                            }
-                        },
-                        label = { Text("Metrické (km, kg)", maxLines = 1) },
-                        modifier = Modifier.weight(1f)
-                    )
-                    FilterChip(
-                        selected = currentUnits == UnitSystem.IMPERIAL,
-                        onClick = {
-                            scope.launch(Dispatchers.IO) {
-                                sl.settings.unitSystem = UnitSystem.IMPERIAL
-                                activeFmt = Fmt(ZoneId.of(sl.settings.zoneId), units = UnitSystem.IMPERIAL)
-                                feedback = "Nastaveny imperiální jednotky (mi, ft, lb, min/mi)."
-                                tick++
-                            }
-                        },
-                        label = { Text("Imperiální (mi, lb)", maxLines = 1) },
-                        modifier = Modifier.weight(1f)
-                    )
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(
+                            selected = currentUnits == UnitSystem.METRIC,
+                            onClick = {
+                                scope.launch(Dispatchers.IO) {
+                                    sl.settings.unitSystem = UnitSystem.METRIC
+                                    activeFmt = Fmt(ZoneId.of(sl.settings.zoneId), units = UnitSystem.METRIC)
+                                    feedback = "Nastaveny metrické jednotky (km, m, kg, min/km)."
+                                    tick++
+                                }
+                            },
+                            label = { Text("Metrické (km, kg)", maxLines = 1, fontWeight = FontWeight.Bold) },
+                            modifier = Modifier.weight(1f)
+                        )
+                        FilterChip(
+                            selected = currentUnits == UnitSystem.IMPERIAL,
+                            onClick = {
+                                scope.launch(Dispatchers.IO) {
+                                    sl.settings.unitSystem = UnitSystem.IMPERIAL
+                                    activeFmt = Fmt(ZoneId.of(sl.settings.zoneId), units = UnitSystem.IMPERIAL)
+                                    feedback = "Nastaveny imperiální jednotky (mi, ft, lb, min/mi)."
+                                    tick++
+                                }
+                            },
+                            label = { Text("Imperiální (mi, lb)", maxLines = 1, fontWeight = FontWeight.Bold) },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+
+                    Spacer(Modifier.height(8.dp))
+                    LabeledRow("Vzdálenost & tempo", if (currentUnits == UnitSystem.IMPERIAL) "Míle (mi) · min/mi" else "Kilometry (km) · min/km")
+                    LabeledRow("Nadmořská výška", if (currentUnits == UnitSystem.IMPERIAL) "Stopy (ft)" else "Metry (m)")
+                    LabeledRow("Tělesná hmotnost", if (currentUnits == UnitSystem.IMPERIAL) "Libry (lb)" else "Kilogramy (kg)")
                 }
-
-                Spacer(Modifier.height(8.dp))
-                LabeledRow("Vzdálenost & tempo", if (currentUnits == UnitSystem.IMPERIAL) "Míle (mi) · min/mi" else "Kilometry (km) · min/km")
-                LabeledRow("Nadmořská výška", if (currentUnits == UnitSystem.IMPERIAL) "Stopy (ft)" else "Metry (m)")
-                LabeledRow("Tělesná hmotnost", if (currentUnits == UnitSystem.IMPERIAL) "Libry (lb)" else "Kilogramy (kg)")
             }
         }
 
@@ -228,81 +408,101 @@ private fun GeneralAndUnitsSection(sl: ServiceLocator) {
 
         // Výběr poskytovatele mapového podkladu (Map Provider)
         Card(
-            shape = RoundedCornerShape(18.dp),
-            border = BorderStroke(1.dp, app.pulse4.android.ui.theme.MineralOutlineDark),
-            colors = CardDefaults.cardColors(containerColor = app.pulse4.android.ui.theme.MineralSurfaceDark),
+            shape = RoundedCornerShape(22.dp),
+            border = BorderStroke(1.dp, Color(0xFF2DD4BF).copy(alpha = 0.35f)),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF0A101B)),
             modifier = Modifier.fillMaxWidth()
         ) {
-            Column(Modifier.padding(16.dp)) {
-                Text(
-                    "POSKYTOVATEL MAPOVÉHO PODKLADU AKTIVIT",
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = Color(0xFF94A3B8)
+            Box(Modifier.fillMaxWidth()) {
+                Image(
+                    painter = painterResource(id = R.drawable.img_alpine_trail_hero),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.matchParentSize().alpha(0.24f)
                 )
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    "Zvolte mapový podklad pro vykreslování GPS tras v detailu a porovnání aktivit.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFF94A3B8)
-                )
-                Spacer(Modifier.height(10.dp))
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(Color(0xD9080E18), Color(0xF20A101B))
+                            )
+                        )
+                        .padding(16.dp)
+                ) {
+                    Text(
+                        "KARTOGRAFICKÝ ENGINE AKTIVIT",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Color(0xFF2DD4BF),
+                        letterSpacing = 0.8.sp
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "Zvolte mapový podklad pro vykreslování GPS tras v detailu a překryvném porovnání aktivit.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFFCBD5E1)
+                    )
+                    Spacer(Modifier.height(10.dp))
 
-                FlowRow(Modifier.fillMaxWidth()) {
-                    MapProvider.entries.forEach { mp ->
-                        FilterChip(
-                            selected = currentMapProvider == mp,
+                    FlowRow(Modifier.fillMaxWidth()) {
+                        MapProvider.entries.forEach { mp ->
+                            FilterChip(
+                                selected = currentMapProvider == mp,
+                                onClick = {
+                                    scope.launch(Dispatchers.IO) {
+                                        sl.settings.mapProvider = mp
+                                        feedback = "Mapový podklad změněn na: ${mp.title}"
+                                        tick++
+                                    }
+                                },
+                                label = { Text(mp.shortLabel, maxLines = 1) },
+                                modifier = Modifier.padding(end = 6.dp, bottom = 4.dp)
+                            )
+                        }
+                    }
+
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        currentMapProvider.title,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Color(0xFF38BDF8)
+                    )
+                    Text(
+                        currentMapProvider.subtitle,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFFCBD5E1)
+                    )
+                    Text(
+                        "Atribuce: ${currentMapProvider.attribution}",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = JetBrainsMonoFamily,
+                        color = Color(0xFF94A3B8),
+                        fontSize = 10.sp,
+                        modifier = Modifier.padding(top = 2.dp)
+                    )
+
+                    if (currentMapProvider == MapProvider.CUSTOM_URL) {
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = customMapUrl,
+                            onValueChange = { customMapUrl = it },
+                            label = { Text("Vlastní URL stylu mapy (style.json)") },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        Button(
                             onClick = {
                                 scope.launch(Dispatchers.IO) {
-                                    sl.settings.mapProvider = mp
-                                    feedback = "Mapový podklad změněn na: ${mp.title}"
+                                    sl.settings.mapStyleUrl = customMapUrl.trim()
+                                    feedback = "Vlastní URL mapového stylu uložena."
                                     tick++
                                 }
                             },
-                            label = { Text(mp.shortLabel, maxLines = 1) },
-                            modifier = Modifier.padding(end = 6.dp, bottom = 4.dp)
-                        )
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text("Uložit vlastní URL mapy") }
                     }
-                }
-
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    currentMapProvider.title,
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = Color(0xFF38BDF8)
-                )
-                Text(
-                    currentMapProvider.subtitle,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFF94A3B8)
-                )
-                Text(
-                    "Atribuce: ${currentMapProvider.attribution}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Color(0xFF64748B),
-                    modifier = Modifier.padding(top = 2.dp)
-                )
-
-                if (currentMapProvider == MapProvider.CUSTOM_URL) {
-                    Spacer(Modifier.height(8.dp))
-                    OutlinedTextField(
-                        value = customMapUrl,
-                        onValueChange = { customMapUrl = it },
-                        label = { Text("Vlastní URL stylu mapy (style.json)") },
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Spacer(Modifier.height(6.dp))
-                    Button(
-                        onClick = {
-                            scope.launch(Dispatchers.IO) {
-                                sl.settings.mapStyleUrl = customMapUrl.trim()
-                                feedback = "Vlastní URL mapového stylu uložena."
-                                tick++
-                            }
-                        },
-                        modifier = Modifier.fillMaxWidth()
-                    ) { Text("Uložit vlastní URL mapy") }
                 }
             }
         }
@@ -342,17 +542,18 @@ private fun GeneralAndUnitsSection(sl: ServiceLocator) {
         }
 
         Card(
-            shape = RoundedCornerShape(18.dp),
-            border = BorderStroke(1.dp, app.pulse4.android.ui.theme.MineralOutlineDark),
-            colors = CardDefaults.cardColors(containerColor = app.pulse4.android.ui.theme.MineralSurfaceDark),
+            shape = RoundedCornerShape(22.dp),
+            border = BorderStroke(1.dp, Color(0xFFA855F7).copy(alpha = 0.35f)),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF0A101B)),
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(Modifier.padding(16.dp)) {
                 Text(
-                    "PROFIL A ČASOVÉ PÁSMO",
+                    "IDENTITA PROFILU A ČASOVÉ PÁSMO",
                     style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = Color(0xFF94A3B8)
+                    fontWeight = FontWeight.ExtraBold,
+                    color = Color(0xFFA855F7),
+                    letterSpacing = 0.8.sp
                 )
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(
@@ -395,7 +596,7 @@ private fun GeneralAndUnitsSection(sl: ServiceLocator) {
                     Card(
                         shape = RoundedCornerShape(12.dp),
                         border = BorderStroke(1.dp, if (zoneMenuExpanded) Color(0xFF38BDF8) else Color(0xFF334155)),
-                        colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF141D2E)),
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable { zoneMenuExpanded = !zoneMenuExpanded }
@@ -533,12 +734,12 @@ private fun GlobalSharingSection(sl: ServiceLocator) {
     var notice by remember { mutableStateOf<String?>(null) }
 
     val sectionDefs = listOf(
-        Triple(Category.SLEEP, "Spánek", "Délka spánku, skóre kvality a fáze spánku"),
-        Triple(Category.BODY_BATTERY, "Body Battery & Regenerace", "Aktuální stav energie, denní min/max a křivka"),
-        Triple(Category.HEART_RATE, "Kardio & Klidový tep", "Klidová tepová frekvence a denní průběh"),
-        Triple(Category.HRV, "Variabilita tepu (HRV)", "Noční rMSSD průměr a průběh regenerace"),
-        Triple(Category.ACTIVITY, "Aktivity & Trasy", "Sportovní záznamy, souhrny, křivky a sanitizované GPS trasy"),
-        Triple(Category.BODY_COMPOSITION, "Tělesné složení & Váha", "Tělesná hmotnost a procento tělesného tuku")
+        Triple(Category.SLEEP, "Spánek" to "Délka spánku, skóre kvality a fáze spánku", R.drawable.img_motif_sleep_night),
+        Triple(Category.BODY_BATTERY, "Body Battery & Regenerace" to "Aktuální stav energie, denní min/max a křivka", R.drawable.img_motif_body_battery),
+        Triple(Category.HEART_RATE, "Kardio & Klidový tep" to "Klidová tepová frekvence a denní průběh", R.drawable.img_motif_heart_pulse),
+        Triple(Category.HRV, "Variabilita tepu (HRV)" to "Noční rMSSD průměr a průběh regenerace", R.drawable.img_motif_hrv_autonomic),
+        Triple(Category.ACTIVITY, "Aktivity & Trasy" to "Sportovní záznamy, souhrny, křivky a sanitizované GPS trasy", R.drawable.img_alpine_trail_hero),
+        Triple(Category.BODY_COMPOSITION, "Tělesné složení & Váha" to "Tělesná hmotnost a procento tělesného tuku", R.drawable.img_motif_body_silhouette)
     )
 
     Column(
@@ -548,23 +749,37 @@ private fun GlobalSharingSection(sl: ServiceLocator) {
             .padding(14.dp)
     ) {
         Card(
-            shape = RoundedCornerShape(18.dp),
-            border = BorderStroke(1.dp, app.pulse4.android.ui.theme.MineralOutlineDark),
-            colors = CardDefaults.cardColors(containerColor = app.pulse4.android.ui.theme.MineralSurfaceDark),
+            shape = RoundedCornerShape(22.dp),
+            border = BorderStroke(1.dp, Color(0xFF2DD4BF).copy(alpha = 0.35f)),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF0A101B)),
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(Modifier.padding(16.dp)) {
-                Text(
-                    "GLOBÁLNÍ NASTAVENÍ SDÍLENÍ PO SEKCÍCH",
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = Color(0xFF94A3B8)
-                )
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "GLOBÁLNÍ NASTAVENÍ SDÍLENÍ PO SEKCÍCH",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Color(0xFF2DD4BF),
+                        letterSpacing = 0.8.sp
+                    )
+                    Text(
+                        "${enabledCategories.size}/6 AKTIVNÍ",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = JetBrainsMonoFamily,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF38BDF8)
+                    )
+                }
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    "Zapněte sekce, které chcete automaticky sdílet přes P2P. Nezapnuté sekce nikdy neopustí váš telefon.",
+                    "Zapněte biometrické domény, které chcete automaticky šifrovaně sdílet přes P2P. Nezapnuté sekce nikdy neopustí váš telefon.",
                     style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFF94A3B8)
+                    color = Color(0xFFCBD5E1)
                 )
                 Spacer(Modifier.height(10.dp))
 
@@ -574,7 +789,7 @@ private fun GlobalSharingSection(sl: ServiceLocator) {
                         onClick = { enabledCategories = Category.entries.toSet() },
                         modifier = Modifier.weight(1f)
                     ) { Text("Zapnout vše") }
-                    Button(
+                    OutlinedButton(
                         onClick = { enabledCategories = emptySet() },
                         modifier = Modifier.weight(1f)
                     ) { Text("Vypnout vše") }
@@ -582,25 +797,70 @@ private fun GlobalSharingSection(sl: ServiceLocator) {
 
                 Spacer(Modifier.height(10.dp))
 
-                sectionDefs.forEach { (cat, title, subtitle) ->
+                sectionDefs.forEach { (cat, texts, bgRes) ->
+                    val (title, subtitle) = texts
                     val isOn = cat in enabledCategories
-                    Row(
-                        Modifier
+                    val catColor = cat.unifiedColor()
+                    Card(
+                        shape = RoundedCornerShape(16.dp),
+                        border = BorderStroke(1.dp, if (isOn) catColor.copy(alpha = 0.55f) else Color(0xFF1E293B)),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF0E1524)),
+                        modifier = Modifier
                             .fillMaxWidth()
-                            .padding(vertical = 6.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(Modifier.weight(1f).padding(end = 8.dp)) {
-                            Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = Color.White)
-                            Text(subtitle, style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8))
-                        }
-                        Switch(
-                            checked = isOn,
-                            onCheckedChange = { checked ->
-                                enabledCategories = if (checked) enabledCategories + cat else enabledCategories - cat
+                            .padding(vertical = 4.dp)
+                            .clickable {
+                                enabledCategories = if (isOn) enabledCategories - cat else enabledCategories + cat
                             }
-                        )
+                    ) {
+                        Box(Modifier.fillMaxWidth()) {
+                            Image(
+                                painter = painterResource(id = bgRes),
+                                contentDescription = null,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier
+                                    .matchParentSize()
+                                    .alpha(if (isOn) 0.28f else 0.12f)
+                            )
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .background(
+                                        Brush.horizontalGradient(
+                                            listOf(Color(0xE60A101C), Color(0xCC0E1524))
+                                        )
+                                    )
+                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                androidx.compose.material3.Surface(
+                                    shape = CircleShape,
+                                    color = catColor.copy(alpha = if (isOn) 0.22f else 0.08f),
+                                    border = BorderStroke(1.dp, catColor.copy(alpha = if (isOn) 0.55f else 0.22f)),
+                                    modifier = Modifier.size(38.dp)
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Icon(
+                                            imageVector = cat.unifiedIcon(),
+                                            contentDescription = null,
+                                            tint = if (isOn) catColor else Color(0xFF64748B),
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                }
+                                Spacer(Modifier.width(12.dp))
+                                Column(Modifier.weight(1f).padding(end = 8.dp)) {
+                                    Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.ExtraBold, color = Color.White)
+                                    Text(subtitle, style = MaterialTheme.typography.labelSmall, color = Color(0xFFCBD5E1))
+                                }
+                                Switch(
+                                    checked = isOn,
+                                    onCheckedChange = { checked ->
+                                        enabledCategories = if (checked) enabledCategories + cat else enabledCategories - cat
+                                    }
+                                )
+                            }
+                        }
                     }
                 }
 
@@ -691,14 +951,19 @@ private fun GlobalSharingSection(sl: ServiceLocator) {
         }
         activeGrants.forEach { g ->
             Card(
-                shape = RoundedCornerShape(14.dp),
-                border = BorderStroke(1.dp, app.pulse4.android.ui.theme.MineralOutlineDark),
-                colors = CardDefaults.cardColors(containerColor = app.pulse4.android.ui.theme.MineralSurfaceDark),
+                shape = RoundedCornerShape(16.dp),
+                border = BorderStroke(1.dp, Color(0xFF2DD4BF).copy(alpha = 0.35f)),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF0A101B)),
                 modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
             ) {
-                Column(Modifier.padding(12.dp)) {
+                Column(Modifier.padding(14.dp)) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                        Text("Aktivní grant · ${g.recipients.size} příjemců · ${g.fields.size} polí", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                        Text(
+                            "Aktivní grant · ${g.recipients.size} příjemců · ${g.fields.size} polí",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color.White
+                        )
                         TextButton(onClick = {
                             scope.launch(Dispatchers.IO) {
                                 sl.shareService.revoke(g.id, System.currentTimeMillis())
@@ -826,46 +1091,78 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
             .verticalScroll(rememberScrollState())
             .padding(14.dp)
     ) {
-        // Přepínač služby – vždy vidíte jen jednu věc
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        // Atmosférický přepínač biometrické služby (Garmin | Withings | Rodina/Dítě)
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             val withingsFailed = wState is app.pulse4.android.di.WithingsUiState.Failed
             listOf(
-                Triple("", "Garmin", garminOk),
-                Triple("", "Withings", wConnected && !withingsFailed),
-                Triple("", "Dítě", (wCfg?.childRecipientIdentity ?: "").isNotBlank())
-            ).forEachIndexed { i, (icon, label, ok) ->
+                Triple(R.drawable.img_motif_heart_pulse, "Garmin", garminOk),
+                Triple(R.drawable.img_motif_body_silhouette, "Withings", wConnected && !withingsFailed),
+                Triple(R.drawable.img_nordic_wellness_hero, "Dítě", (wCfg?.childRecipientIdentity ?: "").isNotBlank())
+            ).forEachIndexed { i, (bgRes, label, ok) ->
                 val selected = sub == i
                 val isWithingsAlert = label == "Withings" && withingsFailed
+                val cardAccent = when {
+                    isWithingsAlert -> Color(0xFFEF4444)
+                    selected -> Color(0xFF38BDF8)
+                    ok -> Color(0xFF10B981)
+                    else -> Color(0xFF334155)
+                }
                 Card(
-                    shape = RoundedCornerShape(14.dp),
-                    border = BorderStroke(1.dp, if (selected) Color(0xFF38BDF8) else if (isWithingsAlert) Color(0xFFEF4444) else app.pulse4.android.ui.theme.MineralOutlineDark),
-                    colors = CardDefaults.cardColors(containerColor = if (selected) Color(0xFF0F2A3D) else if (isWithingsAlert) Color(0xFF450A0A) else app.pulse4.android.ui.theme.MineralSurfaceDark),
+                    shape = RoundedCornerShape(18.dp),
+                    border = BorderStroke(if (selected) 1.5.dp else 1.dp, cardAccent.copy(alpha = if (selected) 0.85f else 0.40f)),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF0A101B)),
                     modifier = Modifier.weight(1f).clickable { sub = i; notice = null }
                 ) {
-                    Column(
-                        Modifier.fillMaxWidth().padding(vertical = 10.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Text(icon, style = MaterialTheme.typography.titleMedium)
-                        Text(label, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
-                        val statusText = when {
-                            isWithingsAlert -> "⚠️ vyžaduje login"
-                            ok -> "● připojeno"
-                            else -> "○ nenastaveno"
-                        }
-                        val statusColor = when {
-                            isWithingsAlert -> Color(0xFFF87171)
-                            ok -> Color(0xFF10B981)
-                            else -> Color(0xFF64748B)
-                        }
-                        Text(
-                            statusText,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = statusColor,
-                            fontWeight = if (isWithingsAlert) FontWeight.Bold else FontWeight.Normal,
-                            maxLines = 1,
-                            softWrap = false
+                    Box(Modifier.fillMaxWidth()) {
+                        Image(
+                            painter = painterResource(id = bgRes),
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier
+                                .matchParentSize()
+                                .alpha(if (selected) 0.34f else 0.16f)
                         )
+                        Column(
+                            Modifier
+                                .fillMaxWidth()
+                                .background(
+                                    Brush.verticalGradient(
+                                        listOf(Color(0x99080E18), Color(0xEB0A101B))
+                                    )
+                                )
+                                .padding(vertical = 12.dp, horizontal = 8.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(
+                                label,
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Color.White,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                            Spacer(Modifier.height(2.dp))
+                            val statusText = when {
+                                isWithingsAlert -> "⚠️ vyžaduje login"
+                                ok -> "● připojeno"
+                                else -> "○ nenastaveno"
+                            }
+                            val statusColor = when {
+                                isWithingsAlert -> Color(0xFFF87171)
+                                ok -> Color(0xFF10B981)
+                                else -> Color(0xFF94A3B8)
+                            }
+                            Text(
+                                statusText,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontFamily = JetBrainsMonoFamily,
+                                color = statusColor,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
                     }
                 }
             }
@@ -2151,17 +2448,50 @@ private fun AccountCard(
     onHelp: (() -> Unit)? = null,
     content: @Composable () -> Unit
 ) {
+    val activeAccent = if (status != null) Color(0xFF10B981) else Color(0xFF38BDF8)
     Card(
-        shape = RoundedCornerShape(18.dp),
-        border = BorderStroke(1.dp, app.pulse4.android.ui.theme.MineralOutlineDark),
-        colors = CardDefaults.cardColors(containerColor = app.pulse4.android.ui.theme.MineralSurfaceDark),
+        shape = RoundedCornerShape(22.dp),
+        border = BorderStroke(1.dp, activeAccent.copy(alpha = 0.38f)),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF0A101B)),
         modifier = Modifier.fillMaxWidth()
     ) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .background(
+                    Brush.verticalGradient(
+                        listOf(activeAccent.copy(alpha = 0.08f), Color(0xFF0A101B))
+                    )
+                )
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                Text(
+                    title,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = Color.White,
+                    modifier = Modifier.weight(1f)
+                )
                 status?.let {
-                    Text(it, style = MaterialTheme.typography.labelSmall, color = Color(0xFF10B981), maxLines = 1, softWrap = false)
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color(0xFF10B981).copy(alpha = 0.16f))
+                            .padding(horizontal = 8.dp, vertical = 3.dp)
+                    ) {
+                        Text(
+                            it.uppercase(),
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = JetBrainsMonoFamily,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF10B981),
+                            fontSize = 10.sp,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
                 }
                 onHelp?.let {
                     TextButton(onClick = it) { Text("Kde získat?", style = MaterialTheme.typography.labelSmall, maxLines = 1, softWrap = false) }
@@ -2235,95 +2565,114 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
     ) {
         // 1. Srozumitelná volba spojení pro běžného uživatele (BFU)
         Card(
-            shape = RoundedCornerShape(18.dp),
-            border = BorderStroke(1.dp, app.pulse4.android.ui.theme.MineralOutlineDark),
-            colors = CardDefaults.cardColors(containerColor = app.pulse4.android.ui.theme.MineralSurfaceDark),
+            shape = RoundedCornerShape(22.dp),
+            border = BorderStroke(1.dp, Color(0xFFA855F7).copy(alpha = 0.40f)),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF0A101B)),
             modifier = Modifier.fillMaxWidth()
         ) {
-            Column(Modifier.padding(16.dp)) {
-                Text(
-                    "JAK SE SPOJIT S PŘÁTELI VE SKUPINĚ",
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = Color(0xFF38BDF8)
+            Box(Modifier.fillMaxWidth()) {
+                Image(
+                    painter = painterResource(id = R.drawable.img_motif_hrv_autonomic),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.matchParentSize().alpha(0.24f)
                 )
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    "Vyberte, jak si aplikace vyměňuje šifrovaná data s vašimi přáteli:",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFFCBD5E1)
-                )
-                Spacer(Modifier.height(10.dp))
-
-                val modesInfo = listOf(
-                    Triple(
-                        NetworkMode.AUTO,
-                        "Automaticky (Doporučeno)",
-                        "Spojí vás s přáteli doma na stejné Wi-Fi i přes internet, když jste každý jinde."
-                    ),
-                    Triple(
-                        NetworkMode.LOCAL_ONLY,
-                        "Pouze doma na stejné Wi-Fi",
-                        "Data nikdy neopustí vaši domácí Wi-Fi síť. Funguje zcela bez internetu."
-                    ),
-                    Triple(
-                        NetworkMode.MANUAL,
-                        "Vlastní vybraný uzel",
-                        "Připojení pouze k serveru (uzlu), který si ručně vyberete nebo přidáte níže."
-                    )
-                )
-
-                modesInfo.forEach { (m, title, desc) ->
-                    val selected = mode == m
-                    Card(
-                        shape = RoundedCornerShape(14.dp),
-                        border = BorderStroke(1.dp, if (selected) Color(0xFF38BDF8) else app.pulse4.android.ui.theme.MineralOutlineDark),
-                        colors = CardDefaults.cardColors(
-                            containerColor = if (selected) Color(0xFF0F2942) else Color(0xFF1A202E)
-                        ),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 4.dp)
-                            .clickable {
-                                mode = m
-                                scope.launch(Dispatchers.IO) {
-                                    sl.settings.networkMode = m
-                                    feedback = "Nastaven režim spojení: $title"
-                                    tick++
-                                }
-                            }
-                    ) {
-                        Row(
-                            Modifier.fillMaxWidth().padding(12.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(Modifier.weight(1f)) {
-                                Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = Color.White)
-                                Text(desc, style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8))
-                            }
-                            Text(
-                                if (selected) "Aktivní" else "Vybrat",
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = if (selected) Color(0xFF38BDF8) else Color(0xFF64748B),
-                                maxLines = 1,
-                                softWrap = false,
-                                modifier = Modifier.padding(start = 8.dp)
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(Color(0xD9080E18), Color(0xF20A101B))
                             )
+                        )
+                        .padding(16.dp)
+                ) {
+                    Text(
+                        "REŽIM KRYPTOGRAFICKÉHO SPOJENÍ RETICULUM",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Color(0xFFA855F7),
+                        letterSpacing = 0.8.sp
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "Vyberte, jak si váš uzel vyměňuje šifrovaná data s vašimi přáteli:",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFFCBD5E1)
+                    )
+                    Spacer(Modifier.height(10.dp))
+
+                    val modesInfo = listOf(
+                        Triple(
+                            NetworkMode.AUTO,
+                            "Automaticky (Doporučeno)",
+                            "Spojí vás s přáteli doma na stejné Wi-Fi i přes internet, když jste každý jinde."
+                        ),
+                        Triple(
+                            NetworkMode.LOCAL_ONLY,
+                            "Pouze doma na stejné Wi-Fi",
+                            "Data nikdy neopustí vaši domácí Wi-Fi síť. Funguje zcela bez internetu."
+                        ),
+                        Triple(
+                            NetworkMode.MANUAL,
+                            "Vlastní vybraný uzel",
+                            "Připojení pouze k serveru (uzlu), který si ručně vyberete nebo přidáte níže."
+                        )
+                    )
+
+                    modesInfo.forEach { (m, title, desc) ->
+                        val selected = mode == m
+                        Card(
+                            shape = RoundedCornerShape(14.dp),
+                            border = BorderStroke(1.dp, if (selected) Color(0xFF38BDF8) else Color(0xFF1E293B)),
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (selected) Color(0xFF0F2942) else Color(0xFF0E1524)
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp)
+                                .clickable {
+                                    mode = m
+                                    scope.launch(Dispatchers.IO) {
+                                        sl.settings.networkMode = m
+                                        feedback = "Nastaven režim spojení: $title"
+                                        tick++
+                                    }
+                                }
+                        ) {
+                            Row(
+                                Modifier.fillMaxWidth().padding(12.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.ExtraBold, color = Color.White)
+                                    Text(desc, style = MaterialTheme.typography.labelSmall, color = Color(0xFFCBD5E1))
+                                }
+                                Text(
+                                    if (selected) "AKTIVNÍ" else "Vybrat",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = JetBrainsMonoFamily,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (selected) Color(0xFF38BDF8) else Color(0xFF64748B),
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    modifier = Modifier.padding(start = 8.dp)
+                                )
+                            }
                         }
                     }
-                }
 
-                Spacer(Modifier.height(10.dp))
-                Button(
-                    onClick = {
-                        Scheduler.shareNow(ctx, manual = true)
-                        feedback = "Spuštěno okamžité odeslání a stažení sdílených dat."
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("Synchronizovat se skupinou hned teď")
+                    Spacer(Modifier.height(10.dp))
+                    Button(
+                        onClick = {
+                            Scheduler.shareNow(ctx, manual = true)
+                            feedback = "Spuštěno okamžité odeslání a stažení sdílených dat."
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Synchronizovat se skupinou hned teď")
+                    }
                 }
             }
         }
@@ -2341,9 +2690,9 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
 
         // 2. Správa P2P uzlů (seznam uzlů s možností přepnout, přidat nový nebo ODEBRAT)
         Card(
-            shape = RoundedCornerShape(18.dp),
-            border = BorderStroke(1.dp, app.pulse4.android.ui.theme.MineralOutlineDark),
-            colors = CardDefaults.cardColors(containerColor = app.pulse4.android.ui.theme.MineralSurfaceDark),
+            shape = RoundedCornerShape(22.dp),
+            border = BorderStroke(1.dp, Color(0xFF38BDF8).copy(alpha = 0.35f)),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF0A101B)),
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(Modifier.padding(16.dp)) {
@@ -2356,14 +2705,16 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
                         Text(
                             "ULOŽENÉ PROPOJOVACÍ UZLY (${savedNodes.size})",
                             style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFF94A3B8)
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color(0xFF38BDF8),
+                            letterSpacing = 0.8.sp
                         )
                         Text(
                             "Aktivní uzel: $host:$port",
                             style = MaterialTheme.typography.bodySmall,
-                            color = Color(0xFF38BDF8),
-                            fontWeight = FontWeight.SemiBold
+                            fontFamily = JetBrainsMonoFamily,
+                            color = Color(0xFF2DD4BF),
+                            fontWeight = FontWeight.Bold
                         )
                     }
                     TextButton(
@@ -2397,9 +2748,9 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
                         val isActive = host == nHost && port == nPort.toString()
 
                         Card(
-                            shape = RoundedCornerShape(12.dp),
-                            border = BorderStroke(1.dp, if (isActive) Color(0xFF10B981).copy(alpha = 0.6f) else app.pulse4.android.ui.theme.MineralOutlineDark),
-                            colors = CardDefaults.cardColors(containerColor = Color(0xFF1A202E)),
+                            shape = RoundedCornerShape(14.dp),
+                            border = BorderStroke(1.dp, if (isActive) Color(0xFF10B981).copy(alpha = 0.65f) else Color(0xFF1E293B)),
+                            colors = CardDefaults.cardColors(containerColor = Color(0xFF0E1524)),
                             modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)
                         ) {
                             Row(
@@ -2411,6 +2762,7 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
                                     Text(
                                         "$nHost:$nPort",
                                         style = MaterialTheme.typography.bodyMedium,
+                                        fontFamily = JetBrainsMonoFamily,
                                         fontWeight = FontWeight.Bold,
                                         color = if (isActive) Color(0xFF10B981) else Color.White
                                     )
@@ -2516,9 +2868,9 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
 
         // 3. Pokročilé detaily (Moje P2P adresa, Offline schránka s možností odebrat, Fronta zpráv)
         Card(
-            shape = RoundedCornerShape(18.dp),
-            border = BorderStroke(1.dp, app.pulse4.android.ui.theme.MineralOutlineDark),
-            colors = CardDefaults.cardColors(containerColor = app.pulse4.android.ui.theme.MineralSurfaceDark),
+            shape = RoundedCornerShape(22.dp),
+            border = BorderStroke(1.dp, Color(0xFF2DD4BF).copy(alpha = 0.35f)),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF0A101B)),
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(Modifier.padding(16.dp)) {
@@ -2528,10 +2880,10 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        "POKROČILÉ SÍŤOVÉ DETAILY A FRONTA (${outbox.size})",
+                        "KRYPTOGRAFICKÁ ADRESA & ODCHOZÍ FRONTA (${outbox.size})",
                         style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = Color(0xFF94A3B8),
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Color(0xFF2DD4BF),
                         modifier = Modifier.weight(1f)
                     )
                     TextButton(onClick = { showAdvancedP2p = !showAdvancedP2p }) {
@@ -2550,6 +2902,7 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
                         Text(
                             myInfo?.deliveryHash ?: "Načítání…",
                             style = MaterialTheme.typography.bodySmall,
+                            fontFamily = JetBrainsMonoFamily,
                             fontWeight = FontWeight.SemiBold,
                             color = Color(0xFF38BDF8),
                             modifier = Modifier.weight(1f)
@@ -2677,50 +3030,68 @@ private fun PrivacyAndBackupSection(sl: ServiceLocator) {
     ) {
         // 1. Šifrovaná záloha a obnova dat
         Card(
-            shape = RoundedCornerShape(18.dp),
-            border = BorderStroke(1.dp, app.pulse4.android.ui.theme.MineralOutlineDark),
-            colors = CardDefaults.cardColors(containerColor = app.pulse4.android.ui.theme.MineralSurfaceDark),
+            shape = RoundedCornerShape(22.dp),
+            border = BorderStroke(1.dp, Color(0xFFF59E0B).copy(alpha = 0.40f)),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF0A101B)),
             modifier = Modifier.fillMaxWidth()
         ) {
-            Column(Modifier.padding(16.dp)) {
-                Text(
-                    "ŠIFROVANÁ ZÁLOHA VŠECH DAT DO SOUBORU",
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = Color(0xFF38BDF8)
+            Box(Modifier.fillMaxWidth()) {
+                Image(
+                    painter = painterResource(id = R.drawable.img_sport_tactical_hero),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.matchParentSize().alpha(0.24f)
                 )
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    "Uloží všechna vaše naměřená zdravotní data, aktivity, tréninkové plány a skupiny do jednoho zašifrovaného souboru v telefonu (např. před přechodem na nový telefon).",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFFCBD5E1)
-                )
-                Spacer(Modifier.height(10.dp))
-                OutlinedTextField(
-                    value = pass,
-                    onValueChange = { pass = it },
-                    label = { Text("Zvolte heslo pro zašifrování / odemčení zálohy (min. 8 znaků)") },
-                    visualTransformation = PasswordVisualTransformation(),
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Spacer(Modifier.height(8.dp))
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(
-                        enabled = pass.length >= 8,
-                        onClick = {
-                            scope.launch(Dispatchers.IO) {
-                                pendingBackup = sl.backupService.export(pass.toCharArray())
-                                create.launch("pulse4-zaloha.p4bk")
-                            }
-                        },
-                        modifier = Modifier.weight(1f)
-                    ) { Text("Uložit zálohu", maxLines = 1, softWrap = false) }
-                    Button(
-                        enabled = pass.length >= 8,
-                        onClick = { open.launch(arrayOf("*/*")) },
-                        modifier = Modifier.weight(1f)
-                    ) { Text("Obnovit ze souboru", maxLines = 1, softWrap = false) }
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(Color(0xD9080E18), Color(0xF20A101B))
+                            )
+                        )
+                        .padding(16.dp)
+                ) {
+                    Text(
+                        "ŠIFROVANÝ TREZOR & ZÁLOHA DAT (.P4BK)",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Color(0xFFF59E0B),
+                        letterSpacing = 0.8.sp
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "Uloží všechna vaše naměřená zdravotní data, aktivity, tréninkové plány a skupiny do jednoho zašifrovaného souboru v telefonu (např. před přechodem na nový telefon).",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFFCBD5E1)
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    OutlinedTextField(
+                        value = pass,
+                        onValueChange = { pass = it },
+                        label = { Text("Zvolte heslo pro zašifrování / odemčení zálohy (min. 8 znaků)") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            enabled = pass.length >= 8,
+                            onClick = {
+                                scope.launch(Dispatchers.IO) {
+                                    pendingBackup = sl.backupService.export(pass.toCharArray())
+                                    create.launch("pulse4-zaloha.p4bk")
+                                }
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Uložit zálohu", maxLines = 1, softWrap = false) }
+                        OutlinedButton(
+                            enabled = pass.length >= 8,
+                            onClick = { open.launch(arrayOf("*/*")) },
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Obnovit ze souboru", maxLines = 1, softWrap = false) }
+                    }
                 }
             }
         }
@@ -2729,132 +3100,152 @@ private fun PrivacyAndBackupSection(sl: ServiceLocator) {
 
         // 2. Skrytí bydliště u sdílených aktivit (srozumitelné vysvětlení pro BFU + automatické nastavení)
         Card(
-            shape = RoundedCornerShape(18.dp),
-            border = BorderStroke(1.dp, app.pulse4.android.ui.theme.MineralOutlineDark),
-            colors = CardDefaults.cardColors(containerColor = app.pulse4.android.ui.theme.MineralSurfaceDark),
+            shape = RoundedCornerShape(22.dp),
+            border = BorderStroke(1.dp, Color(0xFF10B981).copy(alpha = 0.40f)),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF0A101B)),
             modifier = Modifier.fillMaxWidth()
         ) {
-            Column(Modifier.padding(16.dp)) {
-                Text(
-                    "SKRYTÍ BYDLIŠTĚ PŘI SDÍLENÍ AKTIVIT DO SKUPINY",
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = Color(0xFF10B981)
+            Box(Modifier.fillMaxWidth()) {
+                Image(
+                    painter = painterResource(id = R.drawable.img_alpine_trail_hero),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.matchParentSize().alpha(0.22f)
                 )
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    "Stejně jako na Stravě nebo Garminu: když nasdílíte svůj běh nebo jízdu kamarádům do skupiny, aplikace automaticky ořízne začátek a konec GPS trasy v okruhu např. 200 m kolem vašeho domu, aby nikdo neviděl, kde přesně bydlíte.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFFCBD5E1)
-                )
-                Spacer(Modifier.height(10.dp))
-
-                if (zones.isNullOrEmpty()) {
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(Color(0xD9080E18), Color(0xF20A101B))
+                            )
+                        )
+                        .padding(16.dp)
+                ) {
                     Text(
-                        "Momentálně nemáte nastavené žádné skryté místo (sdílí se celá trasa).",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color(0xFF94A3B8)
+                        "GEOFENCING: SKRYTÍ BYDLIŠTĚ PŘI SDÍLENÍ TRAS",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Color(0xFF10B981),
+                        letterSpacing = 0.8.sp
                     )
-                } else {
-                    zones?.forEachIndexed { idx, z ->
-                        Card(
-                            shape = RoundedCornerShape(12.dp),
-                            colors = CardDefaults.cardColors(containerColor = Color(0xFF1A202E)),
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)
-                        ) {
-                            Row(
-                                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "Stejně jako na Stravě nebo Garminu: když nasdílíte svůj běh nebo jízdu kamarádům do skupiny, aplikace automaticky ořízne začátek a konec GPS trasy v okruhu např. 200 m kolem vašeho domu, aby nikdo neviděl, kde přesně bydlíte.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFFCBD5E1)
+                    )
+                    Spacer(Modifier.height(10.dp))
+
+                    if (zones.isNullOrEmpty()) {
+                        Text(
+                            "Momentálně nemáte nastavené žádné skryté místo (sdílí se celá trasa).",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFF94A3B8)
+                        )
+                    } else {
+                        zones?.forEachIndexed { idx, z ->
+                            Card(
+                                shape = RoundedCornerShape(14.dp),
+                                border = BorderStroke(1.dp, Color(0xFF10B981).copy(alpha = 0.35f)),
+                                colors = CardDefaults.cardColors(containerColor = Color(0xFF0E1524)),
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)
                             ) {
-                                Column(Modifier.weight(1f)) {
-                                    Text(
-                                        "Skrytý okruh #${idx + 1} (${fmt.elevation(z.radiusM)})",
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        fontWeight = FontWeight.Bold,
-                                        color = Color.White
-                                    )
-                                    Text(
-                                        "GPS: ${fmt.number(z.lat, 4)}, ${fmt.number(z.lon, 4)}",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = Color(0xFF94A3B8)
-                                    )
-                                }
-                                TextButton(onClick = {
-                                    scope.launch(Dispatchers.IO) {
-                                        sl.settings.privacyZones = (zones ?: emptyList()) - z
-                                        msg = "Skrytý okruh byl odebrán."
-                                        tick++
+                                Row(
+                                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text(
+                                            "Skrytý okruh #${idx + 1} (${fmt.elevation(z.radiusM)})",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color.White
+                                        )
+                                        Text(
+                                            "GPS: ${fmt.number(z.lat, 4)}, ${fmt.number(z.lon, 4)}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontFamily = JetBrainsMonoFamily,
+                                            color = Color(0xFF94A3B8)
+                                        )
                                     }
-                                }) {
-                                    Text("Odebrat", color = MaterialTheme.colorScheme.error, maxLines = 1, softWrap = false)
+                                    TextButton(onClick = {
+                                        scope.launch(Dispatchers.IO) {
+                                            sl.settings.privacyZones = (zones ?: emptyList()) - z
+                                            msg = "Skrytý okruh byl odebrán."
+                                            tick++
+                                        }
+                                    }) {
+                                        Text("Odebrat", color = MaterialTheme.colorScheme.error, maxLines = 1, softWrap = false)
+                                    }
                                 }
                             }
                         }
                     }
-                }
 
-                Spacer(Modifier.height(10.dp))
-                Button(
-                    onClick = {
-                        scope.launch(Dispatchers.IO) {
-                            val latestAct = sl.db.activities().latest()
-                            val pts = latestAct?.let { sl.db.activities().track(it.id) }?.let { tr ->
-                                runCatching {
-                                    Wire.json.decodeFromString(
-                                        kotlinx.serialization.builtins.ListSerializer(app.pulse4.domain.TrackPoint.serializer()),
-                                        tr.json
-                                    )
-                                }.getOrNull()
-                            }.orEmpty()
-                            val firstGps = pts.firstOrNull { it.lat != null && it.lon != null }
-                            if (firstGps?.lat != null && firstGps.lon != null) {
-                                val r = radius.toDoubleOrNull()?.coerceAtLeast(50.0) ?: 200.0
-                                sl.settings.privacyZones = (zones ?: emptyList()) + PrivacyZone(firstGps.lat!!, firstGps.lon!!, r)
-                                msg = "Nastaven skrytý okruh (${r.toInt()} m) podle startu vaší poslední aktivity."
-                                tick++
-                            } else {
-                                msg = "Nebyla nalezena žádná aktivita s GPS trasou. Zadejte polohu ručně níže."
-                                showManualZoneCoords = true
-                            }
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("Nastavit automaticky podle startu poslední aktivity")
-                }
-
-                TextButton(
-                    onClick = { showManualZoneCoords = !showManualZoneCoords },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(if (showManualZoneCoords) "Skrýt ruční zadání GPS ▲" else "Zadat GPS souřadnice ručně ▼")
-                }
-
-                if (showManualZoneCoords) {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        OutlinedTextField(value = lat, onValueChange = { lat = it }, label = { Text("Šířka (lat)") }, singleLine = true, modifier = Modifier.weight(1f))
-                        OutlinedTextField(value = lon, onValueChange = { lon = it }, label = { Text("Délka (lon)") }, singleLine = true, modifier = Modifier.weight(1f))
-                        OutlinedTextField(value = radius, onValueChange = { radius = it.filter(Char::isDigit) }, label = { Text("Okruh (m)") }, singleLine = true, modifier = Modifier.weight(0.9f))
-                    }
-                    Spacer(Modifier.height(8.dp))
-                    OutlinedButton(
+                    Spacer(Modifier.height(10.dp))
+                    Button(
                         onClick = {
-                            val la = lat.replace(',', '.').toDoubleOrNull()
-                            val lo = lon.replace(',', '.').toDoubleOrNull()
-                            val r = radius.toDoubleOrNull()
-                            if (la == null || lo == null || r == null || la !in -90.0..90.0 || lo !in -180.0..180.0 || r < 50) {
-                                msg = "Zadejte platné GPS souřadnice a okruh alespoň 50 m."
-                            } else {
-                                scope.launch(Dispatchers.IO) {
-                                    sl.settings.privacyZones = (zones ?: emptyList()) + PrivacyZone(la, lo, r)
-                                    lat = ""; lon = ""; tick++
+                            scope.launch(Dispatchers.IO) {
+                                val latestAct = sl.db.activities().latest()
+                                val pts = latestAct?.let { sl.db.activities().track(it.id) }?.let { tr ->
+                                    runCatching {
+                                        Wire.json.decodeFromString(
+                                            kotlinx.serialization.builtins.ListSerializer(app.pulse4.domain.TrackPoint.serializer()),
+                                            tr.json
+                                        )
+                                    }.getOrNull()
+                                }.orEmpty()
+                                val firstGps = pts.firstOrNull { it.lat != null && it.lon != null }
+                                if (firstGps?.lat != null && firstGps.lon != null) {
+                                    val r = radius.toDoubleOrNull()?.coerceAtLeast(50.0) ?: 200.0
+                                    sl.settings.privacyZones = (zones ?: emptyList()) + PrivacyZone(firstGps.lat!!, firstGps.lon!!, r)
+                                    msg = "Nastaven skrytý okruh (${r.toInt()} m) podle startu vaší poslední aktivity."
+                                    tick++
+                                } else {
+                                    msg = "Nebyla nalezena žádná aktivita s GPS trasou. Zadejte polohu ručně níže."
+                                    showManualZoneCoords = true
                                 }
-                                msg = "Skrytý okruh soukromí přidán."
                             }
                         },
                         modifier = Modifier.fillMaxWidth()
-                    ) { Text("Přidat zadané místo") }
+                    ) {
+                        Text("Nastavit automaticky podle startu poslední aktivity")
+                    }
+
+                    TextButton(
+                        onClick = { showManualZoneCoords = !showManualZoneCoords },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(if (showManualZoneCoords) "Skrýt ruční zadání GPS ▲" else "Zadat GPS souřadnice ručně ▼")
+                    }
+
+                    if (showManualZoneCoords) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            OutlinedTextField(value = lat, onValueChange = { lat = it }, label = { Text("Šířka (lat)") }, singleLine = true, modifier = Modifier.weight(1f))
+                            OutlinedTextField(value = lon, onValueChange = { lon = it }, label = { Text("Délka (lon)") }, singleLine = true, modifier = Modifier.weight(1f))
+                            OutlinedTextField(value = radius, onValueChange = { radius = it.filter(Char::isDigit) }, label = { Text("Okruh (m)") }, singleLine = true, modifier = Modifier.weight(0.9f))
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedButton(
+                            onClick = {
+                                val la = lat.replace(',', '.').toDoubleOrNull()
+                                val lo = lon.replace(',', '.').toDoubleOrNull()
+                                val r = radius.toDoubleOrNull()
+                                if (la == null || lo == null || r == null || la !in -90.0..90.0 || lo !in -180.0..180.0 || r < 50) {
+                                    msg = "Zadejte platné GPS souřadnice a okruh alespoň 50 m."
+                                } else {
+                                    scope.launch(Dispatchers.IO) {
+                                        sl.settings.privacyZones = (zones ?: emptyList()) + PrivacyZone(la, lo, r)
+                                        lat = ""; lon = ""; tick++
+                                    }
+                                    msg = "Skrytý okruh soukromí přidán."
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text("Přidat zadané místo") }
+                    }
                 }
             }
         }

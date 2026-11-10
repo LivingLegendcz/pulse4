@@ -111,7 +111,7 @@ import kotlinx.coroutines.withContext
  * Sjednocené Centrum Nastavení na jednom místě:
  * 0 -> Obecné & Jednotky (Metrické vs Imperiální, jméno profilu)
  * 1 -> Globální Sdílení (přepínače sdílení po sekcích pro kontakty a skupiny)
- * 2 -> Garmin & Withings (API klíče, přihlášení e-mail/heslo/MFA, Health Connect)
+ * 2 -> Zdroje dat & Integrace (Garmin, Withings, senzory, Health Connect, rodinné profily)
  * 3 -> Reticulum P2P Síť (režim, brány, propagation uzel, identita, fronta)
  * 4 -> Soukromí & Záloha (zóny soukromí, mapy, šifrovaný export/obnova)
  */
@@ -121,7 +121,7 @@ fun SettingsHubScreen(sl: ServiceLocator, initialTab: Int = 0) {
     val tabs = listOf(
         Triple("Jednotky & Mapy", "KALIBRACE", 0),
         Triple("Globální Sdílení", "P2P MATICE", 1),
-        Triple("Garmin & Withings", "SENZORY", 2),
+        Triple("Zdroje dat", "INTEGRACE", 2),
         Triple("Reticulum P2P", "MESH UZEL", 3),
         Triple("Soukromí & Záloha", "TREZOR", 4)
     )
@@ -140,7 +140,7 @@ fun SettingsHubScreen(sl: ServiceLocator, initialTab: Int = 0) {
         2 -> Triple(
             R.drawable.img_motif_heart_real,
             Color(0xFF10B981),
-            "Biometrické Zdroje & Integrace" to "Přímé napojení na Garmin Connect, Personal API a váhy Withings."
+            "Datové zdroje & Integrace" to "Připojení k nositelným senzorům, biometrickým platformám a rodinným zařízením."
         )
         3 -> Triple(
             R.drawable.img_motif_hrv_autonomic,
@@ -1091,16 +1091,16 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
             .verticalScroll(rememberScrollState())
             .padding(14.dp)
     ) {
-        // Atmosférický přepínač biometrické služby (Garmin | Withings | Rodina/Dítě)
+        // Atmosférický přepínač biometrické služby (Garmin | Withings | Rodina a děti)
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             val withingsFailed = wState is app.pulse4.android.di.WithingsUiState.Failed
             listOf(
                 Triple(R.drawable.img_motif_heart_pulse, "Garmin", garminOk),
                 Triple(R.drawable.img_motif_body_silhouette, "Withings", wConnected && !withingsFailed),
-                Triple(R.drawable.img_nordic_wellness_hero, "Dítě", (wCfg?.childRecipientIdentity ?: "").isNotBlank())
+                Triple(R.drawable.img_nordic_wellness_hero, "Rodina & Děti", (wCfg?.childRecipientIdentity ?: "").isNotBlank())
             ).forEachIndexed { i, (bgRes, label, ok) ->
                 val selected = sub == i
-                val isWithingsAlert = label == "Withings" && withingsFailed
+                val isWithingsAlert = label.startsWith("Withings") && withingsFailed
                 val cardAccent = when {
                     isWithingsAlert -> Color(0xFFEF4444)
                     selected -> Color(0xFF38BDF8)

@@ -1101,19 +1101,26 @@ fun LineChart(
                             " ($sign${fmt.number(d, effectiveDecimals)}$unitSuffix)"
                         } ?: ""
                         Column(Modifier.weight(1f)) {
-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            FlowRow(
+                                verticalArrangement = Arrangement.spacedBy(2.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
                                 Text(
                                     "${fmt.number(activeVal, effectiveDecimals)}$unitSuffix$deltaStr",
                                     style = MaterialTheme.typography.titleSmall,
                                     fontWeight = FontWeight.Bold,
-                                    color = color
+                                    color = color,
+                                    maxLines = 1,
+                                    softWrap = false
                                 )
                                 if (activeSecVal != null && secondaryLabel.isNotBlank()) {
                                     Text(
                                         "$secondaryLabel: ${fmt.number(activeSecVal, effectiveDecimals)}$unitSuffix",
                                         style = MaterialTheme.typography.labelSmall,
                                         fontWeight = FontWeight.Bold,
-                                        color = secondaryColor
+                                        color = secondaryColor,
+                                        maxLines = 1,
+                                        softWrap = false
                                     )
                                 }
                             }
@@ -1437,20 +1444,20 @@ fun LineChart(
                     if (isScatter) {
                         GarminZoneLegend(ch, Modifier.padding(start = 52.dp, top = 4.dp))
                     } else if (ch == Channel.STAMINA && secondaryValues != null) {
-                        Row(
+                        FlowRow(
                             Modifier.padding(start = 52.dp, top = 6.dp),
                             horizontalArrangement = Arrangement.spacedBy(16.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Box(Modifier.size(8.dp).clip(CircleShape).background(Color(0xFF0EA5E9)))
                                 Spacer(Modifier.width(6.dp))
-                                Text("Okamžitá výdrž (Aktuální)", style = MaterialTheme.typography.labelSmall, color = Color(0xFF0EA5E9), fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                                Text("Okamžitá výdrž (Aktuální)", style = MaterialTheme.typography.labelSmall, color = Color(0xFF0EA5E9), fontWeight = FontWeight.Bold, fontSize = 10.sp, maxLines = 1, softWrap = false)
                             }
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Box(Modifier.size(8.dp).clip(CircleShape).background(Color(0xFFF59E0B)))
                                 Spacer(Modifier.width(6.dp))
-                                Text("Potenciální výdrž (Strop)", style = MaterialTheme.typography.labelSmall, color = Color(0xFFF59E0B), fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                                Text("Potenciální výdrž (Strop)", style = MaterialTheme.typography.labelSmall, color = Color(0xFFF59E0B), fontWeight = FontWeight.Bold, fontSize = 10.sp, maxLines = 1, softWrap = false)
                             }
                         }
                     }
@@ -1603,53 +1610,21 @@ fun WeightCompositionStackedAreaChart(
         colors = CardDefaults.cardColors(containerColor = MineralSurfaceDark)
     ) {
         Column(Modifier.padding(12.dp)) {
-            // Horní lišta s legendou Váha + Svaly + Tuk a přepínačem měřítka
+            // 1. Horní lišta: Titulek nalevo, přepínač měřítka napravo
             Row(
                 Modifier.fillMaxWidth().padding(bottom = 6.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        if (curDate != null) "SLOŽENÍ VÁHY ($curDate)" else "VÁHA + SKLÁDANÁ PLOCHA SVALŮ A TUKU",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = Color(0xFF94A3B8)
-                    )
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.padding(top = 2.dp)
-                    ) {
-                        if (curW != null) {
-                            val dStr = diffW?.let { " (${formatDeltaMetric(it, unit)})" } ?: ""
-                            Text(
-                                "● Váha ${fmtDetail(curW)} $unit$dStr",
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.ExtraBold,
-                                color = weightColor
-                            )
-                        }
-                        if (curM != null) {
-                            val dStr = diffM?.let { " (${formatDeltaMetric(it, unit)})" } ?: ""
-                            Text(
-                                "■ Svaly ${fmtDetail(curM)} $unit$dStr",
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = muscleColor
-                            )
-                        }
-                        if (curF != null) {
-                            val dStr = diffF?.let { " (${formatDeltaMetric(it, unit)})" } ?: ""
-                            Text(
-                                "■ Tuk ${fmtDetail(curF)} $unit$dStr",
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = fatColor
-                            )
-                        }
-                    }
-                }
+                Text(
+                    text = if (curDate != null) "SLOŽENÍ VÁHY ($curDate)" else "VÁHA + SKLÁDANÁ PLOCHA SVALŮ A TUKU",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF94A3B8),
+                    modifier = Modifier.weight(1f, fill = false),
+                    maxLines = 1
+                )
+                Spacer(Modifier.width(8.dp))
                 Row(
                     modifier = Modifier
                         .clip(RoundedCornerShape(8.dp))
@@ -1662,7 +1637,52 @@ fun WeightCompositionStackedAreaChart(
                         text = if (absoluteZeroScale) "Měřítko: 0–${fmtVal(maxY)} $unit" else "Měřítko: Detail váhy",
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.SemiBold,
-                        color = weightColor
+                        color = weightColor,
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                }
+            }
+
+            // 2. Legenda s hodnotami a přírůstky na plnou šířku karty pomocí FlowRow
+            FlowRow(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                if (curW != null) {
+                    val dStr = diffW?.let { " (${formatDeltaMetric(it, unit)})" } ?: ""
+                    Text(
+                        "● Váha ${fmtDetail(curW)} $unit$dStr",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = weightColor,
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                }
+                if (curM != null) {
+                    val dStr = diffM?.let { " (${formatDeltaMetric(it, unit)})" } ?: ""
+                    Text(
+                        "■ Svaly ${fmtDetail(curM)} $unit$dStr",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = muscleColor,
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                }
+                if (curF != null) {
+                    val dStr = diffF?.let { " (${formatDeltaMetric(it, unit)})" } ?: ""
+                    Text(
+                        "■ Tuk ${fmtDetail(curF)} $unit$dStr",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = fatColor,
+                        maxLines = 1,
+                        softWrap = false
                     )
                 }
             }

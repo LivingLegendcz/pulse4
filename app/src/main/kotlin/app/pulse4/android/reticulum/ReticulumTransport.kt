@@ -30,6 +30,10 @@ class ReticulumTransport(
 ) {
     private var receiver: Receiver? = null
     private val inFlightWaitMs = 15_000L
+    @Volatile
+    private var pumpActiveCallback: ((Outcome) -> Unit)? = null
+    @Volatile
+    var forceGateway: Boolean = false
 
     private fun receiver(selfId: String): Receiver = receiver ?: Receiver(
         selfId = selfId,
@@ -38,6 +42,41 @@ class ReticulumTransport(
         ackSink = AckSink { from, ack -> outbox.onAck(from, ack) },
         builder = MessageBuilder(selfId),
     ).also { receiver = it }
+
+    /** Okamžité zpracování příchozí události (z lokální Wi-Fi nebo Reticulum TCP brány). */
+    fun processEvent(ev: BridgeEvent): Outcome? {
+        when (ev) {
+            is BridgeEvent.Delivery -> {
+                outbox.onTransportResult(ev.eventId, when (ev.state) {
+                    "HANDED" -> TransportResult.Handed
+                    "STORED" -> TransportResult.StoredInPropagation
+                    else -> TransportResult.Failed(ev.reason ?: "failed")
+                }, System.currentTimeMillis())
+                return null
+            }
+
+            is BridgeEvent.Message -> {
+                val info = bridge.ensureStarted()
+                val rx = receiver(info.deliveryHash)
+                val usePropagation = settings.propagationNode.isNotBlank()
+                android.util.Log.i("Pulse4Sync", "INCOMING MESSAGE from ${ev.source}, validated=${ev.validated}, len=${ev.content.length}")
+                if (!ev.validated) {
+                    android.util.Log.w("Pulse4Sync", "REJECTED: ev.validated is false!")
+                    return null
+                }
+                val outcome = rx.receive(ev.source, ev.content.toByteArray(Charsets.UTF_8), System.currentTimeMillis())
+                android.util.Log.i("Pulse4Sync", "OUTCOME: $outcome")
+                pumpActiveCallback?.invoke(outcome)
+                // ACK až po commitu transakce; ztracené ACK vyvolá opakování, které se znovu potvrdí.
+                outcome.ack?.let { ack ->
+                    runCatching {
+                        bridge.send(ack.envelope.recipient, app.pulse4.sync.Wire.encode(ack).toString(Charsets.UTF_8), usePropagation, ack.envelope.eventId)
+                    }
+                }
+                return outcome
+            }
+        }
+    }
 
     /**
      * Jedno okno synchronizace: odeslat splatné, vyzvednout schránku, zpracovat události až do [windowMs].
@@ -57,7 +96,7 @@ class ReticulumTransport(
 
         for (item in outbox.due(nowMs)) {
             try {
-                bridge.send(item.recipient, item.wire.toString(Charsets.UTF_8), propagated = usePropagation, eventId = item.eventId)
+                bridge.send(item.recipient, item.wire.toString(Charsets.UTF_8), propagated = usePropagation, eventId = item.eventId, forceGateway = forceGateway)
                 outbox.markAttempt(item.eventId, nowMs, inFlightWaitMs)
                 sent++
             } catch (e: Exception) {
@@ -67,41 +106,23 @@ class ReticulumTransport(
         if (usePropagation) runCatching { bridge.syncInbox() }
 
         val deadline = System.currentTimeMillis() + windowMs
-        while (true) {
-            for (ev in bridge.drainEvents()) when (ev) {
-                is BridgeEvent.Delivery -> outbox.onTransportResult(ev.eventId, when (ev.state) {
-                    "HANDED" -> TransportResult.Handed
-                    "STORED" -> TransportResult.StoredInPropagation
-                    else -> TransportResult.Failed(ev.reason ?: "failed")
-                }, System.currentTimeMillis())
-
-                is BridgeEvent.Message -> {
-                    android.util.Log.i("Pulse4Sync", "INCOMING MESSAGE from ${ev.source}, validated=${ev.validated}, len=${ev.content.length}")
-                    if (!ev.validated) {
-                        android.util.Log.w("Pulse4Sync", "REJECTED: ev.validated is false!")
-                        rejected++
-                        continue
-                    }
-                    val outcome = rx.receive(ev.source, ev.content.toByteArray(Charsets.UTF_8), System.currentTimeMillis())
-                    android.util.Log.i("Pulse4Sync", "OUTCOME: $outcome")
-                    when (outcome) {
-                        is Outcome.Rejected -> {
-                            android.util.Log.w("Pulse4Sync", "REJECTED by receiver: ${outcome.reason}")
-                            rejected++
-                        }
-                        is Outcome.AckProcessed -> Unit
-                        else -> { received++; onApplied() }
-                    }
-                    // ACK až po commitu transakce; ztracené ACK vyvolá opakování, které se znovu potvrdí.
-                    outcome.ack?.let { ack ->
-                        runCatching {
-                            bridge.send(ack.envelope.recipient, app.pulse4.sync.Wire.encode(ack).toString(Charsets.UTF_8), usePropagation, ack.envelope.eventId)
-                        }
-                    }
-                }
+        pumpActiveCallback = { outcome ->
+            when (outcome) {
+                is Outcome.Rejected -> rejected++
+                is Outcome.AckProcessed -> Unit
+                else -> { received++; onApplied() }
             }
-            if (System.currentTimeMillis() >= deadline) break
-            Thread.sleep(500)
+        }
+        try {
+            while (true) {
+                for (ev in bridge.drainEvents()) {
+                    processEvent(ev)
+                }
+                if (System.currentTimeMillis() >= deadline) break
+                Thread.sleep(500)
+            }
+        } finally {
+            pumpActiveCallback = null
         }
         val inFlight = outbox.due(Long.MAX_VALUE / 2).size
         return PumpStats(sent, received, rejected, inFlight)

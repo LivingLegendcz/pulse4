@@ -25,8 +25,8 @@ object Pairing {
             ?: return PairingResult.Invalid("Nečitelný párovací kód")
         if (p.v != FORMAT) return PairingResult.Invalid("Nepodporovaná verze párovacího formátu: ${p.v}")
         val key = runCatching { Base64.getDecoder().decode(p.pub) }.getOrNull()
-        // Reticulum veřejný klíč identity má 64 bajtů (X25519 + Ed25519).
-        if (key == null || key.size != 64) return PairingResult.Invalid("Neplatný veřejný klíč")
+        // Reticulum veřejný klíč má 64 bajtů (X25519 + Ed25519) nebo 32 bajtů (čistý Ed25519/SHA-256).
+        if (key == null || (key.size != 64 && key.size != 32)) return PairingResult.Invalid("Neplatný veřejný klíč")
         if (!Regex("[0-9a-f]{32}").matches(p.addr)) return PairingResult.Invalid("Neplatná adresa")
         if (p.name.isBlank() || p.name.length > 40) return PairingResult.Invalid("Neplatné jméno")
         return PairingResult.Ok(p, fingerprint(p.pub))

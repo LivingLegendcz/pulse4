@@ -17,6 +17,12 @@ class PairingTest {
         assertEquals(r.fingerprint, Pairing.fingerprint(pub))
         assertTrue(Regex("([0-9a-f]{4} ){5}[0-9a-f]{4}").matches(r.fingerprint), r.fingerprint)
         assertTrue(Pairing.fingerprint(Base64.getEncoder().encodeToString(ByteArray(64) { 1 })) != r.fingerprint)
+
+        // 32-bajtový klíč
+        val pub32 = Base64.getEncoder().encodeToString(ByteArray(32) { it.toByte() })
+        val ok32 = ok.copy(pub = pub32)
+        val r32 = assertIs<PairingResult.Ok>(Pairing.parse(Pairing.encode(ok32)))
+        assertEquals(ok32, r32.payload)
     }
 
     @Test fun `malformed, oversized, wrong version, short key and bad address are refused`() {

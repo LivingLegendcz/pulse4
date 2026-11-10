@@ -96,6 +96,7 @@ dependencies {
     // Šifrovaná SQLite (Room samo databázi nešifruje).
     implementation("net.zetetic:sqlcipher-android:4.20.0")
     implementation("androidx.sqlite:sqlite-ktx:2.5.2")
+    implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
 
     implementation("androidx.work:work-runtime-ktx:2.10.3")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")

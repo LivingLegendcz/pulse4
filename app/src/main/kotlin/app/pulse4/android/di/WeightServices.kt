@@ -467,14 +467,14 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
             }
             is AreaResult.Failed -> {
                 if (result.error is ProviderError.Unauthorized) {
-                    if (tryAutoReLogin()) {
+                    if (renewSession()) {
                         return runWebImport(nowMs)
                     }
                     _state.value = WithingsUiState.Failed("Relace Withings vyžaduje obnovení")
                 }
             }
             is AreaResult.NeedsUser -> {
-                if (tryAutoReLogin()) {
+                if (renewSession()) {
                     return runWebImport(nowMs)
                 }
                 _state.value = WithingsUiState.Failed("Relace Withings vyžaduje obnovení")

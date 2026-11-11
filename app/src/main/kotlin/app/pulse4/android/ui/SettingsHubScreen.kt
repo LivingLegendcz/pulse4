@@ -1092,13 +1092,12 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
             .verticalScroll(rememberScrollState())
             .padding(14.dp)
     ) {
-        // Atmosférický přepínač biometrické služby (Garmin | Withings | Rodina a děti)
+        // Atmosférický přepínač biometrické služby (Garmin | Withings & Váha)
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             val withingsFailed = wState is app.pulse4.android.di.WithingsUiState.Failed
             listOf(
-                Triple(R.drawable.img_motif_heart_pulse, "Garmin", garminOk),
-                Triple(R.drawable.img_motif_body_silhouette, "Withings", wConnected && !withingsFailed),
-                Triple(R.drawable.img_nordic_wellness_hero, "Rodina & Děti", (wCfg?.childRecipientIdentity ?: "").isNotBlank())
+                Triple(R.drawable.img_motif_heart_pulse, "Garmin Connect", garminOk),
+                Triple(R.drawable.img_motif_body_silhouette, "Withings & Váha", wConnected && !withingsFailed)
             ).forEachIndexed { i, (bgRes, label, ok) ->
                 val selected = sub == i
                 val isWithingsAlert = label.startsWith("Withings") && withingsFailed
@@ -1522,7 +1521,7 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
             }
 
             // ───────────────────────── WITHINGS ─────────────────────────
-            1 -> {
+            else -> {
                 val conn = wState as? app.pulse4.android.di.WithingsUiState.Connected
                 val failed = wState as? app.pulse4.android.di.WithingsUiState.Failed
                 val isWeb = conn?.isWeb == true || webSession != null
@@ -1808,77 +1807,185 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
 
                 Spacer(Modifier.height(12.dp))
 
-                var showOAuthCard by remember { mutableStateOf(false) }
-                AccountCard("Vývojářské API (OAuth 2.0)", if (wCfg?.hasCreds == true) "Nastaveno" else "Alternativa", onHelp = { showOAuthCard = !showOAuthCard }) {
-                    Text(
-                        "Alternativní připojení přes vývojářský portál Withings (pro ty, kdo mají vlastní Client ID a Secret).",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color(0xFF94A3B8)
-                    )
-                    if (showOAuthCard || wCfg?.hasCreds == true) {
-                        Spacer(Modifier.height(8.dp))
-                        HelpBox(
-                            listOf(
-                                "Přihlaste se na developer.withings.com (stejný účet jako v aplikaci Withings).",
-                                "Klikněte na Create an application → Public API integration a jako Callback URL vložte adresu níže.",
-                                "Zkopírujte sem Client ID a Client Secret a klikněte na Připojit."
-                            )
-                        ) {
-                            OutlinedButton(
-                                onClick = { openUrl("https://developer.withings.com/dashboard/") },
-                                modifier = Modifier.fillMaxWidth()
-                            ) { Text("Otevřít developer.withings.com", maxLines = 1, softWrap = false) }
+                // ───────────────────────── RODINA & DĚTSKÝ PROFIL ─────────────────────────
+                val childUid = wCfg?.childWithingsUserId
+                val childName = sl.withings.loadWebSession()?.childUserName
+                val hasChildConfig = childUid != null || (wCfg?.childRecipientIdentity ?: "").isNotBlank()
+
+                AccountCard(
+                    "Rodina & Dětský profil",
+                    if (hasChildConfig) "Aktivní přeposílání" else "Sdílení váhy dítěte"
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text(
+                            "Withings nepovoluje dětem do 16 let samostatný účet. Pokud máte v rodinném Withings profil dítěte, Pulse4 může jeho váhu automaticky přeposílat přes šifrovanou P2P síť (Reticulum) přímo do jeho vlastního telefonu.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFF94A3B8)
+                        )
+
+                        if (wConnected) {
                             Text(
-                                app.pulse4.android.BuildConfig.WITHINGS_REDIRECT,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = Color(0xFF38BDF8)
+                                "1. Dětský profil na Withings váze:",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
                             )
-                            OutlinedButton(
-                                onClick = {
-                                    clipboard.setText(AnnotatedString(app.pulse4.android.BuildConfig.WITHINGS_REDIRECT))
-                                    notice = "Callback URL zkopírována."
-                                },
-                                modifier = Modifier.fillMaxWidth()
-                            ) { Text("Kopírovat Callback URL", maxLines = 1, softWrap = false) }
-                        }
-                        OutlinedTextField(
-                            value = withingsClientId.ifEmpty { wCfg?.clientId.orEmpty() },
-                            onValueChange = { withingsClientId = it },
-                            label = { Text("Client ID") },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        OutlinedTextField(
-                            value = withingsSecret,
-                            onValueChange = { withingsSecret = it },
-                            label = { Text(if (wCfg?.hasCreds == true) "Client Secret (uložen)" else "Client Secret") },
-                            visualTransformation = PasswordVisualTransformation(),
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        Button(
-                            onClick = {
-                                scope.launch(Dispatchers.IO) {
-                                    val cid = withingsClientId.ifBlank { wCfg?.clientId.orEmpty() }.trim()
-                                    if (cid.isNotBlank() && withingsSecret.isNotBlank()) {
-                                        sl.withings.saveCredentials(cid, withingsSecret.trim())
-                                        withingsSecret = ""
-                                    } else if (cid.isNotBlank()) {
-                                        sl.settings.withingsClientId = cid
-                                    }
-                                    sl.settings.withingsDirectEnabled = true
-                                    tick++
-                                    try {
-                                        val authUrl = sl.withings.beginLogin(System.currentTimeMillis())
-                                        withContext(Dispatchers.Main) { openUrl(authUrl) }
-                                    } catch (e: Exception) {
-                                        notice = "Vyplňte Client ID i Client Secret."
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                OutlinedButton(
+                                    onClick = {
+                                        webLoginMode = WithingsDialogMode.SelectProfilesOnly
+                                        showWebLoginDialog = true
+                                    },
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text(
+                                        if (childUid != null) "Změnit profil (${childName ?: "ID $childUid"})" else "Přiřadit profil dítěte",
+                                        maxLines = 1,
+                                        softWrap = false
+                                    )
+                                }
+                                if (childUid != null) {
+                                    TextButton(onClick = {
+                                        sl.withings.disconnectChild()
+                                        notice = "Dětský profil odpojen."
+                                        tick++
+                                    }) {
+                                        Text("Odpojit", color = MaterialTheme.colorScheme.error)
                                     }
                                 }
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        ) { Text(if (wConnected && !isWeb) "Přepojit OAuth" else "Připojit přes OAuth", maxLines = 1, softWrap = false) }
+                            }
+
+                            Text(
+                                "2. Telefon dítěte (příjemce v P2P síti):",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                            if (contacts.isEmpty()) {
+                                Text(
+                                    "Zatím nemáte spárované žádné kontakty. Spárujte telefon dítěte v záložce Skupiny → QR kód.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color(0xFFF59E0B)
+                                )
+                            } else {
+                                FlowRow(
+                                    Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    contacts.forEach { c ->
+                                        val isSelected = wCfg?.childRecipientIdentity == c.identity
+                                        FilterChip(
+                                            selected = isSelected,
+                                            onClick = {
+                                                scope.launch(Dispatchers.IO) {
+                                                    sl.settings.childRecipientIdentity = if (isSelected) "" else c.identity
+                                                    tick++
+                                                }
+                                            },
+                                            label = { Text(c.displayName, maxLines = 1, softWrap = false) }
+                                        )
+                                    }
+                                }
+                            }
+
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Button(
+                                    onClick = {
+                                        scope.launch(Dispatchers.IO) {
+                                            val sent = sl.withings.syncAndForwardChildWeights(System.currentTimeMillis())
+                                            notice = if (sent > 0) "Odesláno $sent vážení dítěte."
+                                            else if ((wCfg?.childRecipientIdentity ?: "").isBlank()) "Vyberte, komu posílat."
+                                            else "Nic nového k odeslání."
+                                            tick++
+                                        }
+                                    },
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text("Odeslat měření dítěte", maxLines = 1, softWrap = false)
+                                }
+                            }
+
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                OutlinedTextField(
+                                    value = childWeightSendKg,
+                                    onValueChange = { childWeightSendKg = it },
+                                    label = { Text("Nebo ruční váha dítěte (kg)") },
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1.4f)
+                                )
+                                OutlinedButton(
+                                    onClick = {
+                                        val kg = childWeightSendKg.replace(',', '.').toDoubleOrNull()
+                                        val childId = wCfg?.childRecipientIdentity.orEmpty()
+                                        if (childId.isBlank()) {
+                                            notice = "Vyberte, komu posílat."
+                                        } else if (kg != null && kg in 5.0..150.0) {
+                                            scope.launch(Dispatchers.IO) {
+                                                val now = System.currentTimeMillis()
+                                                val today = LocalDate.now(ZoneId.of(sl.settings.zoneId)).toString()
+                                                val obs = app.pulse4.domain.MetricObservation(
+                                                    id = "withings-child-$now",
+                                                    provider = app.pulse4.domain.Provider.WITHINGS_API,
+                                                    accountId = "withings-family",
+                                                    externalId = "cw-$now",
+                                                    type = app.pulse4.domain.MetricType.WEIGHT,
+                                                    startUtcMs = now,
+                                                    endUtcMs = now,
+                                                    value = kg,
+                                                    zoneId = sl.settings.zoneId,
+                                                    localDate = today
+                                                )
+                                                val ok = sl.withings.forwardSingleWeightToChild(obs, now, excludeFromParent = false)
+                                                childWeightSendKg = ""
+                                                notice = if (ok) "${fmt.weight(kg)} odesláno dítěti." else "Odeslání se nezdařilo."
+                                                tick++
+                                            }
+                                        } else notice = "Zadejte platnou váhu v kg."
+                                    },
+                                    modifier = Modifier.weight(1f)
+                                ) { Text("Poslat", maxLines = 1, softWrap = false) }
+                            }
+                        }
+
+                        Box(Modifier.fillMaxWidth().height(1.dp).background(Color(0xFF1E293B)))
+
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f).padding(end = 8.dp)) {
+                                Text(
+                                    "Přijímat moji váhu od rodiče",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color.White
+                                )
+                                Text(
+                                    "Zapněte na telefonu dítěte. Váha zaslaná z rodinného účtu rodiče se automaticky zařadí do grafů.",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFF94A3B8)
+                                )
+                            }
+                            Switch(
+                                checked = wCfg?.acceptFromParent ?: true,
+                                onCheckedChange = { on -> scope.launch(Dispatchers.IO) { sl.settings.acceptWeightFromParent = on; tick++ } }
+                            )
+                        }
                     }
                 }
 
@@ -1998,158 +2105,80 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                         modifier = Modifier.fillMaxWidth()
                     ) { Text("Import CSV z aplikace Withings", maxLines = 1, softWrap = false) }
                 }
-            }
-
-            // ───────────────────────── DÍTĚ ─────────────────────────
-            else -> {
-                Text(
-                    "Dítě nemůže mít vlastní Withings. Jeho váhu z vaší váhy pošlete do jeho telefonu.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFF94A3B8)
-                )
-                Spacer(Modifier.height(10.dp))
-
-                AccountCard("1. Komu posílat", null) {
-                    if (contacts.isEmpty()) {
-                        Text(
-                            "Nejdřív spárujte telefon dítěte (Skupiny → QR kód).",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Color(0xFFF59E0B)
-                        )
-                    } else {
-                        FlowRow(
-                            Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            contacts.forEach { c ->
-                                val isSelected = wCfg?.childRecipientIdentity == c.identity
-                                FilterChip(
-                                    selected = isSelected,
-                                    onClick = {
-                                        scope.launch(Dispatchers.IO) {
-                                            sl.settings.childRecipientIdentity = if (isSelected) "" else c.identity
-                                            tick++
-                                        }
-                                    },
-                                    label = { Text(c.displayName, maxLines = 1, softWrap = false) }
-                                )
-                            }
-                        }
-                    }
-                }
 
                 Spacer(Modifier.height(12.dp))
 
-                val childUid = wCfg?.childWithingsUserId
-                val childName = sl.withings.loadWebSession()?.childUserName
-                AccountCard("2. Odkud brát váhu", if (childUid != null) (childName ?: "Profil připojen") else null) {
+                var showOAuthCard by remember { mutableStateOf(false) }
+                AccountCard("Vývojářské API (OAuth 2.0)", if (wCfg?.hasCreds == true) "Nastaveno" else "Alternativa", onHelp = { showOAuthCard = !showOAuthCard }) {
                     Text(
-                        "Připojte dětský profil z vašeho Withings účtu (v dialogu vyberte dítě pro přesměrování do Reticulum).",
+                        "Alternativní připojení přes vývojářský portál Withings (pro ty, kdo mají vlastní Client ID a Secret).",
                         style = MaterialTheme.typography.bodySmall,
                         color = Color(0xFF94A3B8)
                     )
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(
-                            onClick = {
-                                webLoginMode = WithingsDialogMode.SelectProfilesOnly
-                                showWebLoginDialog = true
-                            },
-                            modifier = Modifier.weight(1f)
-                        ) { Text(if (childUid != null) "Změnit profil" else "Vybrat profil", maxLines = 1, softWrap = false) }
+                    if (showOAuthCard || wCfg?.hasCreds == true) {
+                        Spacer(Modifier.height(8.dp))
+                        HelpBox(
+                            listOf(
+                                "Přihlaste se na developer.withings.com (stejný účet jako v aplikaci Withings).",
+                                "Klikněte na Create an application → Public API integration a jako Callback URL vložte adresu níže.",
+                                "Zkopírujte sem Client ID a Client Secret a klikněte na Připojit."
+                            )
+                        ) {
+                            OutlinedButton(
+                                onClick = { openUrl("https://developer.withings.com/dashboard/") },
+                                modifier = Modifier.fillMaxWidth()
+                            ) { Text("Otevřít developer.withings.com", maxLines = 1, softWrap = false) }
+                            Text(
+                                app.pulse4.android.BuildConfig.WITHINGS_REDIRECT,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFF38BDF8)
+                            )
+                            OutlinedButton(
+                                onClick = {
+                                    clipboard.setText(AnnotatedString(app.pulse4.android.BuildConfig.WITHINGS_REDIRECT))
+                                    notice = "Callback URL zkopírována."
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) { Text("Kopírovat Callback URL", maxLines = 1, softWrap = false) }
+                        }
+                        OutlinedTextField(
+                            value = withingsClientId.ifEmpty { wCfg?.clientId.orEmpty() },
+                            onValueChange = { withingsClientId = it },
+                            label = { Text("Client ID") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        OutlinedTextField(
+                            value = withingsSecret,
+                            onValueChange = { withingsSecret = it },
+                            label = { Text(if (wCfg?.hasCreds == true) "Client Secret (uložen)" else "Client Secret") },
+                            visualTransformation = PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
                         Button(
                             onClick = {
                                 scope.launch(Dispatchers.IO) {
-                                    val sent = sl.withings.syncAndForwardChildWeights(System.currentTimeMillis())
-                                    notice = if (sent > 0) "Odesláno $sent vážení."
-                                    else if ((wCfg?.childRecipientIdentity ?: "").isBlank()) "Vyberte, komu posílat."
-                                    else "Nic nového k odeslání."
+                                    val cid = withingsClientId.ifBlank { wCfg?.clientId.orEmpty() }.trim()
+                                    if (cid.isNotBlank() && withingsSecret.isNotBlank()) {
+                                        sl.withings.saveCredentials(cid, withingsSecret.trim())
+                                        withingsSecret = ""
+                                    } else if (cid.isNotBlank()) {
+                                        sl.settings.withingsClientId = cid
+                                    }
+                                    sl.settings.withingsDirectEnabled = true
                                     tick++
+                                    try {
+                                        val authUrl = sl.withings.beginLogin(System.currentTimeMillis())
+                                        withContext(Dispatchers.Main) { openUrl(authUrl) }
+                                    } catch (e: Exception) {
+                                        notice = "Vyplňte Client ID i Client Secret."
+                                    }
                                 }
                             },
-                            modifier = Modifier.weight(1f)
-                        ) { Text("Poslat", maxLines = 1, softWrap = false) }
-                    }
-                    if (childUid != null) {
-                        Row(
-                            Modifier.fillMaxWidth().padding(top = 4.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text("Aktivní dětský profil: ${childName ?: "ID $childUid"}", style = MaterialTheme.typography.labelSmall, color = Color(0xFF38BDF8))
-                            TextButton(onClick = {
-                                sl.withings.disconnectChild()
-                                notice = "Dětský profil odpojen."
-                                tick++
-                            }) {
-                                Text("Odpojit dítě", color = MaterialTheme.colorScheme.error)
-                            }
-                        }
-                    }
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        OutlinedTextField(
-                            value = childWeightSendKg,
-                            onValueChange = { childWeightSendKg = it },
-                            label = { Text("Nebo ručně (kg)") },
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                            singleLine = true,
-                            modifier = Modifier.weight(1.4f)
-                        )
-                        OutlinedButton(
-                            onClick = {
-                                val kg = childWeightSendKg.replace(',', '.').toDoubleOrNull()
-                                val childId = wCfg?.childRecipientIdentity.orEmpty()
-                                if (childId.isBlank()) {
-                                    notice = "Vyberte, komu posílat."
-                                } else if (kg != null && kg in 5.0..150.0) {
-                                    scope.launch(Dispatchers.IO) {
-                                        val now = System.currentTimeMillis()
-                                        val today = LocalDate.now(ZoneId.of(sl.settings.zoneId)).toString()
-                                        val obs = app.pulse4.domain.MetricObservation(
-                                            id = "withings-child-$now",
-                                            provider = app.pulse4.domain.Provider.WITHINGS_API,
-                                            accountId = "withings-family",
-                                            externalId = "cw-$now",
-                                            type = app.pulse4.domain.MetricType.WEIGHT,
-                                            startUtcMs = now,
-                                            endUtcMs = now,
-                                            value = kg,
-                                            zoneId = sl.settings.zoneId,
-                                            localDate = today
-                                        )
-                                        val ok = sl.withings.forwardSingleWeightToChild(obs, now, excludeFromParent = false)
-                                        childWeightSendKg = ""
-                                        notice = if (ok) "${fmt.weight(kg)} odesláno dítěti." else "Odeslání se nezdařilo."
-                                        tick++
-                                    }
-                                } else notice = "Zadejte váhu v kg."
-                            },
-                            modifier = Modifier.weight(1f)
-                        ) { Text("Poslat", maxLines = 1, softWrap = false) }
-                    }
-                }
-
-                Spacer(Modifier.height(12.dp))
-
-                AccountCard("Na telefonu dítěte", null) {
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            "Přijímat moji váhu od rodiče",
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.weight(1f)
-                        )
-                        Switch(
-                            checked = wCfg?.acceptFromParent ?: true,
-                            onCheckedChange = { on -> scope.launch(Dispatchers.IO) { sl.settings.acceptWeightFromParent = on; tick++ } }
-                        )
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text(if (wConnected && !isWeb) "Přepojit OAuth" else "Připojit přes OAuth", maxLines = 1, softWrap = false) }
                     }
                 }
             }

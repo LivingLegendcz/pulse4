@@ -43,6 +43,9 @@ import app.pulse4.withings.WithingsUserProfile
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
@@ -263,19 +266,22 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
 
     /** Prodlouží existující webovou relaci Withings nebo provede automatické znovupřihlášení. */
     fun renewSession(): Boolean {
-        val s = loadWebSession()
-        if (s != null && s.isConnected()) {
-            val extended = runCatching { webClient.extendSession(s.cookies, s.sessionToken) }.getOrNull()
-            if (extended != null) {
-                val updated = s.copy(
-                    sessionToken = extended.sessionToken ?: s.sessionToken,
-                    cookies = extended.cookies,
-                    lastExtendedMs = System.currentTimeMillis()
-                )
-                saveWebSession(updated)
-                return true
+        if (sl.settings.withingsDirectEnabled) {
+            val s = loadWebSession()
+            if (s != null && s.isConnected()) {
+                val extended = runCatching { webClient.extendSession(s.cookies, s.sessionToken) }.getOrNull()
+                if (extended != null) {
+                    val updated = s.copy(
+                        sessionToken = extended.sessionToken ?: s.sessionToken,
+                        cookies = extended.cookies,
+                        lastExtendedMs = System.currentTimeMillis()
+                    )
+                    saveWebSession(updated)
+                    return true
+                }
+                return tryAutoReLogin()
             }
-            return tryAutoReLogin()
+            return false
         }
         if (session.isConnected()) {
             return runCatching { session.accessToken(); true }.getOrDefault(false)
@@ -312,7 +318,10 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
         saveWebSession(s)
         sl.settings.withingsProfileLabel = primary.displayName
         runCatching { RoomAreaStateStore(sl.db, "withings.").put(SyncArea.WEIGHT, app.pulse4.provider.AreaState()) }
-        runCatching { runWebImport(nowMs) }
+        // Spustit počáteční import na pozadí, aby neblokoval okamžité zavření UI dialogu:
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            runCatching { runWebImport(nowMs) }
+        }
     }
 
     /** Přepne aktivní hlavní nebo dětský profil v rámci existující relace a spustí synchronizaci. */

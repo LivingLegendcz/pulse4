@@ -78,6 +78,7 @@ fun BodyScreen(sl: ServiceLocator) {
             mode = if (wState is WithingsUiState.Connected) WithingsDialogMode.SelectProfilesOnly else WithingsDialogMode.FullLogin,
             onDismiss = { showWebDialog = false },
             onSuccess = { profile ->
+                showWebDialog = false
                 msg = "Withings připojen (${profile.displayName})"
                 tick++
             }

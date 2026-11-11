@@ -40,6 +40,15 @@ android {
                 keyPassword = "android"
             }
         }
+        val releaseKeystore = file("${rootDir}/release.keystore")
+        if (releaseKeystore.exists()) {
+            create("releaseConfig") {
+                storeFile = releaseKeystore
+                storePassword = "***REMOVED***"
+                keyAlias = "pulse4key"
+                keyPassword = "***REMOVED***"
+            }
+        }
     }
 
     buildTypes {
@@ -47,6 +56,7 @@ android {
             signingConfigs.findByName("debugConfig")?.let { signingConfig = it }
         }
         release {
+            signingConfigs.findByName("releaseConfig")?.let { signingConfig = it }
             isMinifyEnabled = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }

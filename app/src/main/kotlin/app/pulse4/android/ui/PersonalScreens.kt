@@ -791,7 +791,6 @@ fun TodayScreen(
         val wNeedsLogin = wState is app.pulse4.android.di.WithingsUiState.Failed ||
             (sl.settings.withingsDirectEnabled && webSession != null && !webSession.isConnected())
         var showWithingsLoginDialogOnToday by remember { mutableStateOf(false) }
-        var isSilentReconnecting by remember { mutableStateOf(false) }
 
         if (showWithingsLoginDialogOnToday) {
             WithingsWebLoginDialog(
@@ -806,24 +805,6 @@ fun TodayScreen(
             )
         }
 
-        val onBarClick: () -> Unit = {
-            if (!isSilentReconnecting) {
-                scope.launch {
-                    isSilentReconnecting = true
-                    val ok = withContext(Dispatchers.IO) {
-                        sl.withings.renewSession()
-                    }
-                    isSilentReconnecting = false
-                    if (ok) {
-                        syncMessage = "Withings relace byla úspěšně obnovena."
-                        app.pulse4.android.work.Scheduler.importNow(ctx)
-                    } else {
-                        showWithingsLoginDialogOnToday = true
-                    }
-                }
-            }
-        }
-
         if (wNeedsLogin) {
             Card(
                 shape = RoundedCornerShape(12.dp),
@@ -832,7 +813,7 @@ fun TodayScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(top = 10.dp)
-                    .clickable(enabled = !isSilentReconnecting) { onBarClick() }
+                    .clickable { showWithingsLoginDialogOnToday = true }
             ) {
                 Row(
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
@@ -853,7 +834,7 @@ fun TodayScreen(
                             color = Color.White
                         )
                         Text(
-                            if (isSilentReconnecting) "Obnovuji relaci…" else "Klepněte pro obnovení relace",
+                            "Klepněte pro přihlášení heslem / obnovení relace",
                             style = MaterialTheme.typography.bodySmall,
                             color = Color(0xFFFCA5A5)
                         )

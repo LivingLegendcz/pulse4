@@ -259,36 +259,24 @@ class WithingsDirectAuth(
 
         return try {
             val loginUrl = "https://account.withings.com/new_workflow/login?r=https%3A%2F%2Fapp.withings.com%2F"
-            // 1. Zahájení relace – načte výchozí w_uuid, signin_authorize_state a případné CSRF tokeny
+            // 1. Zahájení relace – načte výchozí w_uuid, signin_authorize_state a workflow cookies
             val req1 = Request.Builder()
                 .url(loginUrl)
                 .header("User-Agent", ua)
                 .get()
                 .build()
-            val html1 = client.newCall(req1).execute().use { it.body?.string().orEmpty() }
-            val hidden1 = parseHiddenInputs(html1)
+            client.newCall(req1).execute().close()
 
-            // 2. Odeslání e-mailu (tím Withings nastaví cookie `email` a zároveň odešle záložní kód na e-mail)
-            val bodyEmailBuilder = FormBody.Builder()
-            hidden1.forEach { (k, v) -> if (k != "email" && k.isNotBlank()) bodyEmailBuilder.add(k, v) }
-            bodyEmailBuilder.add("email", em)
-
-            val req2 = Request.Builder()
-                .url(loginUrl)
-                .header("User-Agent", ua)
-                .header("Origin", "https://account.withings.com")
-                .header("Referer", loginUrl)
-                .post(bodyEmailBuilder.build())
-                .build()
-            val html2 = client.newCall(req2).execute().use { it.body?.string().orEmpty() }
-            val emailCheckHidden = parseHiddenInputs(html2)
+            // 2. Nastavíme cookie `email` přímo v cookieJar bez odeslání POST /login
+            // Tím Withings nepošle zbytečný 8místný OTP kód do schránky, pokud je heslo platné!
+            cookieJar.setEmailCookie(em)
 
             // 3. Načtení stránky password_check a odeslání hesla
             val passCheckUrl = "https://account.withings.com/new_workflow/password_check?r=https%3A%2F%2Fapp.withings.com%2F"
             val passGetReq = Request.Builder()
                 .url(passCheckUrl)
                 .header("User-Agent", ua)
-                .header("Referer", "https://account.withings.com/new_workflow/email_check?r=https%3A%2F%2Fapp.withings.com%2F")
+                .header("Referer", loginUrl)
                 .get()
                 .build()
             val passGetHtml = client.newCall(passGetReq).execute().use { it.body?.string().orEmpty() }
@@ -320,14 +308,8 @@ class WithingsDirectAuth(
                 bodyText.contains("Invalid email or password", ignoreCase = true) ||
                 (finalUrl.contains("password_check") && hasVisibleAlertError(bodyText))
             ) {
-                // Pokud má uživatel účet přes Google / Apple nebo bez hesla, krok 2 už mu na e-mail poslal 8místný kód!
-                lastMfaUrl = "https://account.withings.com/new_workflow/email_check?r=https%3A%2F%2Fapp.withings.com%2F"
-                lastHiddenFields = emailCheckHidden
-                isAwaitingCode = true
-                return WithingsLoginResult.NeedsMfa(
-                    email = em,
-                    message = "Heslo nebylo přijato (účty přes Google/Apple heslo Withings nemají). Na váš e-mail $em jsme rovnou odeslali 8místný přihlašovací kód – zadejte ho do pole níže."
-                )
+                // Heslo nebylo přijato (nebo účet přes Google/Apple heslo nemá) -> odešleme záložní kód na e-mail
+                return requestEmailCode(em)
             }
 
             // Kontrola, zda Withings vyžaduje 2FA kód (e-mail OTP, SMS nebo TOTP)
@@ -345,10 +327,7 @@ class WithingsDirectAuth(
                 return WithingsLoginResult.NeedsMfa(em, "Withings zaslal ověřovací kód na váš e-mail nebo v SMS. Zadejte ho do pole níže.")
             }
 
-            lastMfaUrl = "https://account.withings.com/new_workflow/email_check?r=https%3A%2F%2Fapp.withings.com%2F"
-            lastHiddenFields = emailCheckHidden
-            isAwaitingCode = true
-            WithingsLoginResult.NeedsMfa(em, "Na váš e-mail $em byl odeslán 8místný ověřovací kód Withings. Zadejte ho do pole níže.")
+            return requestEmailCode(em)
         } catch (e: Exception) {
             WithingsLoginResult.Error(e.message ?: "Chyba sítě při přihlašování.")
         }

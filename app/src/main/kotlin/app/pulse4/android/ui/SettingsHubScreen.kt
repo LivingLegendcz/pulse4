@@ -1079,6 +1079,7 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
             mode = webLoginMode,
             onDismiss = { showWebLoginDialog = false },
             onSuccess = { profile ->
+                showWebLoginDialog = false
                 notice = "Withings připojen k profilu: ${profile.displayName}"
                 tick++
             }

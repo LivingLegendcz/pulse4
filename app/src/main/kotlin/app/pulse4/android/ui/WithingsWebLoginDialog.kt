@@ -660,26 +660,11 @@ fun WithingsWebLoginDialog(
                                 sl = sl,
                                 onLoggedIn = { ok ->
                                     notice = null
-                                    // Automaticky zachovat stávající primární i dětský profil bez otravného dotazování
                                     val primary = existingSession?.primaryUserId?.let { pid -> ok.profiles.firstOrNull { it.id == pid } }
                                         ?: ok.profiles.firstOrNull { it.isPrimary }
                                         ?: ok.profiles.first()
-                                    val child = existingSession?.childUserId?.let { cid -> ok.profiles.firstOrNull { it.id == cid } }
-                                    val em = existingSession?.email ?: sl.secrets.getString("withings.web.email")
-                                    scope.launch(Dispatchers.IO) {
-                                        sl.withings.completeWebLogin(
-                                            cookies = ok.session.cookies,
-                                            primary = primary,
-                                            child = child,
-                                            sessionToken = ok.session.sessionToken,
-                                            allProfiles = ok.profiles,
-                                            email = em
-                                        )
-                                        withContext(Dispatchers.Main) {
-                                            onSuccess(primary)
-                                            onDismiss()
-                                        }
-                                    }
+                                    onSuccess(primary)
+                                    onDismiss()
                                 },
                                 onNotice = { notice = it }
                             )
@@ -690,7 +675,14 @@ fun WithingsWebLoginDialog(
                                 sl = sl,
                                 onLoggedIn = { ok ->
                                     notice = null
-                                    if (ok.profiles.size > 1) {
+                                    if (existingSession != null) {
+                                        // Pokud již profil známe (např. Pepe), zachováme ho a dialog ihned zavřeme:
+                                        val primary = existingSession.primaryUserId.let { pid -> ok.profiles.firstOrNull { it.id == pid } }
+                                            ?: ok.profiles.firstOrNull { it.isPrimary }
+                                            ?: ok.profiles.first()
+                                        onSuccess(primary)
+                                        onDismiss()
+                                    } else if (ok.profiles.size > 1) {
                                         stage = NativeDialogStage.SelectProfiles(
                                             cookies = ok.session.cookies,
                                             sessionToken = ok.session.sessionToken,

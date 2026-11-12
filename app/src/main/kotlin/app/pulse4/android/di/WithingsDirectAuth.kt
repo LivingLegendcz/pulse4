@@ -53,10 +53,13 @@ private class InMemoryCookieJar : CookieJar {
 
     @Synchronized
     fun getSessionToken(): String? {
+        // Pouze skutečný `session_token`. Hodnota `session_key` / `sessionid` je identifikátor relace,
+        // který server čte z cookie – nesmí se vydávat za session_token.
         return store.lastOrNull { it.name == "session_token" && it.value.isNotBlank() && it.value != "deleted" }?.value
-            ?: store.lastOrNull { it.name == "session_key" && it.value.isNotBlank() && it.value != "deleted" }?.value
-            ?: store.lastOrNull { it.name == "sessionid" && it.value.isNotBlank() && it.value != "deleted" }?.value
     }
+
+    @Synchronized
+    fun describe(): String = store.joinToString(", ") { "${it.name}@${it.domain}" }
 
     @Synchronized
     fun hasSession(): Boolean {
@@ -311,7 +314,7 @@ class WithingsDirectAuth(
                 bodyText.contains("Invalid email or password", ignoreCase = true) ||
                 (finalUrl.contains("password_check") && hasVisibleAlertError(bodyText))
             ) {
-                return WithingsLoginResult.Error("Nesprávné heslo k účtu Withings. Zkontrolujte prosím heslo, nebo si vytvořte heslo přes web Withings (Zapomenuté heslo), případně se přihlaste jednorázovým e-mailovým kódem.")
+                return WithingsLoginResult.Error("Withings heslo odmítl. Zkontrolujte heslo; pokud k účtu žádné nemáte (přihlášení přes Google / Apple), založte si ho na account.withings.com přes „Zapomenuté heslo“.")
             }
 
             // Kontrola, zda Withings vyžaduje 2FA kód (e-mail OTP, SMS nebo TOTP)
@@ -330,7 +333,7 @@ class WithingsDirectAuth(
                 return WithingsLoginResult.NeedsMfa(em, "Withings zaslal ověřovací kód na váš e-mail nebo v SMS. Zadejte ho do pole níže.")
             }
 
-            WithingsLoginResult.Error("Přihlášení heslem se nezdařilo. Zkontrolujte přihlašovací údaje nebo použijte jednorázový e-mailový kód.")
+            WithingsLoginResult.Error("Přihlášení heslem se nezdařilo. Zkontrolujte e-mail a heslo k účtu Withings.")
         } catch (e: Exception) {
             android.util.Log.e("WithingsDirectAuth", "loginPassword exception: ${e.message}", e)
             WithingsLoginResult.Error(e.message ?: "Chyba sítě při přihlašování.")
@@ -389,7 +392,7 @@ class WithingsDirectAuth(
 
             if (bodyText.contains("Invalid code", ignoreCase = true) || hasVisibleAlertError(bodyText)) {
                 isAwaitingCode = true
-                return WithingsLoginResult.Error("Neplatný nebo expirovaný ověřovací kód. Klikněte na 'Poslat 8místný kód na e-mail' a zadejte nově doručený kód.")
+                return WithingsLoginResult.Error("Neplatný nebo expirovaný ověřovací kód. Přihlaste se znovu heslem a zadejte nový kód.")
             }
 
             // Pokud po email_check následuje ještě druhý faktor (např. SMS/TOTP)
@@ -419,7 +422,7 @@ class WithingsDirectAuth(
 
         val cookies = cookieJar.getCookieString()
         val sessionToken = cookieJar.getSessionToken()
-        android.util.Log.i("WithingsDirectAuth", "finishLogin: cookiesLen=${cookies.length}, sessionToken=$sessionToken")
+        android.util.Log.i("WithingsDirectAuth", "finishLogin: cookies=[${cookieJar.describe()}], hasSessionToken=${sessionToken != null}")
         return try {
             val profiles = webClient.getUsersList(cookies, sessionToken)
             android.util.Log.i("WithingsDirectAuth", "finishLogin: fetched ${profiles.size} profiles: ${profiles.map { "${it.displayName} (${it.id})" }}")

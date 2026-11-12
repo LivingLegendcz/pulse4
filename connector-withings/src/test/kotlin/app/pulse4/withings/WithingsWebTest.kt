@@ -344,4 +344,23 @@ class WithingsWebTest {
         assertTrue(session.cookies.contains("session_token=proactive-tok-888"))
         assertEquals(1730950000_000L, session.lastExtendedMs)
     }
+
+    @Test
+    fun testSessionKeyCookieIsNotReplacedBySessionTokenAsSessionid() {
+        val fakeHttp = object : HttpGateway {
+            override fun get(url: String, headers: Map<String, String>): HttpResponse = error("unused")
+            override fun postForm(url: String, form: Map<String, String>, headers: Map<String, String>): HttpResponse {
+                // Regrese 401: session_token se nesmí posílat jako sessionid (server pak vrací status 250)
+                assertFalse(form.containsKey("sessionid"))
+                assertEquals("tok123", form["session_token"])
+                assertEquals("hmw", form["appname"])
+                val cookie = headers["Cookie"].orEmpty()
+                assertTrue(cookie.contains("session_key=key456"))
+                assertFalse(cookie.contains("sessionid="))
+                return HttpResponse(200, emptyMap(), """{"status":0,"body":{"users":[{"id":1,"firstname":"A","lastname":"B","is_primary":1}]}}""")
+            }
+        }
+        val users = WithingsWebClient(fakeHttp).getUsersList("session_key=key456; session_token=tok123; w_uuid=x", "tok123")
+        assertEquals(1, users.size)
+    }
 }

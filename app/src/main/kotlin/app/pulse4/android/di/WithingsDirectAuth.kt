@@ -250,7 +250,7 @@ class WithingsDirectAuth(
 
     fun loginPassword(email: String, password: String): WithingsLoginResult {
         if (password.isBlank()) {
-            return requestEmailCode(email)
+            return WithingsLoginResult.Error("Zadejte heslo k účtu Withings.")
         }
         cookieJar.clear()
         val em = email.trim()
@@ -308,8 +308,7 @@ class WithingsDirectAuth(
                 bodyText.contains("Invalid email or password", ignoreCase = true) ||
                 (finalUrl.contains("password_check") && hasVisibleAlertError(bodyText))
             ) {
-                // Heslo nebylo přijato (nebo účet přes Google/Apple heslo nemá) -> odešleme záložní kód na e-mail
-                return requestEmailCode(em)
+                return WithingsLoginResult.Error("Nesprávné heslo k účtu Withings. Zkontrolujte prosím heslo, nebo si vytvořte heslo přes web Withings (Zapomenuté heslo), případně se přihlaste jednorázovým e-mailovým kódem.")
             }
 
             // Kontrola, zda Withings vyžaduje 2FA kód (e-mail OTP, SMS nebo TOTP)
@@ -327,7 +326,7 @@ class WithingsDirectAuth(
                 return WithingsLoginResult.NeedsMfa(em, "Withings zaslal ověřovací kód na váš e-mail nebo v SMS. Zadejte ho do pole níže.")
             }
 
-            return requestEmailCode(em)
+            return WithingsLoginResult.Error("Přihlášení heslem se nezdařilo. Zkontrolujte přihlašovací údaje nebo použijte jednorázový e-mailový kód.")
         } catch (e: Exception) {
             WithingsLoginResult.Error(e.message ?: "Chyba sítě při přihlašování.")
         }
@@ -437,7 +436,8 @@ class WithingsDirectAuth(
                 WithingsLoginResult.Ok(session, profiles)
             }
         } catch (e: Exception) {
-            WithingsLoginResult.Error("Ověření zatím nebylo dokončeno – zadejte platný 8místný kód z e-mailu.")
+            val err = e.message ?: "Chyba při načtení profilů účtu Withings."
+            WithingsLoginResult.Error(err)
         }
     }
 }

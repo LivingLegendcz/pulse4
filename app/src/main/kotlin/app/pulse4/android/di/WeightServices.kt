@@ -320,6 +320,7 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
         runCatching { RoomAreaStateStore(sl.db, "withings.").put(SyncArea.WEIGHT, app.pulse4.provider.AreaState()) }
         // Spustit počáteční import na pozadí, aby neblokoval okamžité zavření UI dialogu:
         kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            kotlinx.coroutines.delay(1000L)
             runCatching { runWebImport(nowMs) }
         }
     }

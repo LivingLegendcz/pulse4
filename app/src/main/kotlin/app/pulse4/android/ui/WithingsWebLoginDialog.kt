@@ -23,6 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.outlined.Email
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -30,6 +31,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -208,8 +210,51 @@ fun WithingsNativeLoginForm(
                 Spacer(Modifier.width(8.dp))
                 Text("Přihlašuji se k Withings…", fontWeight = FontWeight.Bold)
             } else {
-                Text("Přihlásit se k Withings", fontWeight = FontWeight.Bold)
+                Text("Přihlásit se heslem", fontWeight = FontWeight.Bold)
             }
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            HorizontalDivider(Modifier.weight(1f), color = Color(0xFF334155))
+            Text("  NEBO  ", style = MaterialTheme.typography.labelSmall, color = Color(0xFF64748B))
+            HorizontalDivider(Modifier.weight(1f), color = Color(0xFF334155))
+        }
+
+        OutlinedButton(
+            enabled = !busy && email.isNotBlank(),
+            onClick = {
+                busy = true
+                scope.launch {
+                    val res = withContext(Dispatchers.IO) {
+                        sl.withings.requestDirectEmailCode(email)
+                    }
+                    busy = false
+                    when (res) {
+                        is WithingsLoginResult.Ok -> {
+                            password = ""
+                            code = ""
+                            awaitingCode = false
+                            onLoggedIn(res)
+                        }
+                        is WithingsLoginResult.NeedsMfa -> {
+                            awaitingCode = true
+                            onNotice(res.message)
+                        }
+                        is WithingsLoginResult.Error -> onNotice(res.message)
+                    }
+                }
+            },
+            modifier = Modifier.fillMaxWidth().height(44.dp),
+            shape = RoundedCornerShape(12.dp),
+            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF38BDF8)),
+            border = BorderStroke(1.dp, Color(0xFF0284C7).copy(alpha = 0.6f))
+        ) {
+            Icon(Icons.Outlined.Email, contentDescription = null, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("Poslat 8místný kód na e-mail (Google / Apple)", fontWeight = FontWeight.SemiBold)
         }
 
         // Pokud Withings vyžaduje 2FA kód (např. e-mail OTP nebo SMS)
@@ -438,6 +483,50 @@ fun WithingsReconnectForm(
                 Text("Obnovuji spojení heslem…", fontWeight = FontWeight.Bold)
             } else {
                 Text("Obnovit spojení heslem", fontWeight = FontWeight.Bold)
+            }
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            HorizontalDivider(Modifier.weight(1f), color = Color(0xFF334155))
+            Text("  NEBO  ", style = MaterialTheme.typography.labelSmall, color = Color(0xFF64748B))
+            HorizontalDivider(Modifier.weight(1f), color = Color(0xFF334155))
+        }
+
+        OutlinedButton(
+            enabled = !loggingInByPassword && !verifyingCode && !sendingCode,
+            onClick = {
+                sendingCode = true
+                scope.launch {
+                    val res = withContext(Dispatchers.IO) {
+                        sl.withings.requestDirectEmailCode(savedEmail)
+                    }
+                    sendingCode = false
+                    when (res) {
+                        is WithingsLoginResult.Ok -> onLoggedIn(res)
+                        is WithingsLoginResult.NeedsMfa -> {
+                            codeSent = true
+                            onNotice(res.message)
+                        }
+                        is WithingsLoginResult.Error -> onNotice(res.message)
+                    }
+                }
+            },
+            modifier = Modifier.fillMaxWidth().height(44.dp),
+            shape = RoundedCornerShape(12.dp),
+            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF38BDF8)),
+            border = BorderStroke(1.dp, Color(0xFF0284C7).copy(alpha = 0.6f))
+        ) {
+            if (sendingCode) {
+                CircularProgressIndicator(strokeWidth = 2.dp, color = Color(0xFF38BDF8), modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Odesílám kód na e-mail…", fontWeight = FontWeight.SemiBold)
+            } else {
+                Icon(Icons.Outlined.Email, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Poslat 8místný kód na e-mail (Google / Apple)", fontWeight = FontWeight.SemiBold)
             }
         }
 

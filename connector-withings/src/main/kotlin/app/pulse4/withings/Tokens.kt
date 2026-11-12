@@ -59,9 +59,10 @@ internal object Wire {
         if (e.status == 0) return e.body ?: JsonObject(emptyMap())
         val err = e.error?.lowercase().orEmpty()
         val isAuthError = when (e.status) {
-            401, 403, 102, 2553, 2554, 2555, 2556 -> true
+            401, 403, 102, 214, 247, 250, 501, 2553, 2554, 2555, 2556 -> true
             100 -> err.contains("session") || err.contains("token") || err.contains("auth") || err.contains("cookie")
-            else -> err.contains("session") || err.contains("unauthorized") || err.contains("forbidden")
+            else -> err.contains("session") || err.contains("unauthorized") || err.contains("forbidden") ||
+                    err.contains("credential") || err.contains("oauth") || err.contains("expired") || err.contains("auth")
         }
         if (isAuthError) throw ProviderError.Unauthorized()
         if (e.status == 601) throw ProviderError.RateLimited(null)

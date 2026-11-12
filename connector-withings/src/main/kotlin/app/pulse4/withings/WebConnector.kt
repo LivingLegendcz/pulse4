@@ -30,9 +30,10 @@ import kotlinx.serialization.json.longOrNull
 data class WithingsWebConfig(
     val baseUrl: String = "https://scalews.withings.com/cgi-bin/",
     val loginUrl: String = "https://account.withings.com/connection/login?r=https%3A%2F%2Fapp.withings.com%2F",
-    val appName: String = "wiscale2",
+    // Stejná identifikace klienta jako webová aplikace app.withings.com (WS_APP_NAME / appliver = 8 znaků build hashe)
+    val appName: String = "hmw",
     val appPfm: String = "web",
-    val appLiver: String = "1080000",
+    val appLiver: String = "bb4050e3",
     val attribQuality: Map<Int, Quality> = mapOf(
         0 to Quality.OK,
         2 to Quality.OK,
@@ -220,11 +221,13 @@ class WithingsWebClient(
         if (env.status != 0) return null
         val body = env.body ?: return null
         val newToken = body["session_token"]?.jsonPrimitive?.contentOrNull
-            ?: body["sessionid"]?.jsonPrimitive?.contentOrNull
             ?: extractCookieValue(res.headers["Set-Cookie"].orEmpty(), "session_token")
-            ?: extractCookieValue(res.headers["Set-Cookie"].orEmpty(), "sessionid")
             ?: sessionToken
-        val updatedCookies = mergeCookies(cookies, res.headers["Set-Cookie"], newToken)
+        var updatedCookies = mergeCookies(cookies, res.headers["Set-Cookie"], newToken)
+        // Nové sessionid z prodloužení = nová hodnota cookie session_key
+        body["sessionid"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }?.let { sid ->
+            updatedCookies = mergeCookies(updatedCookies, "session_key=$sid", null)
+        }
         return WithingsExtendedSession(newToken, updatedCookies)
     }
 
@@ -373,13 +376,15 @@ class WithingsWebClient(
             "apppfm" to config.appPfm,
             "appliver" to config.appLiver,
         )
-        val sessionid = extractCookieValue(cookies, "sessionid") ?: explicitToken
+        // Server ověřuje relaci cookie `session_key` (shodně s webem, který posílá cookies přes withCredentials).
+        // Parametr `sessionid` se smí poslat jen se SKUTEČNÝM sessionid – dosazení jiného tokenu
+        // vede na status 250 („credentials do not match“), který se projevoval jako 401.
+        val sessionKey = extractCookieValue(cookies, "session_key")
+        val sessionid = extractCookieValue(cookies, "sessionid")
         val sessionToken = extractCookieValue(cookies, "session_token")
-            ?: extractCookieValue(cookies, "session_key")
-            ?: explicitToken
-            ?: sessionid
+            ?: explicitToken?.takeIf { it != sessionKey && it != sessionid }
 
-        if (!sessionid.isNullOrBlank()) {
+        if (sessionKey.isNullOrBlank() && !sessionid.isNullOrBlank()) {
             map["sessionid"] = sessionid
         }
         if (!sessionToken.isNullOrBlank()) {
@@ -417,9 +422,8 @@ class WithingsWebClient(
                     }
                 }
             }
-        if (!newToken.isNullOrBlank()) {
+        if (!newToken.isNullOrBlank() && newToken != map["session_key"] && newToken != map["sessionid"]) {
             map["session_token"] = newToken
-            map["sessionid"] = newToken
         }
         return map.entries.joinToString("; ") { "${it.key}=${it.value}" }
     }

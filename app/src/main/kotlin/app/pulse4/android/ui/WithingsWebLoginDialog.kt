@@ -24,7 +24,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.outlined.Email
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -32,7 +31,6 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -189,13 +187,13 @@ fun WithingsNativeLoginForm(
                 )
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(
-                        "Účty přihlašované přes Google nebo Apple",
+                        "K účtu Withings je nutné mít heslo",
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.Bold,
                         color = Color(0xFF38BDF8)
                     )
                     Text(
-                        "Pokud k Withings běžně používáte přihlášení přes Google nebo Apple, je potřeba si k účtu jednorázově vytvořit heslo na webu Withings (přes volbu „Zapomenuté heslo“ odeslanou na váš Google e-mail). Heslo se bezpečně uloží v šifrovaném úložišti telefonu a zajistí trvalé automatické spojení bez odhlašování.",
+                        "Pulse4 se přihlašuje pouze e-mailem a heslem. Pokud se k Withings přihlašujete přes Google nebo Apple, založte si nejdřív k účtu heslo: na account.withings.com zvolte „Zapomenuté heslo“, zadejte svůj e-mail a v doručeném e-mailu si heslo nastavte. Heslo se uloží šifrovaně v telefonu a slouží k automatickému obnovení spojení.",
                         style = MaterialTheme.typography.bodySmall,
                         color = Color(0xFFCBD5E1)
                     )
@@ -219,49 +217,6 @@ fun WithingsNativeLoginForm(
             } else {
                 Text("Přihlásit se heslem", fontWeight = FontWeight.Bold)
             }
-        }
-
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            HorizontalDivider(Modifier.weight(1f), color = Color(0xFF334155))
-            Text("  NEBO  ", style = MaterialTheme.typography.labelSmall, color = Color(0xFF64748B))
-            HorizontalDivider(Modifier.weight(1f), color = Color(0xFF334155))
-        }
-
-        OutlinedButton(
-            enabled = !busy && email.isNotBlank(),
-            onClick = {
-                busy = true
-                scope.launch {
-                    val res = withContext(Dispatchers.IO) {
-                        sl.withings.requestDirectEmailCode(email)
-                    }
-                    busy = false
-                    when (res) {
-                        is WithingsLoginResult.Ok -> {
-                            password = ""
-                            code = ""
-                            awaitingCode = false
-                            onLoggedIn(res)
-                        }
-                        is WithingsLoginResult.NeedsMfa -> {
-                            awaitingCode = true
-                            onNotice(res.message)
-                        }
-                        is WithingsLoginResult.Error -> onNotice(res.message)
-                    }
-                }
-            },
-            modifier = Modifier.fillMaxWidth().height(44.dp),
-            shape = RoundedCornerShape(12.dp),
-            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF38BDF8)),
-            border = BorderStroke(1.dp, Color(0xFF0284C7).copy(alpha = 0.6f))
-        ) {
-            Icon(Icons.Outlined.Email, contentDescription = null, modifier = Modifier.size(18.dp))
-            Spacer(Modifier.width(8.dp))
-            Text("Poslat 8místný kód na e-mail (Google / Apple)", fontWeight = FontWeight.SemiBold)
         }
 
         val doVerifyMfa: () -> Unit = {
@@ -357,7 +312,7 @@ enum class WithingsDialogMode {
 
 /**
  * Přímý formulář obnovení relace Withings:
- * Umožňuje rychlé obnovení heslem nebo e-mailovým kódem bez ztráty nastavení profilů.
+ * Umožňuje rychlé obnovení heslem bez ztráty nastavení profilů.
  */
 @Composable
 fun WithingsReconnectForm(
@@ -374,7 +329,6 @@ fun WithingsReconnectForm(
     var password by remember { mutableStateOf(savedPass) }
     var code by rememberSaveable { mutableStateOf("") }
     var codeSent by rememberSaveable { mutableStateOf(sl.withings.isAwaitingCode()) }
-    var sendingCode by remember { mutableStateOf(false) }
     var verifyingCode by remember { mutableStateOf(false) }
     var loggingInByPassword by remember { mutableStateOf(false) }
 
@@ -439,13 +393,13 @@ fun WithingsReconnectForm(
                 )
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(
-                        "Účty přes Google nebo Apple",
+                        "K účtu Withings je nutné mít heslo",
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.Bold,
                         color = Color(0xFF38BDF8)
                     )
                     Text(
-                        "Pokud k Withings používáte Google nebo Apple, vytvořte si k účtu heslo přes volbu „Zapomenuté heslo“ odeslanou na váš Google e-mail. Zadané heslo se bezpečně uloží do telefonu a zajistí trvalé automatické spojení.",
+                        "Pokud se k Withings přihlašujete přes Google nebo Apple, založte si k účtu heslo: na account.withings.com zvolte „Zapomenuté heslo“ a heslo si nastavte z doručeného e-mailu. Heslo se uloží šifrovaně v telefonu a slouží k automatickému obnovení spojení.",
                         style = MaterialTheme.typography.bodySmall,
                         color = Color(0xFFCBD5E1)
                     )
@@ -454,7 +408,7 @@ fun WithingsReconnectForm(
         }
 
         val doPasswordLogin: () -> Unit = {
-            if (!loggingInByPassword && !verifyingCode && !sendingCode && password.isNotBlank()) {
+            if (!loggingInByPassword && !verifyingCode && password.isNotBlank()) {
                 loggingInByPassword = true
                 scope.launch {
                     val res = withContext(Dispatchers.IO) {
@@ -483,12 +437,12 @@ fun WithingsReconnectForm(
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
             keyboardActions = KeyboardActions(onDone = { doPasswordLogin() }),
             singleLine = true,
-            enabled = !loggingInByPassword && !verifyingCode && !sendingCode,
+            enabled = !loggingInByPassword && !verifyingCode,
             modifier = Modifier.fillMaxWidth()
         )
 
         Button(
-            enabled = !loggingInByPassword && !verifyingCode && !sendingCode && password.isNotBlank(),
+            enabled = !loggingInByPassword && !verifyingCode && password.isNotBlank(),
             onClick = doPasswordLogin,
             modifier = Modifier.fillMaxWidth().height(48.dp),
             shape = RoundedCornerShape(12.dp),
@@ -500,50 +454,6 @@ fun WithingsReconnectForm(
                 Text("Obnovuji spojení heslem…", fontWeight = FontWeight.Bold)
             } else {
                 Text("Obnovit spojení heslem", fontWeight = FontWeight.Bold)
-            }
-        }
-
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            HorizontalDivider(Modifier.weight(1f), color = Color(0xFF334155))
-            Text("  NEBO  ", style = MaterialTheme.typography.labelSmall, color = Color(0xFF64748B))
-            HorizontalDivider(Modifier.weight(1f), color = Color(0xFF334155))
-        }
-
-        OutlinedButton(
-            enabled = !loggingInByPassword && !verifyingCode && !sendingCode,
-            onClick = {
-                sendingCode = true
-                scope.launch {
-                    val res = withContext(Dispatchers.IO) {
-                        sl.withings.requestDirectEmailCode(savedEmail)
-                    }
-                    sendingCode = false
-                    when (res) {
-                        is WithingsLoginResult.Ok -> onLoggedIn(res)
-                        is WithingsLoginResult.NeedsMfa -> {
-                            codeSent = true
-                            onNotice(res.message)
-                        }
-                        is WithingsLoginResult.Error -> onNotice(res.message)
-                    }
-                }
-            },
-            modifier = Modifier.fillMaxWidth().height(44.dp),
-            shape = RoundedCornerShape(12.dp),
-            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF38BDF8)),
-            border = BorderStroke(1.dp, Color(0xFF0284C7).copy(alpha = 0.6f))
-        ) {
-            if (sendingCode) {
-                CircularProgressIndicator(strokeWidth = 2.dp, color = Color(0xFF38BDF8), modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("Odesílám kód na e-mail…", fontWeight = FontWeight.SemiBold)
-            } else {
-                Icon(Icons.Outlined.Email, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("Poslat 8místný kód na e-mail (Google / Apple)", fontWeight = FontWeight.SemiBold)
             }
         }
 
@@ -560,7 +470,7 @@ fun WithingsReconnectForm(
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Text(
-                        "Ověřovací 2FA kód z e-mailu / SMS",
+                        "Withings vyžaduje ověřovací kód (2FA)",
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.Bold,
                         color = Color(0xFF38BDF8)
@@ -589,8 +499,8 @@ fun WithingsReconnectForm(
                             val digits = input.filter { it.isDigit() }.take(8)
                             code = digits
                         },
-                        label = { Text("8místný kód z e-mailu / 2FA") },
-                        placeholder = { Text("Vložte kód z e-mailu") },
+                        label = { Text("Ověřovací kód (2FA)") },
+                        placeholder = { Text("Kód, který Withings vyžádal") },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
                         keyboardActions = KeyboardActions(onDone = { doVerifyCode() }),
                         singleLine = true,

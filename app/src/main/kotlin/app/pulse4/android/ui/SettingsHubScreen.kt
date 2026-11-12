@@ -2326,9 +2326,13 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
         val wFailed = wState as? app.pulse4.android.di.WithingsUiState.Failed
         val wAreaState = states.firstOrNull { it.area == "withings.WEIGHT" }
         val wLastSyncMs = wAreaState?.lastSuccessMs ?: wConn?.lastSyncMs ?: webSession?.lastSyncMs
-        val wErrorText = wFailed?.message ?: wAreaState?.lastError?.takeIf { it.isNotBlank() }
+        val wLastError = wAreaState?.lastError?.takeIf {
+            it.isNotBlank() && (wAreaState.lastSuccessMs == null || (wAreaState.lastAttemptMs ?: 0L) > (wAreaState.lastSuccessMs ?: 0L))
+        }
+        val wErrorText = wFailed?.message ?: wLastError
         val withingsBarColor = when {
-            wErrorText != null -> Color(0xFFEF4444)
+            wFailed != null -> Color(0xFFEF4444)
+            wLastError != null -> Color(0xFFEF4444)
             wLastSyncMs != null && !latestBody.isNullOrEmpty() -> Color(0xFF10B981)
             wConnected || wLastSyncMs != null -> Color(0xFFF59E0B)
             else -> Color(0xFF64748B)
@@ -2364,7 +2368,8 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                             )
                             Text(
                                 when {
-                                    wErrorText != null -> "Chyba: $wErrorText"
+                                    wFailed != null -> "Relace vypršela – klepněte pro obnovení"
+                                    wLastError != null -> "Chyba synchronizace: $wLastError"
                                     wLastSyncMs != null -> "Synchronizováno (${latestBody?.size ?: 0} metrik) · ${fmt.time(wLastSyncMs)}"
                                     wConnected -> "Připojeno – čeká na synchronizaci"
                                     else -> "Zatím nesynchronizováno"

@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -55,6 +56,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -126,6 +128,33 @@ fun WithingsNativeLoginForm(
             }
         }
 
+        val doLogin: () -> Unit = {
+            if (!busy && email.isNotBlank() && password.isNotBlank()) {
+                busy = true
+                scope.launch {
+                    val res = withContext(Dispatchers.IO) {
+                        sl.withings.loginDirectPassword(email, password)
+                    }
+                    busy = false
+                    when (res) {
+                        is WithingsLoginResult.Ok -> {
+                            password = ""
+                            code = ""
+                            awaitingCode = false
+                            onLoggedIn(res)
+                        }
+                        is WithingsLoginResult.NeedsMfa -> {
+                            awaitingCode = true
+                            onNotice(res.message)
+                        }
+                        is WithingsLoginResult.Error -> {
+                            onNotice(res.message)
+                        }
+                    }
+                }
+            }
+        }
+
         // Heslo Withings
         OutlinedTextField(
             value = password,
@@ -133,7 +162,8 @@ fun WithingsNativeLoginForm(
             label = { Text("Heslo Withings") },
             placeholder = { Text("Zadejte heslo k účtu Withings") },
             visualTransformation = PasswordVisualTransformation(),
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
+            keyboardActions = KeyboardActions(onDone = { doLogin() }),
             singleLine = true,
             enabled = !busy,
             modifier = Modifier.fillMaxWidth()
@@ -177,30 +207,7 @@ fun WithingsNativeLoginForm(
 
         Button(
             enabled = canSubmit,
-            onClick = {
-                busy = true
-                scope.launch {
-                    val res = withContext(Dispatchers.IO) {
-                        sl.withings.loginDirectPassword(email, password)
-                    }
-                    busy = false
-                    when (res) {
-                        is WithingsLoginResult.Ok -> {
-                            password = ""
-                            code = ""
-                            awaitingCode = false
-                            onLoggedIn(res)
-                        }
-                        is WithingsLoginResult.NeedsMfa -> {
-                            awaitingCode = true
-                            onNotice(res.message)
-                        }
-                        is WithingsLoginResult.Error -> {
-                            onNotice(res.message)
-                        }
-                    }
-                }
-            },
+            onClick = doLogin,
             modifier = Modifier.fillMaxWidth().height(48.dp),
             shape = RoundedCornerShape(12.dp),
             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0284C7))
@@ -257,6 +264,33 @@ fun WithingsNativeLoginForm(
             Text("Poslat 8místný kód na e-mail (Google / Apple)", fontWeight = FontWeight.SemiBold)
         }
 
+        val doVerifyMfa: () -> Unit = {
+            if (!busy && code.isNotBlank() && email.isNotBlank()) {
+                busy = true
+                scope.launch {
+                    val res = withContext(Dispatchers.IO) {
+                        sl.withings.resumeDirectMfa(code, emailFallback = email)
+                    }
+                    busy = false
+                    when (res) {
+                        is WithingsLoginResult.Ok -> {
+                            password = ""
+                            code = ""
+                            awaitingCode = false
+                            onLoggedIn(res)
+                        }
+                        is WithingsLoginResult.NeedsMfa -> {
+                            awaitingCode = true
+                            onNotice(res.message)
+                        }
+                        is WithingsLoginResult.Error -> {
+                            onNotice(res.message)
+                        }
+                    }
+                }
+            }
+        }
+
         // Pokud Withings vyžaduje 2FA kód (např. e-mail OTP nebo SMS)
         if (awaitingCode || code.isNotBlank()) {
             Card(
@@ -281,7 +315,8 @@ fun WithingsNativeLoginForm(
                         onValueChange = { code = it },
                         label = { Text("Ověřovací kód") },
                         placeholder = { Text("Vložte kód z e-mailu / SMS") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
+                        keyboardActions = KeyboardActions(onDone = { doVerifyMfa() }),
                         singleLine = true,
                         enabled = !busy,
                         modifier = Modifier.fillMaxWidth()
@@ -289,30 +324,7 @@ fun WithingsNativeLoginForm(
 
                     Button(
                         enabled = !busy && code.isNotBlank() && email.isNotBlank(),
-                        onClick = {
-                            busy = true
-                            scope.launch {
-                                val res = withContext(Dispatchers.IO) {
-                                    sl.withings.resumeDirectMfa(code, emailFallback = email)
-                                }
-                                busy = false
-                                when (res) {
-                                    is WithingsLoginResult.Ok -> {
-                                        password = ""
-                                        code = ""
-                                        awaitingCode = false
-                                        onLoggedIn(res)
-                                    }
-                                    is WithingsLoginResult.NeedsMfa -> {
-                                        awaitingCode = true
-                                        onNotice(res.message)
-                                    }
-                                    is WithingsLoginResult.Error -> {
-                                        onNotice(res.message)
-                                    }
-                                }
-                            }
-                        },
+                        onClick = doVerifyMfa,
                         modifier = Modifier.fillMaxWidth().height(48.dp),
                         shape = RoundedCornerShape(12.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))
@@ -441,22 +453,8 @@ fun WithingsReconnectForm(
             }
         }
 
-        // Pole pro heslo
-        OutlinedTextField(
-            value = password,
-            onValueChange = { password = it },
-            label = { Text("Heslo Withings") },
-            placeholder = { Text("Zadejte heslo k účtu") },
-            visualTransformation = PasswordVisualTransformation(),
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-            singleLine = true,
-            enabled = !loggingInByPassword && !verifyingCode && !sendingCode,
-            modifier = Modifier.fillMaxWidth()
-        )
-
-        Button(
-            enabled = !loggingInByPassword && !verifyingCode && !sendingCode && password.isNotBlank(),
-            onClick = {
+        val doPasswordLogin: () -> Unit = {
+            if (!loggingInByPassword && !verifyingCode && !sendingCode && password.isNotBlank()) {
                 loggingInByPassword = true
                 scope.launch {
                     val res = withContext(Dispatchers.IO) {
@@ -472,7 +470,26 @@ fun WithingsReconnectForm(
                         is WithingsLoginResult.Error -> onNotice(res.message)
                     }
                 }
-            },
+            }
+        }
+
+        // Pole pro heslo
+        OutlinedTextField(
+            value = password,
+            onValueChange = { password = it },
+            label = { Text("Heslo Withings") },
+            placeholder = { Text("Zadejte heslo k účtu") },
+            visualTransformation = PasswordVisualTransformation(),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
+            keyboardActions = KeyboardActions(onDone = { doPasswordLogin() }),
+            singleLine = true,
+            enabled = !loggingInByPassword && !verifyingCode && !sendingCode,
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        Button(
+            enabled = !loggingInByPassword && !verifyingCode && !sendingCode && password.isNotBlank(),
+            onClick = doPasswordLogin,
             modifier = Modifier.fillMaxWidth().height(48.dp),
             shape = RoundedCornerShape(12.dp),
             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0284C7))
@@ -549,23 +566,8 @@ fun WithingsReconnectForm(
                         color = Color(0xFF38BDF8)
                     )
 
-                    OutlinedTextField(
-                        value = code,
-                        onValueChange = { input ->
-                            val digits = input.filter { it.isDigit() }.take(8)
-                            code = digits
-                        },
-                        label = { Text("8místný kód z e-mailu / 2FA") },
-                        placeholder = { Text("Vložte kód z e-mailu") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        singleLine = true,
-                        enabled = !verifyingCode,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
-                    Button(
-                        enabled = !verifyingCode && code.length >= 6,
-                        onClick = {
+                    val doVerifyCode: () -> Unit = {
+                        if (!verifyingCode && code.length >= 6) {
                             verifyingCode = true
                             scope.launch {
                                 val res = withContext(Dispatchers.IO) {
@@ -578,7 +580,27 @@ fun WithingsReconnectForm(
                                     is WithingsLoginResult.Error -> onNotice(res.message)
                                 }
                             }
+                        }
+                    }
+
+                    OutlinedTextField(
+                        value = code,
+                        onValueChange = { input ->
+                            val digits = input.filter { it.isDigit() }.take(8)
+                            code = digits
                         },
+                        label = { Text("8místný kód z e-mailu / 2FA") },
+                        placeholder = { Text("Vložte kód z e-mailu") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
+                        keyboardActions = KeyboardActions(onDone = { doVerifyCode() }),
+                        singleLine = true,
+                        enabled = !verifyingCode,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Button(
+                        enabled = !verifyingCode && code.length >= 6,
+                        onClick = doVerifyCode,
                         modifier = Modifier.fillMaxWidth().height(48.dp),
                         shape = RoundedCornerShape(12.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))

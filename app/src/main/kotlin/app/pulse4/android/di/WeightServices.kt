@@ -242,9 +242,12 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
 
     /** Automatické tiché opětovné přihlášení e-mailem a heslem ze zapečetěného úložiště, pokud relace vypršela. */
     fun tryAutoReLogin(): Boolean {
-        val email = sl.secrets.getString("withings.web.email") ?: return false
-        val pass = sl.secrets.getString("withings.web.password") ?: return false
+        val email = sl.secrets.getString("withings.web.email")
+        val pass = sl.secrets.getString("withings.web.password")
+        android.util.Log.i("Withings", "tryAutoReLogin: email=$email, hasPassword=${!pass.isNullOrBlank()}")
+        if (email.isNullOrBlank() || pass.isNullOrBlank()) return false
         val r = directAuth.loginPassword(email, pass)
+        android.util.Log.i("Withings", "tryAutoReLogin result: ${r::class.simpleName}")
         if (r is WithingsLoginResult.Ok) {
             val existing = loadWebSession()
             val primary = existing?.primaryUserId?.let { pid -> r.profiles.firstOrNull { it.id == pid } }
@@ -268,9 +271,11 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
     fun renewSession(): Boolean {
         if (sl.settings.withingsDirectEnabled) {
             val s = loadWebSession()
+            android.util.Log.i("Withings", "renewSession: hasSession=${s != null}, isConnected=${s?.isConnected() == true}")
             if (s != null && s.isConnected()) {
                 val extended = runCatching { webClient.extendSession(s.cookies, s.sessionToken) }.getOrNull()
                 if (extended != null) {
+                    android.util.Log.i("Withings", "renewSession: extendSession SUCCESS")
                     val updated = s.copy(
                         sessionToken = extended.sessionToken ?: s.sessionToken,
                         cookies = extended.cookies,
@@ -279,6 +284,7 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
                     saveWebSession(updated)
                     return true
                 }
+                android.util.Log.i("Withings", "renewSession: extendSession failed, falling back to tryAutoReLogin")
                 return tryAutoReLogin()
             }
             return false
@@ -449,7 +455,9 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
             }
         }
 
+        android.util.Log.i("Withings", "runWebImport: running engine.runArea for user ${s.primaryUserId}")
         val result = engine.runArea(SyncArea.WEIGHT, nowMs)
+        android.util.Log.i("Withings", "runWebImport result: $result")
         when (result) {
             is AreaResult.Success -> {
                 val latestSession = loadWebSession() ?: s

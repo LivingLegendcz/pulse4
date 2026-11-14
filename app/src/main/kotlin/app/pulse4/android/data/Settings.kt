@@ -92,7 +92,7 @@ class Settings(private val db: AppDatabase) {
     var gatewayPort: Int get() = get("gatewayPort", "4242").toInt(); set(v) = put("gatewayPort", v.toString())
     /** Uložený seznam P2P uzlů (ve tvaru host:port), které lze v nastavení přepínat, přidávat i odebírat. */
     var savedGatewayNodes: List<String>
-        get() = get("savedGatewayNodes", "rns.xali.cz:4242,reticulum.betavine.net:4242,192.168.0.200:4242")
+        get() = get("savedGatewayNodes", "rns.xali.cz:4242,reticulum.betavine.net:4242")
             .split(',')
             .map { it.trim() }
             .filter { it.isNotBlank() }

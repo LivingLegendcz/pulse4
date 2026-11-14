@@ -580,13 +580,6 @@ fun TodayScreen(
         key1 = Triple(states.map { it.area to it.lastSuccessMs }, bgWindowDays, units)
     ) {
         val result = withContext(Dispatchers.IO) {
-            runCatching {
-                if (sl.db.observations().latest(MetricType.HRV.name) == null || sl.db.activities().count() == 0) {
-                    sl.importService.seedDemoData(System.currentTimeMillis())
-                } else {
-                    sl.importService.ensureWeightFallbackLoaded(System.currentTimeMillis())
-                }
-            }
             val today = LocalDate.now(ZoneId.of(sl.settings.zoneId))
             val obsToday = sl.db.observations().forDate(today.toString()).map { it.toDomain() }
             val maxDays = maxOf(bgWindowDays, 30)
@@ -702,8 +695,8 @@ fun TodayScreen(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                // Kulaté skleněné tlačítko pro nahrání Demo dat
-                Box(
+                // Kulaté skleněné tlačítko pro nahrání Demo dat (jen vývojářská verze – nikdy nemíchat do reálných dat)
+                if (app.pulse4.android.BuildConfig.DEBUG) Box(
                     modifier = Modifier
                         .size(36.dp)
                         .clip(CircleShape)

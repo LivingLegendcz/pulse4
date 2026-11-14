@@ -85,9 +85,7 @@ fun ReticulumScreen(sl: ServiceLocator) {
         FlowRow(Modifier.padding(vertical = 4.dp)) {
             listOf(
                 "rns.xali.cz" to 4242,
-                "reticulum.betavine.net" to 4242,
-                "192.168.0.184" to 4242,
-                "10.0.2.2" to 4242
+                "reticulum.betavine.net" to 4242
             ).forEach { (h, p) ->
                 FilterChip(
                     selected = host == h && port == p.toString(),

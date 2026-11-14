@@ -80,7 +80,7 @@ fun WithingsNativeLoginForm(
     val scope = rememberCoroutineScope()
     val savedEmail = sl.secrets.getString("withings.web.email") ?: sl.withings.loadWebSession()?.email ?: sl.withings.pendingEmail()
     val savedPass = sl.secrets.getString("withings.web.password")
-    var email by rememberSaveable { mutableStateOf(savedEmail ?: "pepe.kocourek@gmail.com") }
+    var email by rememberSaveable { mutableStateOf(savedEmail ?: "") }
     var password by remember { mutableStateOf(savedPass ?: "") }
     var code by rememberSaveable { mutableStateOf("") }
     var awaitingCode by rememberSaveable { mutableStateOf(sl.withings.isAwaitingCode()) }
@@ -300,7 +300,7 @@ fun WithingsNativeLoginForm(
 
 /**
  * Režimy zobrazení dialogu Withings:
- * - [Reconnect]: Přímé rychlé obnovení relace bez jakéhokoli výběru účtů / profilů (zachovává stávající profil Pepe a dětský profil).
+ * - [Reconnect]: Přímé rychlé obnovení relace bez jakéhokoli výběru účtů / profilů (zachovává stávající hlavní i dětský profil).
  * - [SelectProfilesOnly]: Pouze přepnutí profilů (hlavní / dětský) v existující platné relaci (z Nastavení -> Změnit profil).
  * - [FullLogin]: Kompletní nové přihlášení s e-mailem a heslem.
  */
@@ -324,7 +324,7 @@ fun WithingsReconnectForm(
     val savedEmail = sl.secrets.getString("withings.web.email")
         ?: sl.withings.loadWebSession()?.email
         ?: sl.withings.pendingEmail()
-        ?: "pepe.kocourek@gmail.com"
+        ?: ""
     val savedPass = sl.secrets.getString("withings.web.password").orEmpty()
     var password by remember { mutableStateOf(savedPass) }
     var code by rememberSaveable { mutableStateOf("") }
@@ -697,7 +697,7 @@ fun WithingsWebLoginDialog(
                                 onLoggedIn = { ok ->
                                     notice = null
                                     if (existingSession != null) {
-                                        // Pokud již profil známe (např. Pepe), zachováme ho a dialog ihned zavřeme:
+                                        // Pokud již profil známe (hlavní profil), zachováme ho a dialog ihned zavřeme:
                                         val primary = existingSession.primaryUserId.let { pid -> ok.profiles.firstOrNull { it.id == pid } }
                                             ?: ok.profiles.firstOrNull { it.isPrimary }
                                             ?: ok.profiles.first()

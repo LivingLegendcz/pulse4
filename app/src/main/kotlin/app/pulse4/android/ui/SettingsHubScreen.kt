@@ -991,7 +991,7 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
     var apiKey by remember { mutableStateOf("") }
     var editingGarminKey by rememberSaveable { mutableStateOf(false) }
     var editingGarminLogin by rememberSaveable { mutableStateOf(false) }
-    var email by rememberSaveable { mutableStateOf("pepe.kocourek@gmail.com") }
+    var email by rememberSaveable { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var mfa by rememberSaveable { mutableStateOf("") }
     var needMfa by rememberSaveable { mutableStateOf(false) }

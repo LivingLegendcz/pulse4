@@ -1,3 +1,5 @@
+import java.util.Properties
+
 // POZOR: tento modul nebyl v prostředí, kde vznikl, sestaven (chyběl Android SDK a přístup na dl.google.com / chaquo.com).
 // Verze závislostí je třeba před prvním sestavením ověřit a případně zvýšit; viz README.
 plugins {
@@ -40,13 +42,21 @@ android {
                 keyPassword = "android"
             }
         }
-        val releaseKeystore = file("${rootDir}/release.keystore")
-        if (releaseKeystore.exists()) {
+        // Údaje k release klíči: local.properties (mimo git) nebo proměnné prostředí PULSE4_*
+        val localProps = Properties().apply {
+            val f = rootProject.file("local.properties")
+            if (f.exists()) f.inputStream().use { load(it) }
+        }
+        fun secret(prop: String, env: String): String? =
+            localProps.getProperty(prop)?.takeIf { it.isNotBlank() } ?: System.getenv(env)?.takeIf { it.isNotBlank() }
+        val releaseKeystore = file(secret("release.storeFile", "PULSE4_STORE_FILE") ?: "${rootDir}/release.keystore")
+        val releaseStorePass = secret("release.storePassword", "PULSE4_STORE_PASSWORD")
+        if (releaseKeystore.exists() && releaseStorePass != null) {
             create("releaseConfig") {
                 storeFile = releaseKeystore
-                storePassword = "pulse4release"
-                keyAlias = "pulse4key"
-                keyPassword = "pulse4release"
+                storePassword = releaseStorePass
+                keyAlias = secret("release.keyAlias", "PULSE4_KEY_ALIAS") ?: "pulse4key"
+                keyPassword = secret("release.keyPassword", "PULSE4_KEY_PASSWORD") ?: releaseStorePass
             }
         }
     }

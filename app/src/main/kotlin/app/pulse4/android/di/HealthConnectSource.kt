@@ -35,7 +35,8 @@ class HealthConnectSource(private val context: Context, private val sl: ServiceL
         HealthPermission.getReadPermission(BodyFatRecord::class),
     )
     /** Čtení na pozadí a historie před standardním 30denním oknem jsou zvláštní oprávnění; bez nich jen v popředí a v rozsahu. */
-    val optionalPermissions: Set<String> = setOf(HealthPermission.PERMISSION_READ_HEALTH_DATA_IN_BACKGROUND, HealthPermission.PERMISSION_READ_HEALTH_DATA_HISTORY)
+    // Záměrně se nežádají (vyžadují zvláštní schválení Google Play); bez nich jen popředí a 29denní okno.
+    val optionalPermissions: Set<String> = emptySet()
 
     fun available() = HealthConnectClient.getSdkStatus(context) == HealthConnectClient.SDK_AVAILABLE
 

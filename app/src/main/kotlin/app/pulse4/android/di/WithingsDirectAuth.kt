@@ -259,7 +259,7 @@ class WithingsDirectAuth(
         val em = email.trim()
         pendingEmail = em
         pendingPassword = password
-        android.util.Log.i("WithingsDirectAuth", "loginPassword starting for $em")
+        android.util.Log.i("WithingsDirectAuth", "loginPassword starting")
 
         return try {
             val loginUrl = "https://account.withings.com/new_workflow/login?r=https%3A%2F%2Fapp.withings.com%2F"

@@ -244,7 +244,7 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
     fun tryAutoReLogin(): Boolean {
         val email = sl.secrets.getString("withings.web.email")
         val pass = sl.secrets.getString("withings.web.password")
-        android.util.Log.i("Withings", "tryAutoReLogin: email=$email, hasPassword=${!pass.isNullOrBlank()}")
+        android.util.Log.i("Withings", "tryAutoReLogin: hasEmail=${!email.isNullOrBlank()}, hasPassword=${!pass.isNullOrBlank()}")
         if (email.isNullOrBlank() || pass.isNullOrBlank()) return false
         val r = directAuth.loginPassword(email, pass)
         android.util.Log.i("Withings", "tryAutoReLogin result: ${r::class.simpleName}")

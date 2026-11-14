@@ -232,75 +232,8 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
             }
         }.getOrElse { AreaResult.Failed(app.pulse4.provider.ProviderError.Server(500)) }
         runCatching { sl.withings.runImport(nowMs) }
-        runCatching { ensureWeightFallbackLoaded(nowMs) }
         runCatching { sl.withings.syncAndForwardChildWeights(nowMs) }
         return res?.plus(SyncArea.ACTIVITIES to actRes)
-    }
-
-    /**
-     * Zajistí, že pokud v posledních 28 dnech nebylo vážení na váze, načte se buď starší váha z profilu Garminu
-     * (uložená se starším datem, aby na Dnešním přehledu svítila jantarově jako starší hodnota),
-     * případně výchozí historická křivka váhy pro ukázku.
-     */
-    fun ensureWeightFallbackLoaded(nowMs: Long) {
-        if (sl.db.observations().latest(app.pulse4.domain.MetricType.WEIGHT.name) != null) return
-        if (sl.withings.isConnected()) return
-        val zone = ZoneId.of(sl.settings.zoneId)
-        val today = LocalDate.now(zone)
-
-        var profileKg: Double? = null
-        val key = sl.secrets.getString(SecretStore.GARMIN_API_KEY)
-        if (!key.isNullOrBlank()) {
-            runCatching {
-                val cfg = config()
-                val client = okhttp3.OkHttpClient.Builder()
-                    .callTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
-                    .build()
-                val tokenReq = okhttp3.Request.Builder()
-                    .url(cfg.token.url)
-                    .header("Authorization", "ApiKey $key")
-                    .post(okhttp3.FormBody.Builder().build())
-                    .build()
-                val tokenBody = client.newCall(tokenReq).execute().use { it.body?.string().orEmpty().trim() }
-                if (tokenBody.isNotBlank()) {
-                    val authHeader = cfg.authValue.replace("{accessToken}", tokenBody)
-                    val profReq = okhttp3.Request.Builder()
-                        .url("${cfg.baseUrl.trimEnd('/')}/userprofile-service/userprofile/user-settings")
-                        .header(cfg.authHeader, authHeader)
-                        .get()
-                        .build()
-                    val profJson = client.newCall(profReq).execute().use { it.body?.string().orEmpty() }
-                    val root = kotlinx.serialization.json.Json.parseToJsonElement(profJson) as? kotlinx.serialization.json.JsonObject
-                    val userData = root?.get("userData") as? kotlinx.serialization.json.JsonObject
-                    val rawW = userData?.get("weight")?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.doubleOrNull }
-                    if (rawW != null && rawW > 0.0) {
-                        profileKg = if (rawW > 300.0) rawW / 1000.0 else rawW
-                    }
-                }
-            }
-        }
-
-        val baseKg = (profileKg ?: 76.4).coerceIn(35.0, 220.0)
-        // Uložíme historické body končící 3 dny zpět, aby bylo jasně vidět starší měření (jantarová barva na Dnes)
-        val daysAgoList = listOf(12L to (baseKg + 0.5), 9L to (baseKg + 0.3), 6L to (baseKg + 0.1), 3L to baseKg)
-        val rows = daysAgoList.map { (daysAgo, kgVal) ->
-            val d = today.minusDays(daysAgo)
-            val ts = d.atStartOfDay(zone).plusHours(7).toInstant().toEpochMilli()
-            val rounded = kotlin.math.round(kgVal * 10.0) / 10.0
-            app.pulse4.domain.MetricObservation(
-                id = "garmin-hist-weight-$d",
-                provider = Provider.GARMIN_PERSONAL,
-                accountId = sl.settings.accountId,
-                externalId = "hist-w-$d",
-                type = app.pulse4.domain.MetricType.WEIGHT,
-                startUtcMs = ts,
-                endUtcMs = ts,
-                value = rounded,
-                zoneId = sl.settings.zoneId,
-                localDate = d.toString()
-            ).toRow()
-        }
-        sl.db.observations().upsert(rows)
     }
 
     /** Kompletní vymazání všech testovacích dat a reset aktivit k čistému opětovnému stažení. */
@@ -321,11 +254,6 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
         runCatching {
             File(context.noBackupFilesDir, "fit").listFiles()?.forEach { it.delete() }
         }
-    }
-
-    fun ensureSampleActivityLoaded(nowMs: Long): Boolean {
-        seedDemoData(nowMs)
-        return true
     }
 
     /**
@@ -1157,7 +1085,6 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
         val key = sl.secrets.getString(SecretStore.GARMIN_API_KEY)?.trim()?.removePrefix("ApiKey ")?.trim()
         val hasExt = sl.secrets.getString(SecretStore.GARMIN_EXT_TOKENS) != null
         if (key.isNullOrBlank() && !hasExt) {
-            ensureSampleActivityLoaded(nowMs)
             return 0
         }
         return runCatching {

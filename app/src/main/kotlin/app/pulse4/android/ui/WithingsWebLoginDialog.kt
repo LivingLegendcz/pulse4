@@ -752,7 +752,6 @@ fun WithingsWebLoginDialog(
                             var selectedChildId by remember {
                                 mutableStateOf<Long?>(
                                     existingSession?.childUserId?.takeIf { id -> id != selectedPrimaryId && cur.profiles.any { it.id == id } }
-                                        ?: cur.profiles.firstOrNull { it.id != selectedPrimaryId && !it.isPrimary }?.id
                                 )
                             }
                             var saving by remember { mutableStateOf(false) }
@@ -797,6 +796,13 @@ fun WithingsWebLoginDialog(
 
                             cur.profiles.forEach { p ->
                                 val isSelected = p.id == selectedPrimaryId
+                                val parent = p.findParent(cur.profiles)
+                                val roleBadge = when {
+                                    p.isAdult && p.isPrimary -> " (Hlavní účet)"
+                                    p.isAdult -> " (Dospělý)"
+                                    parent != null -> " (Dětský · pod ${parent.firstName})"
+                                    else -> " (Dětský profil)"
+                                }
                                 Card(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -804,6 +810,10 @@ fun WithingsWebLoginDialog(
                                         .clickable {
                                             selectedPrimaryId = p.id
                                             if (selectedChildId == p.id) selectedChildId = null
+                                            val childForAdult = p.childrenUnderThis(cur.profiles).firstOrNull()
+                                            if (childForAdult != null && selectedChildId == null) {
+                                                selectedChildId = childForAdult.id
+                                            }
                                         },
                                     shape = RoundedCornerShape(12.dp),
                                     colors = CardDefaults.cardColors(
@@ -823,19 +833,28 @@ fun WithingsWebLoginDialog(
                                             onClick = {
                                                 selectedPrimaryId = p.id
                                                 if (selectedChildId == p.id) selectedChildId = null
+                                                val childForAdult = p.childrenUnderThis(cur.profiles).firstOrNull()
+                                                if (childForAdult != null && selectedChildId == null) {
+                                                    selectedChildId = childForAdult.id
+                                                }
                                             },
                                             colors = RadioButtonDefaults.colors(selectedColor = Color(0xFF06B6D4))
                                         )
                                         Spacer(Modifier.width(8.dp))
                                         Column(Modifier.weight(1f)) {
                                             Text(
-                                                p.displayName + if (p.isPrimary) " (Hlavní na účtu)" else "",
+                                                p.displayName + roleBadge,
                                                 style = MaterialTheme.typography.bodyMedium,
                                                 fontWeight = FontWeight.Bold,
                                                 color = Color.White
                                             )
+                                            val details = buildList {
+                                                add("ID: ${p.id}")
+                                                p.email?.takeIf { it.isNotBlank() }?.let { add(it) }
+                                                p.shortName.takeIf { it.isNotBlank() }?.let { add(it) }
+                                            }.joinToString(" · ")
                                             Text(
-                                                "ID profilu: ${p.id}" + (p.shortName.takeIf { it.isNotBlank() }?.let { " · $it" } ?: ""),
+                                                details,
                                                 style = MaterialTheme.typography.labelSmall,
                                                 color = Color(0xFF94A3B8)
                                             )
@@ -844,6 +863,7 @@ fun WithingsWebLoginDialog(
                                 }
                             }
 
+                            val childProfiles = cur.profiles.filter { it.id != selectedPrimaryId && it.isChild }
                             if (cur.profiles.size > 1) {
                                 Spacer(Modifier.height(14.dp))
                                 Text(
@@ -852,55 +872,89 @@ fun WithingsWebLoginDialog(
                                     fontWeight = FontWeight.Bold,
                                     color = Color.White
                                 )
-                                Spacer(Modifier.height(6.dp))
-
-                                val candidateChildren = cur.profiles.filter { it.id != selectedPrimaryId }
-                                val isNone = selectedChildId == null
-                                Card(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(vertical = 3.dp)
-                                        .clickable { selectedChildId = null },
-                                    shape = RoundedCornerShape(10.dp),
-                                    colors = CardDefaults.cardColors(
-                                        containerColor = if (isNone) Color(0xFF1E293B) else app.pulse4.android.ui.theme.MineralBackgroundDark
-                                    ),
-                                    border = BorderStroke(1.dp, if (isNone) Color(0xFF38BDF8) else app.pulse4.android.ui.theme.MineralOutlineDark)
-                                ) {
-                                    Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                                        RadioButton(
-                                            selected = isNone,
-                                            onClick = { selectedChildId = null },
-                                            colors = RadioButtonDefaults.colors(selectedColor = Color(0xFF38BDF8))
-                                        )
-                                        Spacer(Modifier.width(8.dp))
-                                        Text("Žádný (pouze můj profil)", style = MaterialTheme.typography.bodySmall, color = Color(0xFF94A3B8))
+                                if (childProfiles.isEmpty()) {
+                                    Spacer(Modifier.height(4.dp))
+                                    Card(
+                                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                        shape = RoundedCornerShape(10.dp),
+                                        colors = CardDefaults.cardColors(containerColor = app.pulse4.android.ui.theme.MineralBackgroundDark),
+                                        border = BorderStroke(1.dp, app.pulse4.android.ui.theme.MineralOutlineDark)
+                                    ) {
+                                        Column(Modifier.padding(12.dp)) {
+                                            Text(
+                                                "Na Withings účtu jsou nyní 2 dospělé profily (${cur.profiles.joinToString { it.displayName }}).",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = Color(0xFFE2E8F0)
+                                            )
+                                            Spacer(Modifier.height(4.dp))
+                                            Text(
+                                                "Pokud Klárka nebo vy vytvoříte dětský profil ve Withings aplikaci, Pulse4 jej automaticky rozpozná (vedený pod daným rodičem) a nabídne pro přeposílání. Mezitím můžete využít váhové pásmo dítěte.",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = Color(0xFF94A3B8)
+                                            )
+                                        }
                                     }
-                                }
+                                } else {
+                                    Text(
+                                        "Vyberte profil dítěte na váze. Druhý dospělý profil zůstává samostatně.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = Color(0xFF94A3B8)
+                                    )
+                                    Spacer(Modifier.height(6.dp))
 
-                                candidateChildren.forEach { cp ->
-                                    val isChild = selectedChildId == cp.id
+                                    val isNone = selectedChildId == null
                                     Card(
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .padding(vertical = 3.dp)
-                                            .clickable { selectedChildId = cp.id },
+                                            .clickable { selectedChildId = null },
                                         shape = RoundedCornerShape(10.dp),
                                         colors = CardDefaults.cardColors(
-                                            containerColor = if (isChild) Color(0xFF1E293B) else app.pulse4.android.ui.theme.MineralBackgroundDark
+                                            containerColor = if (isNone) Color(0xFF1E293B) else app.pulse4.android.ui.theme.MineralBackgroundDark
                                         ),
-                                        border = BorderStroke(1.dp, if (isChild) Color(0xFF38BDF8) else app.pulse4.android.ui.theme.MineralOutlineDark)
+                                        border = BorderStroke(1.dp, if (isNone) Color(0xFF38BDF8) else app.pulse4.android.ui.theme.MineralOutlineDark)
                                     ) {
                                         Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
                                             RadioButton(
-                                                selected = isChild,
-                                                onClick = { selectedChildId = cp.id },
+                                                selected = isNone,
+                                                onClick = { selectedChildId = null },
                                                 colors = RadioButtonDefaults.colors(selectedColor = Color(0xFF38BDF8))
                                             )
                                             Spacer(Modifier.width(8.dp))
-                                            Column {
-                                                Text(cp.displayName, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold, color = Color.White)
-                                                Text("ID profilu: ${cp.id}", style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8))
+                                            Text("Žádný (nepřeposílat)", style = MaterialTheme.typography.bodySmall, color = Color(0xFF94A3B8))
+                                        }
+                                    }
+
+                                    childProfiles.forEach { cp ->
+                                        val isChild = selectedChildId == cp.id
+                                        val parent = cp.findParent(cur.profiles)
+                                        Card(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(vertical = 3.dp)
+                                                .clickable { selectedChildId = cp.id },
+                                            shape = RoundedCornerShape(10.dp),
+                                            colors = CardDefaults.cardColors(
+                                                containerColor = if (isChild) Color(0xFF1E293B) else app.pulse4.android.ui.theme.MineralBackgroundDark
+                                            ),
+                                            border = BorderStroke(1.dp, if (isChild) Color(0xFF38BDF8) else app.pulse4.android.ui.theme.MineralOutlineDark)
+                                        ) {
+                                            Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                                                RadioButton(
+                                                    selected = isChild,
+                                                    onClick = { selectedChildId = cp.id },
+                                                    colors = RadioButtonDefaults.colors(selectedColor = Color(0xFF38BDF8))
+                                                )
+                                                Spacer(Modifier.width(8.dp))
+                                                Column {
+                                                    Text(cp.displayName, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold, color = Color.White)
+                                                    Text(
+                                                        "Dětský profil${parent?.let { " · Vedený pod: ${it.displayName}" } ?: ""} · ID: ${cp.id}",
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = Color(0xFF94A3B8)
+                                                    )
+                                                }
                                             }
                                         }
                                     }

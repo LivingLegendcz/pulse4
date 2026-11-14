@@ -1659,9 +1659,10 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                             }
 
                             val profiles = webSession?.allProfiles.orEmpty()
-                            if (profiles.size > 1) {
+                            val adultProfiles = profiles.filter { it.isAdult }.ifEmpty { profiles }
+                            if (adultProfiles.size > 1) {
                                 Text(
-                                    "Rychlé přepnutí hlavního profilu:",
+                                    "Dospělé profily na účtu (přepnutí hlavního profilu):",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = Color(0xFF94A3B8)
                                 )
@@ -1670,14 +1671,14 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                                     verticalArrangement = Arrangement.spacedBy(4.dp)
                                 ) {
-                                    profiles.forEach { p ->
+                                    adultProfiles.forEach { p ->
                                         val isCurrent = p.id == webSession?.primaryUserId
                                         FilterChip(
                                             selected = isCurrent,
                                             onClick = {
                                                 if (!isCurrent) {
                                                     scope.launch(Dispatchers.IO) {
-                                                        sl.withings.selectProfiles(p.id, webSession?.childUserId)
+                                                        sl.withings.selectProfiles(p.id, null)
                                                         notice = "Přepnuto na profil ${p.displayName} a synchronizováno."
                                                         tick++
                                                     }
@@ -1810,6 +1811,8 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                 // ───────────────────────── RODINA & DĚTSKÝ PROFIL ─────────────────────────
                 val childUid = wCfg?.childWithingsUserId
                 val childName = sl.withings.loadWebSession()?.childUserName
+                val allProfiles = sl.withings.loadWebSession()?.allProfiles.orEmpty()
+                val childProfiles = allProfiles.filter { it.isChild }
                 val hasChildConfig = childUid != null || (wCfg?.childRecipientIdentity ?: "").isNotBlank()
 
                 AccountCard(
@@ -1830,6 +1833,34 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                                 fontWeight = FontWeight.Bold,
                                 color = Color.White
                             )
+
+                            if (childProfiles.isNotEmpty()) {
+                                FlowRow(
+                                    Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    childProfiles.forEach { cp ->
+                                        val isSelected = cp.id.toString() == childUid
+                                        val parent = cp.findParent(allProfiles)
+                                        val parentLabel = parent?.let { " (pod: ${it.firstName})" } ?: ""
+                                        FilterChip(
+                                            selected = isSelected,
+                                            onClick = {
+                                                scope.launch(Dispatchers.IO) {
+                                                    val s = sl.withings.loadWebSession() ?: return@launch
+                                                    val newChildId = if (isSelected) null else cp.id
+                                                    sl.withings.selectProfiles(s.primaryUserId, newChildId)
+                                                    notice = if (isSelected) "Dětský profil odpojen." else "Vybrán dětský profil ${cp.displayName}."
+                                                    tick++
+                                                }
+                                            },
+                                            label = { Text("${cp.displayName}$parentLabel", maxLines = 1, softWrap = false) }
+                                        )
+                                    }
+                                }
+                            }
+
                             Row(
                                 Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),

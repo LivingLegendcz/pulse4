@@ -431,7 +431,10 @@ class WithingsDirectAuth(
             } else {
                 isAwaitingCode = false
                 val primary = profiles.firstOrNull { it.isPrimary } ?: profiles.first()
-                val childCandidate = profiles.firstOrNull { it.id != primary.id && !it.isPrimary }
+                // Druhý dospělý profil na účtu (např. Klárka) je samostatný dospělý, nikoliv automaticky dítě.
+                // Dětský profil se automaticky naváže pouze tehdy, pokud je na účtu skutečný dětský profil
+                // (isChild) vedený přímo pod tímto dospělým účtem (parentAccountId).
+                val childCandidate = primary.childrenUnderThis(profiles).firstOrNull()
                 val session = WithingsWebSession(
                     cookies = cookies,
                     sessionToken = sessionToken,

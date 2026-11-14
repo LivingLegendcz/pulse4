@@ -89,7 +89,11 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
     private val vault = SecretTokenVault(sl.secrets, "withings.tokens")
     private val childVault = SecretTokenVault(sl.secrets, "withings.child.tokens")
     private val http = OkHttpGateway()
-    private val webClient by lazy { WithingsWebClient(http) }
+    private val webClient by lazy {
+        WithingsWebClient(http).apply {
+            onDebugLog = { android.util.Log.w("WithingsUsers", it) }
+        }
+    }
 
     fun loadWebSession(): WithingsWebSession? =
         sl.secrets.getString(WEB_SESSION_KEY)?.let {
@@ -338,7 +342,9 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
             runCatching { webClient.getUsersList(s.cookies, s.sessionToken) }.getOrDefault(emptyList())
         }
         val primary = profiles.firstOrNull { it.id == primaryId } ?: return false
-        val child = childId?.let { cid -> profiles.firstOrNull { it.id == cid } }
+        // Pokud childId není explicitně specifikováno, zkontrolujeme, zda tento dospělý má pod sebou dítě:
+        val effectiveChildId = childId ?: primary.childrenUnderThis(profiles).firstOrNull()?.id
+        val child = effectiveChildId?.let { cid -> profiles.firstOrNull { it.id == cid } }
         val updated = s.copy(
             primaryUserId = primary.id,
             primaryUserName = primary.displayName,
@@ -400,6 +406,27 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
     fun runWebImport(nowMs: Long): AreaResult? {
         val s = loadWebSession() ?: return null
         if (!sl.settings.withingsDirectEnabled || !s.isConnected()) return null
+
+        runCatching {
+            val freshProfiles = webClient.getUsersList(s.cookies, s.sessionToken)
+            if (freshProfiles.isNotEmpty()) {
+                val cur = loadWebSession() ?: s
+                val curPrimary = freshProfiles.firstOrNull { it.id == cur.primaryUserId }
+                val autoChild = if (cur.childUserId == null && curPrimary != null) {
+                    curPrimary.childrenUnderThis(freshProfiles).firstOrNull()
+                } else null
+                val newChildId = cur.childUserId ?: autoChild?.id
+                val newChildName = cur.childUserName ?: autoChild?.displayName
+
+                if (cur.allProfiles != freshProfiles || cur.childUserId != newChildId) {
+                    saveWebSession(cur.copy(
+                        allProfiles = freshProfiles,
+                        childUserId = newChildId,
+                        childUserName = newChildName
+                    ))
+                }
+            }
+        }
 
         val db = sl.db
         val stateStore = RoomAreaStateStore(db, "withings.")

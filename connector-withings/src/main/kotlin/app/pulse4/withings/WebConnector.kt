@@ -55,10 +55,38 @@ data class WithingsUserProfile(
     val birthdate: Long = 0,
     val isPrimary: Boolean = false,
     val timezone: String? = null,
+    val parentAccountId: Long? = null,
+    val email: String? = null,
 ) {
     val displayName: String get() {
         val full = "$firstName $lastName".trim()
         return if (full.isNotBlank()) full else "Profil $id"
+    }
+
+    /** Zda jde o dospělý účet (má vlastní e-mail nebo věk >= 18 let). */
+    val isAdult: Boolean get() {
+        if (!email.isNullOrBlank()) return true
+        if (birthdate > 0L) {
+            val nowSec = System.currentTimeMillis() / 1000L
+            val ageYears = (nowSec - birthdate) / (365.25 * 86400.0)
+            return ageYears >= 18.0
+        }
+        return isPrimary
+    }
+
+    /** Zda jde o dětský profil (nemá vlastní e-mail a věk < 18 let, nebo je vedený pod rodičem). */
+    val isChild: Boolean get() = !isAdult
+
+    /** Nalezne dospělý rodičovský profil v seznamu profilů, pod kterým je toto dítě vedeno. */
+    fun findParent(allProfiles: List<WithingsUserProfile>): WithingsUserProfile? {
+        if (!isChild) return null
+        return allProfiles.firstOrNull { it.isAdult && ((parentAccountId != null && it.parentAccountId == parentAccountId) || it.id == parentAccountId) }
+    }
+
+    /** Nalezne všechny dětské profily vedené pod tímto dospělým účtem. */
+    fun childrenUnderThis(allProfiles: List<WithingsUserProfile>): List<WithingsUserProfile> {
+        if (!isAdult) return emptyList()
+        return allProfiles.filter { it.isChild && ((parentAccountId != null && it.parentAccountId == parentAccountId) || it.parentAccountId == id) }
     }
 }
 
@@ -156,14 +184,14 @@ class WithingsWebClient(
      * Načte seznam profilů z `/cgi-bin/account` (`action=getuserslist`) a pokud je prázdný nebo selže,
      * zkusí záložní `/cgi-bin/v2/account` (`action=get`).
      */
+    var onDebugLog: ((String) -> Unit)? = null
+
     fun getUsersList(cookies: String, sessionToken: String? = null): List<WithingsUserProfile> {
-        val primaryTry = runCatching { fetchUsersFromEndpoint("account", "getuserslist", cookies, sessionToken) }.getOrNull()
-        if (!primaryTry.isNullOrEmpty()) return primaryTry
+        val list1 = runCatching { fetchUsersFromEndpoint("account", "getuserslist", cookies, sessionToken) }.getOrDefault(emptyList())
+        val list2 = runCatching { fetchUsersFromEndpoint("v2/account", "get", cookies, sessionToken) }.getOrDefault(emptyList())
+        val combined = (list1 + list2).distinctBy { it.id }
+        if (combined.isNotEmpty()) return combined
 
-        val fallbackTry = runCatching { fetchUsersFromEndpoint("v2/account", "get", cookies, sessionToken) }.getOrNull()
-        if (fallbackTry != null) return fallbackTry
-
-        // Pokud obě cesty selhaly, vyvoláme první chybu pro řádné zpracování (např. Unauthorized)
         return fetchUsersFromEndpoint("account", "getuserslist", cookies, sessionToken)
     }
 
@@ -175,6 +203,7 @@ class WithingsWebClient(
     ): List<WithingsUserProfile> {
         val form = baseForm(action, cookies, sessionToken)
         val res = post(endpoint, form, cookies, sessionToken)
+        onDebugLog?.invoke("fetchUsersFromEndpoint $endpoint res.body: ${res.body}")
         val body = Wire.check(Wire.parse(res.body))
         return parseUsersFromBody(body)
     }
@@ -196,6 +225,9 @@ class WithingsWebClient(
                 ?: return@mapNotNull null
             val status = o["status"]?.jsonPrimitive?.intOrNull ?: 0
             if (status < 0) return@mapNotNull null
+            val pAccountId = o["idparentaccount"]?.jsonPrimitive?.longOrNull
+                ?: o["parentid"]?.jsonPrimitive?.longOrNull
+            val em = o["email"]?.jsonPrimitive?.contentOrNull
             WithingsUserProfile(
                 id = id,
                 firstName = o["firstname"]?.jsonPrimitive?.contentOrNull ?: "",
@@ -205,7 +237,9 @@ class WithingsWebClient(
                 birthdate = o["birthdate"]?.jsonPrimitive?.longOrNull ?: 0L,
                 isPrimary = o["is_primary"]?.jsonPrimitive?.booleanOrNull
                     ?: (o["is_primary"]?.jsonPrimitive?.intOrNull == 1),
-                timezone = o["timezone"]?.jsonPrimitive?.contentOrNull ?: accountTz
+                timezone = o["timezone"]?.jsonPrimitive?.contentOrNull ?: accountTz,
+                parentAccountId = pAccountId,
+                email = em
             )
         }
     }

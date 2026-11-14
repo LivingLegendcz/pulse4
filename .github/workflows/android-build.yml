@@ -1,16 +1,22 @@
-name: Build Pulse4 Android
+
+name: Build and Publish Pulse4 Android
 
 on:
-  workflow_dispatch:
   push:
     branches:
       - main
+  workflow_dispatch:
+  release:
+    types:
+      - published
 
 permissions:
   contents: read
+  id-token: write
 
 jobs:
   build:
+    name: Build and publish Pulse4
     runs-on: ubuntu-latest
 
     steps:
@@ -27,7 +33,8 @@ jobs:
         uses: android-actions/setup-android@v4
 
       - name: Install Android SDK 36
-        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+        run: |
+          sdkmanager "platforms;android-36" "build-tools;36.0.0"
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -55,13 +62,37 @@ jobs:
 
       - name: Verify AAB signature
         run: |
-          jarsigner -verify app/build/outputs/bundle/release/app-release.aab 2>&1 | tee /tmp/pulse4-signature.txt
+          jarsigner -verify \
+            app/build/outputs/bundle/release/app-release.aab \
+            2>&1 | tee /tmp/pulse4-signature.txt
           grep -q "jar verified" /tmp/pulse4-signature.txt
 
-      - name: Upload signed AAB
+      - name: Upload signed AAB artifact
         uses: actions/upload-artifact@v4
         with:
           name: pulse4-release-signed
           path: app/build/outputs/bundle/release/*.aab
           if-no-files-found: error
           retention-days: 7
+
+      # Publikovani probiha pouze pri GitHub Release.
+      - name: Authenticate to Google Cloud
+        if: github.event_name == 'release'
+        id: auth
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/138742660530/locations/global/workloadIdentityPools/github-pulse4/providers/github-actions
+          service_account: pulse4-github-publisher@pulse4-publishing.iam.gserviceaccount.com
+          create_credentials_file: true
+
+      - name: Publish to Google Play Internal Testing
+        if: github.event_name == 'release'
+        uses: r0adkll/upload-google-play@v1
+        with:
+          serviceAccountJson: ${{ steps.auth.outputs.credentials_file_path }}
+          packageName: app.pulse4
+          releaseFiles: app/build/outputs/bundle/release/*.aab
+          tracks: internal
+          status: completed
+          releaseName: ${{ github.event.release.tag_name }}
+          mappingFile: app/build/outputs/mapping/release/mapping.txt

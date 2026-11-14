@@ -1,6 +1,8 @@
 package app.pulse4.android.reticulum
 
 import android.content.Context
+import android.util.Base64
+import android.util.Log
 import app.pulse4.android.security.SecretStore
 import app.pulse4.provider.ProviderError
 import app.pulse4.sync.Wire
@@ -29,6 +31,7 @@ import okhttp3.Cookie
 import okhttp3.CookieJar
 import okhttp3.FormBody
 import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -41,13 +44,14 @@ sealed interface LoginResult {
 
 @Serializable
 data class GarminExtTokens(
-    val oauth1Token: String,
-    val oauth1Secret: String,
+    val oauth1Token: String = "",
+    val oauth1Secret: String = "",
     val accessToken: String,
     val refreshToken: String,
     val expiresAtMs: Long,
     val refreshExpiresAtMs: Long? = null,
-    val email: String? = null
+    val email: String? = null,
+    val clientId: String = "GARMIN_CONNECT_MOBILE_ANDROID_DI_2025Q2"
 )
 
 /**
@@ -99,7 +103,7 @@ object OAuth1Signer {
         val mac = Mac.getInstance("HmacSHA1")
         mac.init(SecretKeySpec(signingKey.toByteArray(Charsets.UTF_8), "HmacSHA1"))
         val signatureBytes = mac.doFinal(baseString.toByteArray(Charsets.UTF_8))
-        val signature = android.util.Base64.encodeToString(signatureBytes, android.util.Base64.NO_WRAP)
+        val signature = Base64.encodeToString(signatureBytes, Base64.NO_WRAP)
         oauthParams["oauth_signature"] = signature
 
         return "OAuth " + oauthParams.entries.joinToString(", ") {
@@ -115,31 +119,49 @@ object OAuth1Signer {
 }
 
 /**
- * Čistě Kotlinový konektor pro Garmin Connect API (zápis a plánování tréninků, stahování FIT a telemetrie).
+ * Konektor pro Garmin Connect API (zápis a plánování tréninků, stahování FIT a telemetrie).
  * Heslo se nikdy neukládá; relace žije v uložených tokenech (šifrovaně přes Android Keystore).
- * Dlouhodobý OAuth 1.0 token umožňuje automatickou tichou obnovu OAuth 2.0 relace po celý rok.
+ * Autentizace využívá moderní DI-OAuth2 protokol (GARMIN_CONNECT_MOBILE_ANDROID_DI_2025Q2)
+ * se záložním mechanizmem OAuth 1.0 pro starší relace.
  */
 class ExtendedGarminApi(
     private val context: Context,
     private val secrets: SecretStore
 ) : GarminWorkoutApi {
+    companion object {
+        private const val TAG = "ExtendedGarminApi"
+        private const val SSO_BASE_URL = "https://sso.garmin.com/sso"
+        private const val SSO_EMBED_URL = "https://sso.garmin.com/sso/embed"
+        private const val SSO_SIGNIN_URL = "https://sso.garmin.com/sso/signin"
+        private const val DI_TOKEN_URL = "https://diauth.garmin.com/di-oauth2-service/oauth/token"
+        private const val DI_GRANT_TYPE = "https://connectapi.garmin.com/di-oauth2-service/oauth/grant/service_ticket"
+        private val DI_CLIENT_IDS = listOf(
+            "GARMIN_CONNECT_MOBILE_ANDROID_DI_2025Q2",
+            "GARMIN_CONNECT_MOBILE_ANDROID_DI_2024Q4",
+            "GARMIN_CONNECT_MOBILE_ANDROID_DI"
+        )
+        private const val SSO_USER_AGENT = "Mozilla/5.0 (Linux; Android 14; M2007J20CG) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
+        private const val CONNECT_MOBILE_USER_AGENT = "com.garmin.android.apps.connectmobile"
+    }
+
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
-    private val cookieStore = mutableMapOf<String, MutableList<Cookie>>()
+    private val cookieStore = mutableListOf<Cookie>()
 
     private val cookieJar = object : CookieJar {
         override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
             synchronized(cookieStore) {
-                val list = cookieStore.getOrPut(url.host) { mutableListOf() }
                 for (c in cookies) {
-                    list.removeAll { it.name == c.name }
-                    list.add(c)
+                    cookieStore.removeAll { it.name == c.name && it.domain == c.domain && it.path == c.path }
+                    cookieStore.add(c)
                 }
             }
         }
 
         override fun loadForRequest(url: HttpUrl): List<Cookie> {
+            val now = System.currentTimeMillis()
             synchronized(cookieStore) {
-                return cookieStore[url.host]?.filter { it.expiresAt > System.currentTimeMillis() } ?: emptyList()
+                cookieStore.removeAll { it.expiresAt <= now }
+                return cookieStore.filter { it.matches(url) }
             }
         }
     }
@@ -155,104 +177,329 @@ class ExtendedGarminApi(
 
     private var pendingMfaCsrf: String? = null
 
-    fun loginPassword(email: String, password: String): LoginResult = call(mutating = false) {
-        val ssoUrl = "https://sso.garmin.com/sso/signin?id=gauth-widget&embedWidget=true&gauthHost=https%3A%2F%2Fsso.garmin.com%2Fsso&service=https%3A%2F%2Fconnect.garmin.com%2Fmodern%2F&source=https%3A%2F%2Fconnect.garmin.com%2Fsignin&redirectAfterAccountLoginUrl=https%3A%2F%2Fconnect.garmin.com%2Fmodern%2F&redirectAfterAccountCreationUrl=https%3A%2F%2Fconnect.garmin.com%2Fmodern%2F"
-
-        val ssoReq = Request.Builder()
-            .url(ssoUrl)
-            .header("User-Agent", "Mozilla/5.0 (Linux; Android 14; M2007J20CG) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36")
+    private fun buildEmbedUrl(): HttpUrl =
+        SSO_EMBED_URL.toHttpUrl().newBuilder()
+            .addQueryParameter("id", "gauth-widget")
+            .addQueryParameter("embedWidget", "true")
+            .addQueryParameter("gauthHost", SSO_BASE_URL)
             .build()
 
-        val ssoRes = http.newCall(ssoReq).execute()
-        val ssoHtml = ssoRes.body?.string().orEmpty()
+    private fun buildSigninUrl(): HttpUrl =
+        SSO_SIGNIN_URL.toHttpUrl().newBuilder()
+            .addQueryParameter("id", "gauth-widget")
+            .addQueryParameter("embedWidget", "true")
+            .addQueryParameter("gauthHost", SSO_EMBED_URL)
+            .addQueryParameter("service", SSO_EMBED_URL)
+            .addQueryParameter("source", SSO_EMBED_URL)
+            .addQueryParameter("redirectAfterAccountLoginUrl", SSO_EMBED_URL)
+            .addQueryParameter("redirectAfterAccountCreationUrl", SSO_EMBED_URL)
+            .build()
 
-        val csrfMatch = Regex("""name="_csrf"\s+value="([^"]+)"""").find(ssoHtml)
-            ?: Regex("""value="([^"]+)"\s+name="_csrf"""").find(ssoHtml)
+    fun loginPassword(email: String, password: String): LoginResult = call(mutating = false) {
+        Log.d(TAG, "Starting Garmin SSO login for email: $email")
+
+        // 1. GET embed page to initialize cookies
+        val embedUrl = buildEmbedUrl()
+        val embedReq = Request.Builder()
+            .url(embedUrl)
+            .header("User-Agent", SSO_USER_AGENT)
+            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+            .build()
+        val embedRes = http.newCall(embedReq).execute()
+        Log.d(TAG, "SSO embed response code: ${embedRes.code}")
+
+        // 2. GET signin page to obtain CSRF token
+        val signinUrl = buildSigninUrl()
+        val signinGetReq = Request.Builder()
+            .url(signinUrl)
+            .header("User-Agent", SSO_USER_AGENT)
+            .header("Referer", embedUrl.toString())
+            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+            .build()
+        val signinGetRes = http.newCall(signinGetReq).execute()
+        val signinGetHtml = signinGetRes.body?.string().orEmpty()
+        Log.d(TAG, "SSO signin GET response code: ${signinGetRes.code}, body length: ${signinGetHtml.length}")
+
+        val csrfMatch = Regex("""name="_csrf"\s+value="([^"]+)"""").find(signinGetHtml)
+            ?: Regex("""value="([^"]+)"\s+name="_csrf"""").find(signinGetHtml)
         val csrf = csrfMatch?.groupValues?.get(1).orEmpty()
+        if (csrf.isBlank()) {
+            Log.w(TAG, "Failed to extract CSRF token from signin page")
+            throw ProviderError.Unauthorized()
+        }
 
+        // Anti-WAF pause
+        try { Thread.sleep(700) } catch (_: InterruptedException) {}
+
+        // 3. POST credentials
         val formBody = FormBody.Builder()
-            .add("username", email)
+            .add("username", email.trim())
             .add("password", password)
             .add("embed", "true")
             .add("_csrf", csrf)
             .build()
 
         val loginReq = Request.Builder()
-            .url("https://sso.garmin.com/sso/signin")
+            .url(signinUrl)
             .post(formBody)
-            .header("User-Agent", "Mozilla/5.0 (Linux; Android 14; M2007J20CG) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36")
-            .header("origin", "https://sso.garmin.com")
+            .header("User-Agent", SSO_USER_AGENT)
+            .header("Referer", signinUrl.toString())
+            .header("Origin", "https://sso.garmin.com")
+            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
             .build()
 
         val loginRes = http.newCall(loginReq).execute()
+        val loginCode = loginRes.code
         val loginBody = loginRes.body?.string().orEmpty()
+        val finalUrl = loginRes.request.url.toString()
+        Log.d(TAG, "SSO signin POST response code: $loginCode, finalUrl: $finalUrl")
 
-        if (loginBody.contains("loginEnterMfaCode") || loginBody.contains("needs_mfa")) {
+        if (loginCode == 401 || loginBody.contains("Invalid credentials", ignoreCase = true) ||
+            loginBody.contains("incorrect", ignoreCase = true) || loginBody.contains("locked", ignoreCase = true)) {
+            Log.w(TAG, "Garmin SSO credentials rejected (HTTP $loginCode)")
+            throw ProviderError.Unauthorized()
+        }
+        if (loginCode == 429) {
+            Log.w(TAG, "Garmin SSO rate limited (HTTP 429)")
+            throw ProviderError.RateLimited(null)
+        }
+
+        // Check MFA
+        if (loginBody.contains("loginEnterMfaCode") || loginBody.contains("needs_mfa") ||
+            loginBody.contains("mfaMethod") || loginBody.contains("setupEnterMfaCode")) {
+            Log.d(TAG, "Garmin SSO requires MFA")
             val mfaCsrfMatch = Regex("""name="_csrf"\s+value="([^"]+)"""").find(loginBody)
+                ?: Regex("""value="([^"]+)"\s+name="_csrf"""").find(loginBody)
             pendingMfaCsrf = mfaCsrfMatch?.groupValues?.get(1) ?: csrf
+            triggerMfaEmailIfNeeded(loginBody)
             return@call LoginResult.NeedsMfa
         }
 
-        val ticket = extractTicket(loginBody, loginRes.request.url.toString())
-            ?: throw ProviderError.Unauthorized()
+        val ticket = extractTicket(loginBody, finalUrl)
+        if (ticket == null) {
+            Log.w(TAG, "Service ticket not found in login response. URL: $finalUrl, body length: ${loginBody.length}")
+            throw ProviderError.Unauthorized()
+        }
 
+        Log.d(TAG, "Garmin SSO login succeeded, acquired ticket: ${ticket.take(8)}...")
         finishLoginWithTicket(ticket, email)
         LoginResult.Ok
     }
 
+    private fun triggerMfaEmailIfNeeded(html: String) {
+        if (html.contains("codeSentTo")) return
+        val methodMatch = Regex("""var\s+mfaMethod\s*=\s*"([^"]*)"""").find(html)?.groupValues?.get(1) ?: return
+        if (methodMatch.equals("email", ignoreCase = true) || methodMatch.equals("sms", ignoreCase = true)) {
+            val guid = Regex("""var\s+customerGuid\s*=\s*"([^"]*)"""").find(html)?.groupValues?.get(1).orEmpty()
+            val locale = Regex("""var\s+locale\s*=\s*"([^"]*)"""").find(html)?.groupValues?.get(1) ?: "en-US"
+            val payload = """{"customerGuid":"$guid","mfaMethod":"$methodMatch","locale":"$locale"}"""
+                .toRequestBody("application/json".toMediaType())
+            val req = Request.Builder()
+                .url("https://sso.garmin.com/sso/verifyMFA/mfaCode?clientId=gauth-widget")
+                .header("Referer", buildSigninUrl().toString())
+                .header("Origin", "https://sso.garmin.com")
+                .header("Accept", "application/json, text/plain, */*")
+                .header("User-Agent", SSO_USER_AGENT)
+                .post(payload)
+                .build()
+            runCatching { http.newCall(req).execute() }
+        }
+    }
+
     fun resumeMfa(code: String): LoginResult = call(mutating = false) {
         val csrf = pendingMfaCsrf ?: throw ProviderError.Unauthorized()
+        val mfaUrl = SSO_BASE_URL.toHttpUrl().newBuilder()
+            .addPathSegment("verifyMFA")
+            .addPathSegment("loginEnterMfaCode")
+            .addQueryParameter("id", "gauth-widget")
+            .addQueryParameter("embedWidget", "true")
+            .addQueryParameter("gauthHost", SSO_EMBED_URL)
+            .addQueryParameter("service", SSO_EMBED_URL)
+            .addQueryParameter("source", SSO_EMBED_URL)
+            .addQueryParameter("redirectAfterAccountLoginUrl", SSO_EMBED_URL)
+            .addQueryParameter("redirectAfterAccountCreationUrl", SSO_EMBED_URL)
+            .build()
+
         val mfaForm = FormBody.Builder()
             .add("mfa-code", code.trim())
             .add("embed", "true")
             .add("_csrf", csrf)
+            .add("fromPage", "setupEnterMfaCode")
             .build()
 
         val mfaReq = Request.Builder()
-            .url("https://sso.garmin.com/sso/verifyMFA/loginEnterMfaCode")
+            .url(mfaUrl)
             .post(mfaForm)
-            .header("User-Agent", "Mozilla/5.0 (Linux; Android 14; M2007J20CG) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36")
-            .header("origin", "https://sso.garmin.com")
+            .header("User-Agent", SSO_USER_AGENT)
+            .header("Referer", buildSigninUrl().toString())
+            .header("Origin", "https://sso.garmin.com")
             .build()
 
         val mfaRes = http.newCall(mfaReq).execute()
         val mfaBody = mfaRes.body?.string().orEmpty()
+        val finalUrl = mfaRes.request.url.toString()
+        Log.d(TAG, "SSO verifyMFA response code: ${mfaRes.code}, finalUrl: $finalUrl")
 
-        val ticket = extractTicket(mfaBody, mfaRes.request.url.toString())
-            ?: throw ProviderError.Unauthorized()
+        val ticket = extractTicket(mfaBody, finalUrl)
+            ?: run {
+                Log.w(TAG, "Service ticket not found after MFA verification")
+                throw ProviderError.Unauthorized()
+            }
 
+        Log.d(TAG, "Garmin MFA succeeded, acquired ticket: ${ticket.take(8)}...")
         finishLoginWithTicket(ticket, null)
         pendingMfaCsrf = null
         LoginResult.Ok
     }
 
     private fun extractTicket(body: String, requestUrl: String): String? {
-        val match = Regex("""ticket=([A-Za-z0-9\-_]+)""").find(body)
-            ?: Regex("""ticket=([A-Za-z0-9\-_]+)""").find(requestUrl)
-        return match?.groupValues?.get(1)
+        val ticketRegex = Regex("""(?:\?|&|#)ticket=([A-Za-z0-9\-_]+)""")
+        val jsonRegex = Regex("""serviceTicketId"?\s*[:=]\s*"([^"]+)"""")
+        val altRegex = Regex("""ticket=([A-Za-z0-9\-_]+)""")
+
+        return ticketRegex.find(requestUrl)?.groupValues?.get(1)
+            ?: ticketRegex.find(body)?.groupValues?.get(1)
+            ?: jsonRegex.find(body)?.groupValues?.get(1)
+            ?: altRegex.find(body)?.groupValues?.get(1)
     }
 
     private fun finishLoginWithTicket(ticket: String, email: String?) {
-        val preAuthUrl = "https://connectapi.garmin.com/oauth-service/oauth/preauthorized?ticket=$ticket&login-url=https%3A%2F%2Fsso.garmin.com%2Fsso%2Fembed&accepts-mfa-tokens=true"
-        val oauth1Header = OAuth1Signer.generateHeader("GET", preAuthUrl)
+        var lastException: Exception? = null
 
-        val preAuthReq = Request.Builder()
-            .url(preAuthUrl)
-            .header("Authorization", oauth1Header)
-            .header("User-Agent", "com.garmin.android.apps.connectmobile")
+        // 1. Primární strategie: Moderní výměna DI-OAuth2 tokenu
+        for (clientId in DI_CLIENT_IDS) {
+            try {
+                Log.d(TAG, "Attempting DI-OAuth2 token exchange with clientId: $clientId")
+                val tokens = exchangeTicketWithDiOAuth2(ticket, clientId, email)
+                saveTokens(tokens)
+                Log.i(TAG, "DI-OAuth2 exchange successful with clientId: $clientId")
+                return
+            } catch (e: Exception) {
+                lastException = e
+                Log.w(TAG, "DI-OAuth2 exchange failed with clientId: $clientId: ${e.message}")
+            }
+        }
+
+        // 2. Sekundární záloha: Legacy OAuth 1.0 preauthorized exchange
+        try {
+            Log.d(TAG, "Falling back to legacy OAuth 1.0 preauthorized exchange")
+            val preAuthUrl = "https://connectapi.garmin.com/oauth-service/oauth/preauthorized?ticket=$ticket&service=https%3A%2F%2Fsso.garmin.com%2Fsso%2Fembed&accepts-mfa-tokens=true"
+            val oauth1Header = OAuth1Signer.generateHeader("GET", preAuthUrl)
+
+            val preAuthReq = Request.Builder()
+                .url(preAuthUrl)
+                .header("Authorization", oauth1Header)
+                .header("User-Agent", CONNECT_MOBILE_USER_AGENT)
+                .build()
+
+            val preAuthRes = http.newCall(preAuthReq).execute()
+            if (preAuthRes.isSuccessful) {
+                val preAuthBody = preAuthRes.body?.string().orEmpty()
+                val oauth1Token = Regex("""oauth_token=([^&]+)""").find(preAuthBody)?.groupValues?.get(1)
+                val oauth1Secret = Regex("""oauth_token_secret=([^&]+)""").find(preAuthBody)?.groupValues?.get(1)
+                if (!oauth1Token.isNullOrBlank() && !oauth1Secret.isNullOrBlank()) {
+                    val tokens = exchangeOAuth1ForOAuth2(oauth1Token, oauth1Secret, email)
+                    saveTokens(tokens)
+                    Log.i(TAG, "Legacy OAuth 1.0 exchange successful")
+                    return
+                }
+            } else {
+                Log.w(TAG, "Legacy preauthorized exchange failed with HTTP ${preAuthRes.code}")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Legacy OAuth 1.0 exchange failed: ${e.message}")
+            if (lastException == null) lastException = e
+        }
+
+        throw lastException ?: ProviderError.Unauthorized()
+    }
+
+    private fun exchangeTicketWithDiOAuth2(ticket: String, clientId: String, email: String?): GarminExtTokens {
+        val basicAuth = "Basic " + Base64.encodeToString("$clientId:".toByteArray(), Base64.NO_WRAP)
+        val formBody = FormBody.Builder()
+            .add("client_id", clientId)
+            .add("service_ticket", ticket)
+            .add("grant_type", DI_GRANT_TYPE)
+            .add("service_url", SSO_EMBED_URL)
             .build()
 
-        val preAuthRes = http.newCall(preAuthReq).execute()
-        if (!preAuthRes.isSuccessful) throw ProviderError.Unauthorized()
-        val preAuthBody = preAuthRes.body?.string().orEmpty()
+        val req = Request.Builder()
+            .url(DI_TOKEN_URL)
+            .post(formBody)
+            .header("Authorization", basicAuth)
+            .header("User-Agent", CONNECT_MOBILE_USER_AGENT)
+            .header("Accept", "application/json,text/html;q=0.9,*/*;q=0.8")
+            .build()
 
-        val oauth1Token = Regex("""oauth_token=([^&]+)""").find(preAuthBody)?.groupValues?.get(1)
-            ?: throw ProviderError.Unauthorized()
-        val oauth1Secret = Regex("""oauth_token_secret=([^&]+)""").find(preAuthBody)?.groupValues?.get(1)
-            ?: throw ProviderError.Unauthorized()
+        val res = http.newCall(req).execute()
+        if (res.code == 429) throw ProviderError.RateLimited(null)
+        if (!res.isSuccessful) {
+            val errBody = res.body?.string().orEmpty()
+            Log.w(TAG, "DI-OAuth2 exchange HTTP ${res.code}: $errBody")
+            throw ProviderError.Unauthorized()
+        }
 
-        val tokens = exchangeOAuth1ForOAuth2(oauth1Token, oauth1Secret, email)
-        saveTokens(tokens)
+        val jsonText = res.body?.string().orEmpty()
+        val elem = json.parseToJsonElement(jsonText).jsonObject
+        val accessToken = elem["access_token"]?.jsonPrimitive?.contentOrNull ?: throw ProviderError.Unauthorized()
+        val refreshToken = elem["refresh_token"]?.jsonPrimitive?.contentOrNull ?: throw ProviderError.Unauthorized()
+        val expiresInS = elem["expires_in"]?.jsonPrimitive?.longOrNull ?: 86400L
+        val refreshExpiresInS = elem["refresh_token_expires_in"]?.jsonPrimitive?.longOrNull ?: 7776000L
+
+        val now = System.currentTimeMillis()
+        return GarminExtTokens(
+            oauth1Token = "",
+            oauth1Secret = "",
+            accessToken = accessToken,
+            refreshToken = refreshToken,
+            expiresAtMs = now + expiresInS * 1000L,
+            refreshExpiresAtMs = now + refreshExpiresInS * 1000L,
+            email = email,
+            clientId = clientId
+        )
+    }
+
+    private fun refreshDiOAuth2Token(refreshToken: String, clientId: String, email: String?): GarminExtTokens {
+        val basicAuth = "Basic " + Base64.encodeToString("$clientId:".toByteArray(), Base64.NO_WRAP)
+        val formBody = FormBody.Builder()
+            .add("grant_type", "refresh_token")
+            .add("client_id", clientId)
+            .add("refresh_token", refreshToken)
+            .build()
+
+        val req = Request.Builder()
+            .url(DI_TOKEN_URL)
+            .post(formBody)
+            .header("Authorization", basicAuth)
+            .header("User-Agent", CONNECT_MOBILE_USER_AGENT)
+            .header("Accept", "application/json")
+            .build()
+
+        val res = http.newCall(req).execute()
+        if (!res.isSuccessful) {
+            val errBody = res.body?.string().orEmpty()
+            Log.w(TAG, "DI token refresh HTTP ${res.code}: $errBody")
+            throw ProviderError.Unauthorized()
+        }
+
+        val jsonText = res.body?.string().orEmpty()
+        val elem = json.parseToJsonElement(jsonText).jsonObject
+        val newAccessToken = elem["access_token"]?.jsonPrimitive?.contentOrNull ?: throw ProviderError.Unauthorized()
+        val newRefreshToken = elem["refresh_token"]?.jsonPrimitive?.contentOrNull ?: refreshToken
+        val expiresInS = elem["expires_in"]?.jsonPrimitive?.longOrNull ?: 86400L
+        val refreshExpiresInS = elem["refresh_token_expires_in"]?.jsonPrimitive?.longOrNull ?: 7776000L
+
+        val now = System.currentTimeMillis()
+        return GarminExtTokens(
+            oauth1Token = "",
+            oauth1Secret = "",
+            accessToken = newAccessToken,
+            refreshToken = newRefreshToken,
+            expiresAtMs = now + expiresInS * 1000L,
+            refreshExpiresAtMs = now + refreshExpiresInS * 1000L,
+            email = email,
+            clientId = clientId
+        )
     }
 
     private fun exchangeOAuth1ForOAuth2(oauth1Token: String, oauth1Secret: String, email: String?): GarminExtTokens {
@@ -269,7 +516,7 @@ class ExtendedGarminApi(
             .url(exchangeUrl)
             .post(emptyBody)
             .header("Authorization", oauth1Header)
-            .header("User-Agent", "com.garmin.android.apps.connectmobile")
+            .header("User-Agent", CONNECT_MOBILE_USER_AGENT)
             .build()
 
         val exchangeRes = http.newCall(exchangeReq).execute()
@@ -296,7 +543,7 @@ class ExtendedGarminApi(
 
     /**
      * Proaktivní keepalive: zkontroluje expiraci přístupového tokenu a v případě potřeby
-     * provede tichou obnovu přes dlouhodobý OAuth 1.0 token (platný 365 dní).
+     * provede tichou obnovu přes DI-OAuth2 refresh token nebo dlouhodobý OAuth 1.0 token.
      */
     @Synchronized
     fun ensureSession(): Boolean {
@@ -309,11 +556,30 @@ class ExtendedGarminApi(
             return true
         }
 
-        return runCatching {
-            val fresh = exchangeOAuth1ForOAuth2(tokens.oauth1Token, tokens.oauth1Secret, tokens.email)
-            saveTokens(fresh)
-            true
-        }.getOrElse { false }
+        // 1. Zkusit obnovit přes DI-OAuth2 refresh token
+        if (tokens.refreshToken.isNotBlank()) {
+            val refreshed = runCatching {
+                val fresh = refreshDiOAuth2Token(tokens.refreshToken, tokens.clientId, tokens.email)
+                saveTokens(fresh)
+                true
+            }.getOrElse { false }
+            if (refreshed) {
+                Log.d(TAG, "Session refreshed via DI-OAuth2 token")
+                return true
+            }
+        }
+
+        // 2. Fallback: obnovit přes dlouhodobý OAuth 1.0 token (pokud existuje)
+        if (tokens.oauth1Token.isNotBlank() && tokens.oauth1Secret.isNotBlank()) {
+            return runCatching {
+                val fresh = exchangeOAuth1ForOAuth2(tokens.oauth1Token, tokens.oauth1Secret, tokens.email)
+                saveTokens(fresh)
+                Log.d(TAG, "Session refreshed via OAuth 1.0 token")
+                true
+            }.getOrElse { false }
+        }
+
+        return false
     }
 
     private fun getValidAccessToken(): String {
@@ -336,7 +602,7 @@ class ExtendedGarminApi(
         val req = Request.Builder()
             .url(fullUrl)
             .header("Authorization", "Bearer $token")
-            .header("User-Agent", "com.garmin.android.apps.connectmobile")
+            .header("User-Agent", CONNECT_MOBILE_USER_AGENT)
             .build()
 
         val res = http.newCall(req).execute()
@@ -363,7 +629,7 @@ class ExtendedGarminApi(
         val req = Request.Builder()
             .url(url)
             .header("Authorization", "Bearer $token")
-            .header("User-Agent", "com.garmin.android.apps.connectmobile")
+            .header("User-Agent", CONNECT_MOBILE_USER_AGENT)
             .build()
 
         val res = http.newCall(req).execute()
@@ -414,7 +680,7 @@ class ExtendedGarminApi(
             .url(url)
             .post(jsonBody)
             .header("Authorization", "Bearer $token")
-            .header("User-Agent", "com.garmin.android.apps.connectmobile")
+            .header("User-Agent", CONNECT_MOBILE_USER_AGENT)
             .build()
 
         val res = http.newCall(req).execute()
@@ -443,7 +709,7 @@ class ExtendedGarminApi(
             .url(url)
             .post(payload)
             .header("Authorization", "Bearer $token")
-            .header("User-Agent", "com.garmin.android.apps.connectmobile")
+            .header("User-Agent", CONNECT_MOBILE_USER_AGENT)
             .build()
 
         val res = http.newCall(req).execute()
@@ -463,7 +729,7 @@ class ExtendedGarminApi(
         throw if (mutating) ProviderError.Timeout() else ProviderError.Network(e.javaClass.simpleName)
     } catch (e: Exception) {
         val m = e.message.orEmpty()
-        android.util.Log.w("ExtendedGarminApi", "Exception: $m", e)
+        Log.w(TAG, "Exception: $m", e)
         throw when {
             "TooManyRequests" in m || "429" in m -> ProviderError.RateLimited(null)
             "Authentication" in m || "401" in m || "Invalid credentials" in m || "Unexpected title" in m -> ProviderError.Unauthorized()

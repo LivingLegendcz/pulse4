@@ -1,47 +1,81 @@
- // Android aplikace se zahrne jen tehdy, je-li k dispozici Android SDK.
-val hasAndroidSdk = System.getenv("ANDROID_HOME") != null ||
+
+ // Android aplikace se zahrne jen tehdy,
+ // je-li k dispozici Android SDK.
+val hasAndroidSdk =
+    System.getenv("ANDROID_HOME") != null ||
     System.getenv("ANDROID_SDK_ROOT") != null ||
     file("local.properties").let {
-        it.exists() && it.readText().contains("sdk.dir")
+        it.exists() &&
+        it.readText().contains("sdk.dir")
     }
 
 pluginManagement {
-    val android = System.getenv("ANDROID_HOME") != null ||
+
+    val android =
+        System.getenv("ANDROID_HOME") != null ||
         System.getenv("ANDROID_SDK_ROOT") != null ||
         file("local.properties").let {
-            it.exists() && it.readText().contains("sdk.dir")
+            it.exists() &&
+            it.readText().contains("sdk.dir")
         }
 
     repositories {
         gradlePluginPortal()
-        if (android) google()
+
+        if (android) {
+            google()
+        }
+
         mavenCentral()
     }
 
-    // Override vestaveneho R8 z Android Gradle Pluginu 8.13.2.
-    // Kotlin 2.4.x vyzaduje R8 9.1.29 nebo novejsi.
-    // Resi warningy pri zpracovani Kotlin metadat.
+    // R8 override pro Kotlin 2.4.21.
+    //
+    // AGP 8.13.2 obsahuje starsi R8, ktery muze
+    // hlasit chyby pri parsovani Kotlin metadat.
+    //
+    // Kotlin 2.4 vyzaduje R8 9.1.29 nebo novejsi.
+    //
+    // R8 9.1.29 je dostupny v oficialnim
+    // Google Cloud Storage Maven repozitari.
     buildscript {
+
         repositories {
+            maven {
+                url = uri(
+                    "https://storage.googleapis.com/r8-releases/raw"
+                )
+            }
+
             google()
             mavenCentral()
         }
+
         dependencies {
-            classpath("com.android.tools:r8:9.1.29")
+            if (android) {
+                classpath(
+                    "com.android.tools:r8:9.1.29"
+                )
+            }
         }
     }
 }
 
 dependencyResolutionManagement {
+
     repositories {
         mavenCentral()
-        if (hasAndroidSdk) google()
+
+        if (hasAndroidSdk) {
+            google()
+        }
     }
 }
 
 rootProject.name = "pulse4"
 
-// Ciste JVM moduly: sestavitelne a testovatelne bez Android SDK.
+// Ciste JVM moduly:
+// sestavitelne a testovatelne bez Android SDK.
 include(
     ":domain",
     ":analytics",
@@ -56,7 +90,8 @@ include(
     ":ui-logic",
 )
 
-// Android aplikaci pridame pouze pri dostupnem Android SDK.
+// Android aplikaci zahrneme pouze,
+// pokud je dostupne Android SDK.
 if (hasAndroidSdk) {
     include(":app")
 }

@@ -8160,7 +8160,7 @@ fun ActivityDetailScreen(sl: ServiceLocator, id: String, onBack: () -> Unit = {}
                             // Vykreslit VŠECHNY dostupné Garmin grafy pod sebou v samostatných skleněných kartách
                             availableChannels.forEach { ch ->
                                 val chChart = remember(view, ch, axis) { view.chart(ch, axis, buckets = 160) }
-                                val chartStats = remember(chChart, ch) {
+                                val chartStats: String? = remember(chChart, ch) {
                                     val finite = chChart.values.filterNotNull().filter { it.isFinite() }
                                     if (finite.isEmpty()) null
                                     else {

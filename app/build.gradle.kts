@@ -222,7 +222,7 @@ dependencies {
     implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
 
     // Background work, HTTP, Health Connect.
-    implementation("androidx.work:work-runtime-ktx:2.10.3")
+    implementation("androidx.work:work-runtime-ktx:2.12.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("androidx.health.connect:connect-client:1.1.0")
     implementation(

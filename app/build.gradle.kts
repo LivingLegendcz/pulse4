@@ -196,7 +196,7 @@ dependencies {
 
     // Jetpack Compose.
     val compose = platform(
-        "androidx.compose:compose-bom:2025.09.00"
+        "androidx.compose:compose-bom:2026.09.00"
     )
 
     implementation(compose)
@@ -208,25 +208,25 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
 
     implementation("androidx.activity:activity-compose:1.10.1")
-    implementation("androidx.navigation:navigation-compose:2.9.3")
+    implementation("androidx.navigation:navigation-compose:2.10.2")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.9.2")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.9.2")
 
     // Room a sifrovana databaze.
-    implementation("androidx.room:room-runtime:2.7.2")
-    implementation("androidx.room:room-ktx:2.7.2")
-    ksp("androidx.room:room-compiler:2.7.2")
+    implementation("androidx.room:room-runtime:2.8.5")
+    implementation("androidx.room:room-ktx:2.8.5")
+    ksp("androidx.room:room-compiler:2.8.5")
 
     implementation("net.zetetic:sqlcipher-android:4.20.0")
     implementation("androidx.sqlite:sqlite-ktx:2.5.2")
-    implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
+    implementation("org.bouncycastle:bcprov-jdk18on:1.87")
 
     // Background work, HTTP, Health Connect.
-    implementation("androidx.work:work-runtime-ktx:2.10.3")
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("androidx.work:work-runtime-ktx:2.12.0")
+    implementation("com.squareup.okhttp3:okhttp:5.5.1")
     implementation("androidx.health.connect:connect-client:1.1.0")
     implementation(
-        "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2"
+        "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0"
     )
 
     // MapLibre.

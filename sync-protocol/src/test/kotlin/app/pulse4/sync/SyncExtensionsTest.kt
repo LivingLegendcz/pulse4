@@ -133,4 +133,73 @@ class SyncExtensionsTest {
             RnsNodeQr.encode(cfg.copy(port = 0))
         }
     }
+
+    @Test
+    fun wifiFirstThenDelayedXaliCopyReturnsDuplicateAndStaleWithoutOverwriting() {
+        val receipts = mutableMapOf<String, String>()
+        val objects = mutableMapOf<String, Pair<Long, String>>()
+        val store = object : ReceiverStore {
+            override fun <T> inTransaction(block: () -> T): T = block()
+            override fun isVerifiedContact(identity: String): Boolean = identity == "alice"
+            override fun receiptHash(eventId: String): String? = receipts[eventId]
+            override fun recordReceipt(eventId: String, contentHash: String, author: String, appliedAtMs: Long) {
+                receipts[eventId] = contentHash
+            }
+            override fun objectVersion(author: String, objectType: String, objectId: String): Long? =
+                objects["$author/$objectType/$objectId"]?.first
+            override fun putObject(author: String, objectType: String, objectId: String, version: Long, payload: String) {
+                objects["$author/$objectType/$objectId"] = version to payload
+            }
+            override fun removeObject(author: String, objectType: String, objectId: String, version: Long) {
+                objects.remove("$author/$objectType/$objectId")
+            }
+            override fun group(groupId: String): Group? = null
+            override fun putGroup(group: Group) = Unit
+        }
+        val acks = mutableListOf<Ack>()
+        val receiver = Receiver("bob", store, BuiltInHandlers.all(), AckSink { _, a -> acks += a })
+        val builder = MessageBuilder("alice")
+
+        // 1. Alice sends v1 and v2 over local Wi-Fi first -> Bob applies v2
+        val msgV1 = builder.build("bob", Kinds.PROJECTION_UPSERT, "daily", "2026-11-15", 1L, """{"weightKg":75.0}""", 1_000L)
+        val msgV2 = builder.build("bob", Kinds.PROJECTION_UPSERT, "daily", "2026-11-15", 2L, """{"weightKg":74.5}""", 2_000L)
+        val wireV1 = Wire.encode(msgV1)
+        val wireV2 = Wire.encode(msgV2)
+
+        assertTrue(receiver.receive("alice", wireV2, 2_100L) is Outcome.Applied)
+        assertEquals("""{"weightKg":74.5}""", objects["alice/daily/2026-11-15"]?.second)
+
+        // 2. Later, Bob picks up the delayed stored copy of v2 from xali -> Duplicate, data untouched
+        val dupOutcome = receiver.receive("alice", wireV2, 5_000L)
+        assertTrue(dupOutcome is Outcome.Duplicate)
+        assertEquals("""{"weightKg":74.5}""", objects["alice/daily/2026-11-15"]?.second)
+
+        // 3. Later, Bob picks up an even older stored v1 from xali -> Stale, never overwrites v2
+        val staleOutcome = receiver.receive("alice", wireV1, 6_000L)
+        assertTrue(staleOutcome is Outcome.Stale)
+        assertEquals(2L, objects["alice/daily/2026-11-15"]?.first)
+        assertEquals("""{"weightKg":74.5}""", objects["alice/daily/2026-11-15"]?.second)
+    }
+
+    @Test
+    fun handedToTransportRetriesAfterTimeoutAndClearsOnAck() {
+        val outboxStore = InMemoryOutboxStore()
+        val mgr = OutboxManager(outboxStore)
+        val item = OutboxItem("ev-1", "bob", Kinds.PROJECTION_UPSERT, "daily", "2026-11-15", 1L, "g-1", byteArrayOf(1, 2), 1_000L)
+        mgr.enqueue(item)
+
+        // Sent via Wi-Fi or RNS -> HANDED_TO_TRANSPORT
+        mgr.onTransportResult("ev-1", TransportResult.Handed, 1_000L)
+        assertTrue(mgr.due(10_000L).isEmpty())
+
+        // If ACK was lost, item becomes due again after >= 60s timeout
+        val retried = mgr.due(1_000L + 120_000L)
+        assertEquals(1, retried.size)
+        assertEquals("ev-1", retried.first().eventId)
+
+        // Once ACK arrives, item is ACKED and never due again
+        assertTrue(mgr.onAck("bob", Ack("ev-1", Ack.Status.ACCEPTED)))
+        assertEquals(DeliveryState.ACKED, outboxStore.find("ev-1")?.state)
+        assertTrue(mgr.due(1_000L + 240_000L).isEmpty())
+    }
 }

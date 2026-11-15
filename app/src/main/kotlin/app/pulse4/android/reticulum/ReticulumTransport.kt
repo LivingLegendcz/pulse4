@@ -112,7 +112,7 @@ class ReticulumTransport(
         pumpActiveCallback = { outcome ->
             when (outcome) {
                 is Outcome.Rejected -> rejected++
-                is Outcome.AckProcessed -> Unit
+                is Outcome.AckProcessed, is Outcome.Duplicate, is Outcome.Stale -> Unit
                 else -> { received++; onApplied() }
             }
         }

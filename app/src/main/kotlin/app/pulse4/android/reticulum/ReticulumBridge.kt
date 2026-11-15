@@ -63,6 +63,14 @@ data class GatewayHealth(
     val lastError: String? = null,
 )
 
+data class NodeTestResult(
+    val host: String,
+    val port: Int,
+    val reachable: Boolean,
+    val latencyMs: Long,
+    val detail: String,
+)
+
 sealed interface BridgeEvent {
     data class Message(val source: String, val validated: Boolean, val content: String) : BridgeEvent
     data class Delivery(val eventId: String, val state: String, val reason: String?) : BridgeEvent
@@ -660,15 +668,24 @@ class ReticulumBridge(
         }
     }
 
-    fun probeNodeReachability(host: String, port: Int, timeoutMs: Int = 2500): Boolean {
+    fun probeNodeReachability(host: String, port: Int, timeoutMs: Int = 2500): Boolean =
+        testNodeConnection(host, port, timeoutMs).reachable
+
+    fun testNodeConnection(host: String, port: Int, timeoutMs: Int = 3000): NodeTestResult {
         val cleanHost = host.trim()
-        if (cleanHost.isBlank() || port !in 1..65535) return false
+        if (cleanHost.isBlank() || port !in 1..65535) {
+            return NodeTestResult(cleanHost, port, false, 0L, "Neplatná adresa nebo port")
+        }
+        val startedNs = System.nanoTime()
         val socket = Socket()
         return try {
             socket.connect(InetSocketAddress(cleanHost, port), timeoutMs)
-            true
-        } catch (_: Exception) {
-            false
+            val ms = ((System.nanoTime() - startedNs) / 1_000_000L).coerceAtLeast(1L)
+            NodeTestResult(cleanHost, port, true, ms, "TCP spojení OK ($ms ms)")
+        } catch (e: Exception) {
+            val ms = ((System.nanoTime() - startedNs) / 1_000_000L).coerceAtLeast(1L)
+            val reason = e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
+            NodeTestResult(cleanHost, port, false, ms, reason)
         } finally {
             runCatching { socket.close() }
         }

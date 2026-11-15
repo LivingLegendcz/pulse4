@@ -57,6 +57,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -2729,6 +2730,8 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
     var showPublicNodes by remember { mutableStateOf(false) }
     var showQrShare by remember { mutableStateOf(false) }
     var showQrImport by remember { mutableStateOf(false) }
+    val nodeTestResults = remember { mutableStateMapOf<String, app.pulse4.android.reticulum.NodeTestResult>() }
+    var testingNodeKey by remember { mutableStateOf<String?>(null) }
 
     val netData by io(tick) {
         listOf(
@@ -3016,6 +3019,36 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
                         OutlinedButton(onClick = { showQrImport = true }) {
                             Text("Načíst QR kód")
                         }
+                        if (host.isNotBlank()) {
+                            val activePortInt = port.toIntOrNull() ?: 4242
+                            val key = "$host:$activePortInt"
+                            OutlinedButton(
+                                enabled = testingNodeKey != key,
+                                onClick = {
+                                    testingNodeKey = key
+                                    scope.launch(Dispatchers.IO) {
+                                        val res = sl.bridge.testNodeConnection(host, activePortInt)
+                                        nodeTestResults[key] = res
+                                        testingNodeKey = null
+                                    }
+                                }
+                            ) {
+                                Text(if (testingNodeKey == key) "Testuji…" else "Test uzlu")
+                            }
+                        }
+                    }
+
+                    if (host.isNotBlank()) {
+                        val activePortInt = port.toIntOrNull() ?: 4242
+                        val res = nodeTestResults["$host:$activePortInt"]
+                        if (res != null) {
+                            Text(
+                                if (res.reachable) "✓ ${res.detail}" else "✕ Nedostupný: ${res.detail}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (res.reachable) Color(0xFF10B981) else Color(0xFFF87171),
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                        }
                     }
 
                     val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
@@ -3049,13 +3082,15 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
 
             Spacer(Modifier.height(14.dp))
 
-            val pendingCount = outbox.count {
+            val localQueueCount = outbox.count {
                 val st = runCatching { DeliveryState.valueOf(it.state) }.getOrNull()
-                st == DeliveryState.QUEUED || st == DeliveryState.HANDED_TO_TRANSPORT || st == DeliveryState.STORED_IN_PROPAGATION
+                st == DeliveryState.QUEUED || st == DeliveryState.HANDED_TO_TRANSPORT
+            }
+            val storedOnNodeCount = outbox.count {
+                runCatching { DeliveryState.valueOf(it.state) }.getOrNull() == DeliveryState.STORED_IN_PROPAGATION
             }
             val deliveredCount = outbox.count {
-                val st = runCatching { DeliveryState.valueOf(it.state) }.getOrNull()
-                st == DeliveryState.ACKED
+                runCatching { DeliveryState.valueOf(it.state) }.getOrNull() == DeliveryState.ACKED
             }
 
             Card(
@@ -3072,13 +3107,9 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
                         color = Color(0xFF2DD4BF),
                         letterSpacing = 0.8.sp
                     )
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Čeká na odeslání: $pendingCount", style = MaterialTheme.typography.bodyMedium, color = Color.White)
-                        Text("Doručeno: $deliveredCount", style = MaterialTheme.typography.bodyMedium, color = Color(0xFF10B981))
-                    }
+                    Text("V telefonu (čeká na spojení): $localQueueCount", style = MaterialTheme.typography.bodySmall, color = Color.White)
+                    Text("Na nodu (čeká na vyzvednutí): $storedOnNodeCount", style = MaterialTheme.typography.bodySmall, color = Color(0xFF38BDF8))
+                    Text("Vyzvednuto a potvrzeno: $deliveredCount", style = MaterialTheme.typography.bodySmall, color = Color(0xFF10B981))
 
                     Spacer(Modifier.height(4.dp))
                     Text(
@@ -3151,6 +3182,36 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
                         OutlinedButton(onClick = { showQrImport = true }) {
                             Text("Načíst QR kód")
                         }
+                        if (host.isNotBlank()) {
+                            val activePortInt = port.toIntOrNull() ?: 4242
+                            val key = "$host:$activePortInt"
+                            OutlinedButton(
+                                enabled = testingNodeKey != key,
+                                onClick = {
+                                    testingNodeKey = key
+                                    scope.launch(Dispatchers.IO) {
+                                        val res = sl.bridge.testNodeConnection(host, activePortInt)
+                                        nodeTestResults[key] = res
+                                        testingNodeKey = null
+                                    }
+                                }
+                            ) {
+                                Text(if (testingNodeKey == key) "Testuji…" else "Test uzlu")
+                            }
+                        }
+                    }
+
+                    if (host.isNotBlank()) {
+                        val activePortInt = port.toIntOrNull() ?: 4242
+                        val res = nodeTestResults["$host:$activePortInt"]
+                        if (res != null) {
+                            Text(
+                                if (res.reachable) "✓ ${res.detail}" else "✕ Nedostupný: ${res.detail}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (res.reachable) Color(0xFF10B981) else Color(0xFFF87171),
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                        }
                     }
 
                     Spacer(Modifier.height(8.dp))
@@ -3192,8 +3253,30 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
                                             style = MaterialTheme.typography.labelSmall,
                                             color = if (isActive) Color(0xFF10B981) else Color(0xFF94A3B8)
                                         )
+                                        val nodeRes = nodeTestResults["$nHost:$nPort"]
+                                        if (nodeRes != null) {
+                                            Text(
+                                                if (nodeRes.reachable) "✓ ${nodeRes.detail}" else "✕ ${nodeRes.detail}",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = if (nodeRes.reachable) Color(0xFF10B981) else Color(0xFFF87171),
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                        }
                                     }
                                     Row(verticalAlignment = Alignment.CenterVertically) {
+                                        TextButton(
+                                            enabled = testingNodeKey != "$nHost:$nPort",
+                                            onClick = {
+                                                val k = "$nHost:$nPort"
+                                                testingNodeKey = k
+                                                scope.launch(Dispatchers.IO) {
+                                                    nodeTestResults[k] = sl.bridge.testNodeConnection(nHost, nPort)
+                                                    testingNodeKey = null
+                                                }
+                                            }
+                                        ) {
+                                            Text(if (testingNodeKey == "$nHost:$nPort") "…" else "Test", maxLines = 1, softWrap = false)
+                                        }
                                         if (!isActive) {
                                             TextButton(
                                                 onClick = {
@@ -3406,32 +3489,61 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
                             }
                         }
 
-                        val pendingRows = outbox.filter {
+                        val localPendingRows = outbox.filter {
                             val st = runCatching { DeliveryState.valueOf(it.state) }.getOrNull()
-                            st == DeliveryState.QUEUED || st == DeliveryState.HANDED_TO_TRANSPORT || st == DeliveryState.STORED_IN_PROPAGATION
+                            st == DeliveryState.QUEUED || st == DeliveryState.HANDED_TO_TRANSPORT
                         }
-                        val advListPendingCount = pendingRows.size
-                        val advListDeliveredCount = outbox.count {
+                        val storedOnNodeRows = outbox.filter {
+                            runCatching { DeliveryState.valueOf(it.state) }.getOrNull() == DeliveryState.STORED_IN_PROPAGATION
+                        }
+                        val ackedRows = outbox.filter {
                             runCatching { DeliveryState.valueOf(it.state) }.getOrNull() == DeliveryState.ACKED
                         }
                         Spacer(Modifier.height(10.dp))
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                            Text("Odchozí fronta zpráv ($advListPendingCount čekajících · $advListDeliveredCount doručených):", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = Color(0xFF94A3B8), modifier = Modifier.weight(1f))
-                            if (advListDeliveredCount > 0) {
+                            Text(
+                                "Fronta: ${localPendingRows.size} v telefonu · ${storedOnNodeRows.size} na nodu · ${ackedRows.size} vyzvednuto",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF94A3B8),
+                                modifier = Modifier.weight(1f)
+                            )
+                            if (ackedRows.isNotEmpty()) {
                                 TextButton(onClick = { scope.launch(Dispatchers.IO) { sl.db.outbox().purge(System.currentTimeMillis()) } }) {
-                                    Text("Vyčistit doručené", fontSize = 11.sp)
+                                    Text("Vyčistit vyzvednuté", fontSize = 11.sp)
                                 }
                             }
                         }
-                        if (pendingRows.isEmpty()) {
-                            Text("Všechny zprávy byly doručeny, fronta je prázdná.", style = MaterialTheme.typography.bodySmall, color = Color(0xFF94A3B8))
+                        if (localPendingRows.isEmpty() && storedOnNodeRows.isEmpty()) {
+                            Text("Žádné zprávy nečekají na odeslání ani na vyzvednutí.", style = MaterialTheme.typography.bodySmall, color = Color(0xFF94A3B8))
                         }
-                        pendingRows.take(10).forEach { o ->
-                            val line = Status.outboxLine(o.kind, "${o.objectType}/${o.objectId}", o.recipient, DeliveryState.valueOf(o.state), o.attempts, o.lastError)
-                            Row(Modifier.fillMaxWidth().padding(vertical = 3.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-                                Column(Modifier.weight(1f)) {
+                        if (storedOnNodeRows.isNotEmpty()) {
+                            Text("Na nodu (čeká na vyzvednutí):", style = MaterialTheme.typography.labelSmall, color = Color(0xFF38BDF8), fontWeight = FontWeight.Bold)
+                            storedOnNodeRows.take(10).forEach { o ->
+                                val line = Status.outboxLine(o.kind, "${o.objectType}/${o.objectId}", o.recipient, DeliveryState.valueOf(o.state), o.attempts, o.lastError)
+                                Column(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+                                    Text(line.title, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
+                                    Text(line.state + (line.detail?.let { " · $it" } ?: ""), style = MaterialTheme.typography.labelSmall, color = Color(0xFF38BDF8))
+                                }
+                            }
+                        }
+                        if (localPendingRows.isNotEmpty()) {
+                            Text("V telefonu (čeká / předáno síti):", style = MaterialTheme.typography.labelSmall, color = Color(0xFFFBBF24), fontWeight = FontWeight.Bold)
+                            localPendingRows.take(10).forEach { o ->
+                                val line = Status.outboxLine(o.kind, "${o.objectType}/${o.objectId}", o.recipient, DeliveryState.valueOf(o.state), o.attempts, o.lastError)
+                                Column(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
                                     Text(line.title, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
                                     Text(line.state + (line.detail?.let { " · $it" } ?: ""), style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8))
+                                }
+                            }
+                        }
+                        if (ackedRows.isNotEmpty()) {
+                            Text("Nedávno vyzvednuto (${ackedRows.size}):", style = MaterialTheme.typography.labelSmall, color = Color(0xFF10B981), fontWeight = FontWeight.Bold)
+                            ackedRows.take(5).forEach { o ->
+                                val line = Status.outboxLine(o.kind, "${o.objectType}/${o.objectId}", o.recipient, DeliveryState.valueOf(o.state), o.attempts, o.lastError)
+                                Column(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+                                    Text(line.title, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
+                                    Text("Vyzvednuto a potvrzeno příjemcem", style = MaterialTheme.typography.labelSmall, color = Color(0xFF10B981))
                                 }
                             }
                         }

@@ -1,9 +1,12 @@
 package app.pulse4.android.di
 
+import app.pulse4.sync.Wire
 import app.pulse4.withings.WithingsUserProfile
 import app.pulse4.withings.WithingsWebClient
 import app.pulse4.withings.WithingsWebSession
 import java.util.concurrent.TimeUnit
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.builtins.ListSerializer
 import okhttp3.Cookie
 import okhttp3.CookieJar
 import okhttp3.FormBody
@@ -17,24 +20,99 @@ sealed interface WithingsLoginResult {
     data class Error(val message: String) : WithingsLoginResult
 }
 
-private class InMemoryCookieJar : CookieJar {
+@Serializable
+private data class PersistedCookie(
+    val name: String,
+    val value: String,
+    val domain: String,
+    val path: String = "/",
+    val expiresAt: Long = 253402300799999L,
+    val secure: Boolean = true,
+    val httpOnly: Boolean = false,
+    val hostOnly: Boolean = false,
+) {
+    fun toOkHttpCookie(): Cookie? = runCatching {
+        Cookie.Builder()
+            .name(name)
+            .value(value)
+            .apply {
+                if (hostOnly) hostOnlyDomain(domain) else domain(domain)
+                path(path)
+                expiresAt(expiresAt)
+                if (secure) secure()
+                if (httpOnly) httpOnly()
+            }
+            .build()
+    }.getOrNull()
+
+    companion object {
+        fun from(c: Cookie): PersistedCookie = PersistedCookie(
+            name = c.name,
+            value = c.value,
+            domain = c.domain,
+            path = c.path,
+            expiresAt = c.expiresAt,
+            secure = c.secure,
+            httpOnly = c.httpOnly,
+            hostOnly = c.hostOnly
+        )
+    }
+}
+
+private class PersistentCookieJar(
+    private val loadPersisted: () -> String? = { null },
+    private val savePersisted: (String) -> Unit = {},
+) : CookieJar {
     private val store = mutableListOf<Cookie>()
+    private var loaded = false
 
     @Synchronized
-    override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
+    private fun ensureLoaded() {
+        if (loaded) return
+        loaded = true
+        val raw = loadPersisted()?.takeIf { it.isNotBlank() } ?: return
         val now = System.currentTimeMillis()
-        for (c in cookies) {
-            store.removeAll { it.name == c.name && it.domain == c.domain && it.path == c.path }
-            if (c.value == "deleted" || c.expiresAt <= now) {
-                store.removeAll { it.name == c.name }
-            } else if (c.value.isNotEmpty()) {
-                store.add(c)
+        val parsed = runCatching {
+            Wire.json.decodeFromString(ListSerializer(PersistedCookie.serializer()), raw)
+        }.getOrNull() ?: return
+        for (p in parsed) {
+            if (p.expiresAt > now && p.value.isNotBlank() && p.value != "deleted") {
+                p.toOkHttpCookie()?.let { store.add(it) }
             }
         }
     }
 
     @Synchronized
+    fun persistNow() {
+        ensureLoaded()
+        val now = System.currentTimeMillis()
+        val toSave = store
+            .filter { it.expiresAt > now && it.value.isNotBlank() && it.value != "deleted" }
+            .map { PersistedCookie.from(it) }
+        val encoded = runCatching {
+            Wire.json.encodeToString(ListSerializer(PersistedCookie.serializer()), toSave)
+        }.getOrNull() ?: return
+        savePersisted(encoded)
+    }
+
+    @Synchronized
+    override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
+        ensureLoaded()
+        val now = System.currentTimeMillis()
+        for (c in cookies) {
+            store.removeAll { it.name == c.name && it.domain == c.domain && it.path == c.path }
+            if (c.value == "deleted" || c.expiresAt <= now) {
+                store.removeAll { it.name == c.name && it.domain == c.domain }
+            } else if (c.value.isNotEmpty()) {
+                store.add(c)
+            }
+        }
+        persistNow()
+    }
+
+    @Synchronized
     override fun loadForRequest(url: HttpUrl): List<Cookie> {
+        ensureLoaded()
         val now = System.currentTimeMillis()
         store.removeAll { it.expiresAt < now || it.value == "deleted" }
         return store.filter { it.matches(url) }
@@ -42,6 +120,7 @@ private class InMemoryCookieJar : CookieJar {
 
     @Synchronized
     fun getCookieString(): String {
+        ensureLoaded()
         val byName = LinkedHashMap<String, String>()
         for (c in store) {
             if (c.value.isNotBlank() && c.value != "deleted") {
@@ -53,16 +132,21 @@ private class InMemoryCookieJar : CookieJar {
 
     @Synchronized
     fun getSessionToken(): String? {
+        ensureLoaded()
         // Pouze skutečný `session_token`. Hodnota `session_key` / `sessionid` je identifikátor relace,
         // který server čte z cookie – nesmí se vydávat za session_token.
         return store.lastOrNull { it.name == "session_token" && it.value.isNotBlank() && it.value != "deleted" }?.value
     }
 
     @Synchronized
-    fun describe(): String = store.joinToString(", ") { "${it.name}@${it.domain}" }
+    fun describe(): String {
+        ensureLoaded()
+        return store.joinToString(", ") { "${it.name}@${it.domain}" }
+    }
 
     @Synchronized
     fun hasSession(): Boolean {
+        ensureLoaded()
         return store.any {
             (it.name == "sessionid" || it.name == "session_token" || it.name == "session_key") &&
                 it.value.isNotBlank() && it.value != "deleted"
@@ -70,12 +154,21 @@ private class InMemoryCookieJar : CookieJar {
     }
 
     @Synchronized
+    fun hasAnyCookies(): Boolean {
+        ensureLoaded()
+        val now = System.currentTimeMillis()
+        return store.any { it.expiresAt > now && it.value.isNotBlank() && it.value != "deleted" }
+    }
+
+    @Synchronized
     fun hasWorkflowCookie(): Boolean {
+        ensureLoaded()
         return store.any { it.name == "w_uuid" && it.value.isNotBlank() }
     }
 
     @Synchronized
     fun setEmailCookie(email: String) {
+        ensureLoaded()
         val encoded = java.net.URLEncoder.encode(email, "UTF-8")
         val cookie = Cookie.Builder()
             .name("email")
@@ -88,21 +181,41 @@ private class InMemoryCookieJar : CookieJar {
         store.add(cookie)
     }
 
+    /**
+     * Odstraní pouze expirovaný aplikační `session_key`/`sessionid`/`session_token` a dočasné přihlašovací
+     * workflow cookies (`signin_authorize_state`, `email`), ale ZACHOVÁ dlouhodobé důvěryhodné cookies
+     * zařízení a SSO (`w_uuid`, `remember*`, `account*`, apod.), aby server nevyžadoval znovu 2FA.
+     */
+    @Synchronized
+    fun clearSessionAndWorkflowCookies() {
+        ensureLoaded()
+        val transientNames = setOf(
+            "session_key", "sessionid", "session_token",
+            "signin_authorize_state", "email"
+        )
+        store.removeAll { it.name in transientNames }
+    }
+
     @Synchronized
     fun clear() {
+        loaded = true
         store.clear()
+        savePersisted("[]")
     }
 }
 
 /**
  * Přímé přihlášení k Withings v pozadí bez nutnosti otevírat WebView.
  * Uživateli se zobrazují pouze nativní pole v tmavém motivu aplikace Pulse4.
- * Extrahuje skrytá CSRF/stavová pole z HTML formulářů a zachytává přesměrování na 2FA.
+ * Extrahuje skrytá CSRF/stavová pole z HTML formulářů, uchovává dlouhodobé cookies zařízení
+ * v šifrovaném úložišti a zachytává přesměrování na 2FA.
  */
 class WithingsDirectAuth(
-    private val webClient: WithingsWebClient
+    private val webClient: WithingsWebClient,
+    loadPersistedCookies: () -> String? = { null },
+    savePersistedCookies: (String) -> Unit = {},
 ) {
-    private val cookieJar = InMemoryCookieJar()
+    private val cookieJar = PersistentCookieJar(loadPersistedCookies, savePersistedCookies)
     private val client: OkHttpClient = OkHttpClient.Builder()
         .cookieJar(cookieJar)
         .callTimeout(30, TimeUnit.SECONDS)
@@ -153,12 +266,54 @@ class WithingsDirectAuth(
         return visibleAlertRegex.containsMatchIn(html)
     }
 
+    fun clearPersistedCookies() {
+        cookieJar.clear()
+        isAwaitingCode = false
+    }
+
+    /**
+     * Tiché obnovení webové relace Withings pomocí uložených dlouhodobých SSO / důvěryhodných cookies
+     * na `account.withings.com`. Funguje i bez hesla (např. po přihlášení přes 8místný kód nebo Google/Apple),
+     * dokud platí SSO relace na account.withings.com.
+     */
+    fun trySilentSsoRefresh(): WithingsLoginResult {
+        if (!cookieJar.hasAnyCookies()) {
+            return WithingsLoginResult.Error("Žádné uložené cookies pro tiché obnovení.")
+        }
+        cookieJar.clearSessionAndWorkflowCookies()
+        return try {
+            val urls = listOf(
+                "https://account.withings.com/new_workflow/login?r=https%3A%2F%2Fapp.withings.com%2F",
+                "https://account.withings.com/connection/login?r=https%3A%2F%2Fapp.withings.com%2F"
+            )
+            for (u in urls) {
+                val req = Request.Builder()
+                    .url(u)
+                    .header("User-Agent", ua)
+                    .get()
+                    .build()
+                client.newCall(req).execute().use { res ->
+                    val finalHttpUrl = res.request.url
+                    if (finalHttpUrl.host.equals("app.withings.com", ignoreCase = true) || cookieJar.hasSession()) {
+                        android.util.Log.i("WithingsDirectAuth", "trySilentSsoRefresh: SSO redirect succeeded via $u")
+                        val fin = finishLogin()
+                        if (fin is WithingsLoginResult.Ok) return fin
+                    }
+                }
+            }
+            WithingsLoginResult.Error("Tiché SSO obnovení nevyústilo v aktivní relaci.")
+        } catch (e: Exception) {
+            android.util.Log.w("WithingsDirectAuth", "trySilentSsoRefresh exception: ${e.message}")
+            WithingsLoginResult.Error(e.message ?: "Chyba sítě při tichém obnovení relace.")
+        }
+    }
+
     /**
      * Vyžádá zaslání 8místného přihlašovacího kódu na e-mail (funguje pro účty Google, Apple i účty bez hesla).
      * Vše probíhá na pozadí bez WebView.
      */
     fun requestEmailCode(email: String): WithingsLoginResult {
-        cookieJar.clear()
+        cookieJar.clearSessionAndWorkflowCookies()
         val em = email.trim()
         if (em.isBlank() || !em.contains("@")) {
             return WithingsLoginResult.Error("Zadejte platnou e-mailovou adresu vašeho účtu Withings (nebo Google / Apple účtu).")
@@ -255,7 +410,7 @@ class WithingsDirectAuth(
         if (password.isBlank()) {
             return WithingsLoginResult.Error("Zadejte heslo k účtu Withings.")
         }
-        cookieJar.clear()
+        cookieJar.clearSessionAndWorkflowCookies()
         val em = email.trim()
         pendingEmail = em
         pendingPassword = password
@@ -269,7 +424,13 @@ class WithingsDirectAuth(
                 .header("User-Agent", ua)
                 .get()
                 .build()
-            client.newCall(req1).execute().close()
+            client.newCall(req1).execute().use { res1 ->
+                if (isLoggedInUrl(res1.request.url)) {
+                    android.util.Log.i("WithingsDirectAuth", "loginPassword: req1 SSO already succeeded")
+                    val fin = finishLogin()
+                    if (fin is WithingsLoginResult.Ok) return fin
+                }
+            }
 
             // 2. Nastavíme cookie `email` přímo v cookieJar bez odeslání POST /login
             // Tím Withings nepošle zbytečný 8místný OTP kód do schránky, pokud je heslo platné!

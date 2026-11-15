@@ -363,4 +363,60 @@ class WithingsWebTest {
         val users = WithingsWebClient(fakeHttp).getUsersList("session_key=key456; session_token=tok123; w_uuid=x", "tok123")
         assertEquals(1, users.size)
     }
+
+    @Test
+    fun testExtendSessionCapturesLowercaseHttp2SetCookieHeader() {
+        val fakeHttp = object : HttpGateway {
+            override fun get(url: String, headers: Map<String, String>): HttpResponse = error("unused")
+            override fun postForm(url: String, form: Map<String, String>, headers: Map<String, String>): HttpResponse {
+                return HttpResponse(
+                    code = 200,
+                    headers = mapOf(
+                        "set-cookie" to "session_key=rotated-key-777; Path=/; HttpOnly; Secure; session_token=rotated-tok-888; Path=/; Priority=High"
+                    ),
+                    body = """{"status":0,"body":{"sessionid":"rotated-key-777"}}"""
+                )
+            }
+        }
+        val extended = requireNotNull(WithingsWebClient(fakeHttp).extendSession("session_key=old-key-111; w_uuid=abc", null))
+        assertEquals("rotated-tok-888", extended.sessionToken)
+        assertTrue(extended.cookies.contains("session_key=rotated-key-777"))
+        assertTrue(extended.cookies.contains("session_token=rotated-tok-888"))
+        assertTrue(extended.cookies.contains("w_uuid=abc"))
+        assertFalse(extended.cookies.contains("Priority="))
+    }
+
+    @Test
+    fun testRefreshSessionUsesFallbackWhenExtendFails() {
+        val fakeHttp = object : HttpGateway {
+            override fun get(url: String, headers: Map<String, String>): HttpResponse = error("unused")
+            override fun postForm(url: String, form: Map<String, String>, headers: Map<String, String>): HttpResponse {
+                return HttpResponse(200, emptyMap(), """{"status":2555,"body":{}}""")
+            }
+        }
+        var session = WithingsWebSession(
+            cookies = "session_key=expired",
+            sessionToken = "expired",
+            primaryUserId = 1001L,
+            primaryUserName = "Petr",
+            lastExtendedMs = 1730950000_000L
+        )
+        var fallbackCalled = false
+        val fetcher = WithingsWebFetcher(
+            client = WithingsWebClient(fakeHttp),
+            sessionProvider = { session },
+            onSessionExtended = { session = it },
+            defaultZone = "Europe/Prague",
+            existingIds = { _, _ -> emptySet() },
+            nowMs = { 1730950000_000L },
+            onRefreshFallback = {
+                fallbackCalled = true
+                session.copy(cookies = "session_key=fresh-from-sso", sessionToken = "fresh-tok")
+            }
+        )
+        fetcher.refreshSession()
+        assertTrue(fallbackCalled)
+        assertEquals("fresh-tok", session.sessionToken)
+        assertTrue(session.cookies.contains("session_key=fresh-from-sso"))
+    }
 }

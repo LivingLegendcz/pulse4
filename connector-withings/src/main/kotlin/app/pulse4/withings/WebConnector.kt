@@ -254,10 +254,11 @@ class WithingsWebClient(
         val env = runCatching { Wire.parse(res.body) }.getOrNull() ?: return null
         if (env.status != 0) return null
         val body = env.body ?: return null
+        val setCookie = res.headers.entries.firstOrNull { it.key.equals("Set-Cookie", ignoreCase = true) }?.value
         val newToken = body["session_token"]?.jsonPrimitive?.contentOrNull
-            ?: extractCookieValue(res.headers["Set-Cookie"].orEmpty(), "session_token")
+            ?: extractCookieValue(setCookie.orEmpty(), "session_token")
             ?: sessionToken
-        var updatedCookies = mergeCookies(cookies, res.headers["Set-Cookie"], newToken)
+        var updatedCookies = mergeCookies(cookies, setCookie, newToken)
         // Nové sessionid z prodloužení = nová hodnota cookie session_key
         body["sessionid"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }?.let { sid ->
             updatedCookies = mergeCookies(updatedCookies, "session_key=$sid", null)
@@ -449,7 +450,7 @@ class WithingsWebClient(
                     val k = part.substring(0, idx).trim()
                     val v = part.substring(idx + 1).trim()
                     val lower = k.lowercase()
-                    if (lower !in setOf("path", "domain", "expires", "max-age", "samesite", "secure", "httponly") &&
+                    if (lower !in setOf("path", "domain", "expires", "max-age", "samesite", "secure", "httponly", "priority") &&
                         v.isNotEmpty() && v != "deleted"
                     ) {
                         map[k] = v
@@ -676,6 +677,7 @@ class WithingsWebFetcher(
     private val initialDays: Int = 730, // 2 roky historie při prvním importu
     private val config: WithingsWebConfig = WithingsWebConfig(),
     private val existingHeartRates: () -> Map<Long, Double> = { emptyMap() },
+    private val onRefreshFallback: (() -> WithingsWebSession?)? = null,
 ) : AreaFetcher {
     var skippedItems = 0
         private set
@@ -686,10 +688,10 @@ class WithingsWebFetcher(
         if (!s.isConnected()) throw ProviderError.Unauthorized()
 
         val now = nowMs()
-        // Proaktivní udržování relace: pokud od posledního prodloužení uplynula více než 1 hodina,
+        // Proaktivní udržování relace: pokud od posledního prodloužení uplynulo více než 30 minut,
         // bezpečně relaci prodloužíme přes scalews.withings.com ještě před vypršením tokenu.
         val lastExt = s.lastExtendedMs ?: 0L
-        if (now - lastExt > 1 * 3600 * 1000L) {
+        if (now - lastExt > 30 * 60 * 1000L) {
             val extended = runCatching { client.extendSession(s.cookies, s.sessionToken) }.getOrNull()
             if (extended != null) {
                 val updated = s.copy(
@@ -775,12 +777,21 @@ class WithingsWebFetcher(
 
     override fun refreshSession() {
         val s = sessionProvider() ?: throw ProviderError.Unauthorized()
-        val extended = client.extendSession(s.cookies, s.sessionToken) ?: throw ProviderError.Unauthorized()
-        val updated = s.copy(
-            sessionToken = extended.sessionToken ?: s.sessionToken,
-            cookies = extended.cookies,
-            lastExtendedMs = nowMs()
-        )
-        onSessionExtended(updated)
+        val extended = runCatching { client.extendSession(s.cookies, s.sessionToken) }.getOrNull()
+        if (extended != null) {
+            val updated = s.copy(
+                sessionToken = extended.sessionToken ?: s.sessionToken,
+                cookies = extended.cookies,
+                lastExtendedMs = nowMs()
+            )
+            onSessionExtended(updated)
+            return
+        }
+        val fallbackSession = runCatching { onRefreshFallback?.invoke() }.getOrNull()
+        if (fallbackSession != null && fallbackSession.isConnected()) {
+            onSessionExtended(fallbackSession)
+            return
+        }
+        throw ProviderError.Unauthorized()
     }
 }

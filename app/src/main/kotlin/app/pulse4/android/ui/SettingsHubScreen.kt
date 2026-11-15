@@ -3307,8 +3307,16 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        val advPendingRows = outbox.filter {
+                            val st = runCatching { DeliveryState.valueOf(it.state) }.getOrNull()
+                            st == DeliveryState.QUEUED || st == DeliveryState.HANDED_TO_TRANSPORT || st == DeliveryState.STORED_IN_PROPAGATION
+                        }
+                        val advPendingCount = advPendingRows.size
+                        val advDeliveredCount = outbox.count {
+                            runCatching { DeliveryState.valueOf(it.state) }.getOrNull() == DeliveryState.ACKED
+                        }
                         Text(
-                            "KRYPTOGRAFICKÁ ADRESA & ODCHOZÍ FRONTA (${outbox.size})",
+                            "KRYPTOGRAFICKÁ ADRESA & ODCHOZÍ FRONTA ($advPendingCount čekajících)",
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.ExtraBold,
                             color = Color(0xFF2DD4BF),
@@ -3398,12 +3406,27 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
                             }
                         }
 
-                        Spacer(Modifier.height(10.dp))
-                        Text("Odchozí fronta zpráv (${outbox.size}):", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = Color(0xFF94A3B8))
-                        if (outbox.isEmpty()) {
-                            Text("Všechny zprávy byly odeslány, fronta je prázdná.", style = MaterialTheme.typography.bodySmall, color = Color(0xFF94A3B8))
+                        val pendingRows = outbox.filter {
+                            val st = runCatching { DeliveryState.valueOf(it.state) }.getOrNull()
+                            st == DeliveryState.QUEUED || st == DeliveryState.HANDED_TO_TRANSPORT || st == DeliveryState.STORED_IN_PROPAGATION
                         }
-                        outbox.take(10).forEach { o ->
+                        val advListPendingCount = pendingRows.size
+                        val advListDeliveredCount = outbox.count {
+                            runCatching { DeliveryState.valueOf(it.state) }.getOrNull() == DeliveryState.ACKED
+                        }
+                        Spacer(Modifier.height(10.dp))
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                            Text("Odchozí fronta zpráv ($advListPendingCount čekajících · $advListDeliveredCount doručených):", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = Color(0xFF94A3B8), modifier = Modifier.weight(1f))
+                            if (advListDeliveredCount > 0) {
+                                TextButton(onClick = { scope.launch(Dispatchers.IO) { sl.db.outbox().purge(System.currentTimeMillis()) } }) {
+                                    Text("Vyčistit doručené", fontSize = 11.sp)
+                                }
+                            }
+                        }
+                        if (pendingRows.isEmpty()) {
+                            Text("Všechny zprávy byly doručeny, fronta je prázdná.", style = MaterialTheme.typography.bodySmall, color = Color(0xFF94A3B8))
+                        }
+                        pendingRows.take(10).forEach { o ->
                             val line = Status.outboxLine(o.kind, "${o.objectType}/${o.objectId}", o.recipient, DeliveryState.valueOf(o.state), o.attempts, o.lastError)
                             Row(Modifier.fillMaxWidth().padding(vertical = 3.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                                 Column(Modifier.weight(1f)) {

@@ -420,6 +420,7 @@ class ReticulumBridge(
             var failures = 0
             while (isActive) {
                 var currentSocket: Socket? = null
+                var wasConnectedThisAttempt = false
                 try {
                     android.util.Log.i("PulseSync", "Připojování k Reticulum gateway $host:$port...")
                     val s = Socket()
@@ -427,6 +428,7 @@ class ReticulumBridge(
                     s.tcpNoDelay = true
                     s.keepAlive = true
                     s.connect(InetSocketAddress(host, port), 6000)
+                    wasConnectedThisAttempt = true
                     failures = 0
                     synchronized(this@ReticulumBridge) {
                         tcpSocket = s
@@ -460,14 +462,22 @@ class ReticulumBridge(
                         }
                     }
                 } catch (e: Exception) {
-                    failures++
-                    _gatewayHealth.value = GatewayHealth(
-                        host = host,
-                        port = port,
-                        state = GatewayHealthState.UNREACHABLE,
-                        consecutiveFailures = failures,
-                        lastError = e.message ?: "Spojení se nezdařilo",
-                    )
+                    if (wasConnectedThisAttempt) {
+                        // Běžné odpojení běžící relace (např. Doze / změna Wi-Fi) – nepovažovat hned za neexistující uzel
+                        failures = 0
+                        _gatewayHealth.value = GatewayHealth(host = host, port = port, state = GatewayHealthState.CONNECTING)
+                    } else {
+                        failures++
+                        if (failures >= 3) {
+                            _gatewayHealth.value = GatewayHealth(
+                                host = host,
+                                port = port,
+                                state = GatewayHealthState.UNREACHABLE,
+                                consecutiveFailures = failures,
+                                lastError = e.message ?: "Spojení se nezdařilo",
+                            )
+                        }
+                    }
                     android.util.Log.w("PulseSync", "Chyba Reticulum gateway spojení ($host:$port): ${e.message}")
                 } finally {
                     synchronized(this@ReticulumBridge) {
@@ -646,6 +656,7 @@ class ReticulumBridge(
             tcpSocket = null
             tcpWriter = null
             isGatewayOnline = false
+            _gatewayHealth.value = GatewayHealth(state = GatewayHealthState.UNCONFIGURED)
         }
     }
 

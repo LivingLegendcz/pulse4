@@ -364,11 +364,19 @@ fun ReticulumScreen(sl: ServiceLocator) {
                 }
             }
 
-            SectionTitle("Odchozí fronta (${outbox.size})")
-            if (outbox.isEmpty()) {
+            val pendingRows = outbox.filter {
+                val st = runCatching { DeliveryState.valueOf(it.state) }.getOrNull()
+                st == DeliveryState.QUEUED || st == DeliveryState.HANDED_TO_TRANSPORT || st == DeliveryState.STORED_IN_PROPAGATION
+            }
+            val advPendingCount = pendingRows.size
+            val advDeliveredCount = outbox.count {
+                runCatching { DeliveryState.valueOf(it.state) }.getOrNull() == DeliveryState.ACKED
+            }
+            SectionTitle("Odchozí fronta ($advPendingCount čekajících · $advDeliveredCount doručených)")
+            if (pendingRows.isEmpty()) {
                 Text("Fronta je prázdná.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             } else {
-                outbox.take(15).forEach { o ->
+                pendingRows.take(15).forEach { o ->
                     val line = Status.outboxLine(o.kind, "${o.objectType}/${o.objectId}", o.recipient, DeliveryState.valueOf(o.state), o.attempts, o.lastError)
                     Column(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
                         Text(line.title, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)

@@ -88,6 +88,9 @@ class ReticulumTransport(
         val usePropagation = settings.propagationNode.isNotBlank()
         var sent = 0; var received = 0; var rejected = 0
 
+        // Průběžně vyčisti staré již doručené / nahrazené / zrušené položky z outboxu (starší než 24 hodin)
+        runCatching { db.outbox().purge(nowMs - 24L * 3600L * 1000L) }
+
         // Ujisti se, že všechny známé kontakty z databáze jsou zaregistrovány v RNS/LXMF směrovací tabulce
         val knownContacts = runCatching { db.contacts().allNow() }.getOrDefault(emptyList())
         for (c in knownContacts) {

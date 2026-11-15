@@ -90,14 +90,21 @@ class OutboxManager(
     /** Položky připravené k pokusu, v pořadí vzniku (stabilní pro jednoho příjemce). */
     fun due(nowMs: Long, recipient: String? = null): List<OutboxItem> =
         store.all().filter {
-            it.state == DeliveryState.QUEUED && it.nextAttemptAtMs <= nowMs && (recipient == null || it.recipient == recipient)
+            (it.state == DeliveryState.QUEUED || it.state == DeliveryState.HANDED_TO_TRANSPORT) &&
+                it.nextAttemptAtMs <= nowMs &&
+                (recipient == null || it.recipient == recipient)
         }.sortedWith(compareBy({ it.createdAtMs }, { it.objectVersion }))
 
     fun onTransportResult(eventId: String, result: TransportResult, nowMs: Long) {
         val it = store.find(eventId) ?: return
         if (it.state == DeliveryState.ACKED) return
         when (result) {
-            TransportResult.Handed -> store.update(it.copy(state = DeliveryState.HANDED_TO_TRANSPORT, attempts = it.attempts + 1))
+            TransportResult.Handed -> {
+                val attempts = it.attempts + 1
+                // Pokud aplikační ACK nedorazí do timeoutu, umožníme bezpečné opakování (idempotentní příjemce duplikát zahodí).
+                val retryAt = nowMs + maxOf(60_000L, backoff(attempts))
+                store.update(it.copy(state = DeliveryState.HANDED_TO_TRANSPORT, attempts = attempts, nextAttemptAtMs = retryAt))
+            }
             TransportResult.StoredInPropagation ->
                 store.update(it.copy(state = DeliveryState.STORED_IN_PROPAGATION, attempts = it.attempts + 1))
             is TransportResult.Failed -> {
@@ -114,7 +121,7 @@ class OutboxManager(
      */
     fun markAttempt(eventId: String, nowMs: Long, waitMs: Long) {
         val it = store.find(eventId) ?: return
-        if (it.state != DeliveryState.QUEUED) return
+        if (it.state != DeliveryState.QUEUED && it.state != DeliveryState.HANDED_TO_TRANSPORT) return
         store.update(it.copy(attempts = it.attempts + 1, nextAttemptAtMs = nowMs + waitMs))
     }
 

@@ -13,8 +13,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.event_name == 'release' && 'pulse4-google-play' || format('pulse4-ci-{0}', github.ref) }}
-  cancel-in-progress: ${{ github.event_name != 'release' }}
+  group: ${{ github.event_name == 'release' && 'pulse4-google-play' || 'pulse4-ci' }}
+  cancel-in-progress: false
 
 jobs:
   verify:
@@ -53,7 +53,7 @@ jobs:
     name: Publish Android release to internal testing
     # Never publish if the verification job failed or was cancelled.
     needs: verify
-    if: github.event_name == 'release' && github.event.release.prerelease == false
+    if: github.event_name == 'release' && github.event.release.prerelease == false && startsWith(github.event.release.tag_name, 'v') && startsWith(github.event.release.name, 'Pulse4 ')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -67,6 +67,7 @@ jobs:
         shell: bash
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TITLE: ${{ github.event.release.name }}
         run: |
           set -euo pipefail
 
@@ -77,6 +78,12 @@ jobs:
             patch=$((10#${BASH_REMATCH[3]}))
           else
             echo "ERROR: Expected release tag in format vMAJOR.MINOR.PATCH, got: $RELEASE_TAG" >&2
+            exit 1
+          fi
+
+          expected_title="Pulse4 ${major}.${minor}.${patch}"
+          if [[ "$RELEASE_TITLE" != "$expected_title" ]]; then
+            echo "ERROR: Expected release title '$expected_title', got: '$RELEASE_TITLE'" >&2
             exit 1
           fi
 

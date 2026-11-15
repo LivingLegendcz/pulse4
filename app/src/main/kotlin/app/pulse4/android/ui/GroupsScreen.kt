@@ -34,6 +34,7 @@ import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.CompareArrows
 import androidx.compose.material.icons.automirrored.outlined.DirectionsRun
 import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.AdminPanelSettings
 import androidx.compose.material.icons.outlined.Bedtime
 import androidx.compose.material.icons.outlined.Bolt
 import androidx.compose.material.icons.outlined.Check
@@ -41,6 +42,7 @@ import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.EmojiEvents
 import androidx.compose.material.icons.outlined.Equalizer
+import androidx.compose.material.icons.outlined.FamilyRestroom
 import androidx.compose.material.icons.outlined.Favorite
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.Group
@@ -54,8 +56,10 @@ import androidx.compose.material.icons.outlined.QrCode
 import androidx.compose.material.icons.outlined.QrCodeScanner
 import androidx.compose.material.icons.outlined.Scale
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Security
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.Star
+import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -103,8 +107,10 @@ import app.pulse4.android.data.toDomain
 import app.pulse4.android.di.ServiceLocator
 import app.pulse4.domain.Activity
 import app.pulse4.domain.MetricType
+import app.pulse4.domain.Provider
 import app.pulse4.domain.Sport
 import app.pulse4.sharing.ActivityProjection
+import app.pulse4.sharing.AgeProfile
 import app.pulse4.sharing.Category
 import app.pulse4.sharing.Field
 import app.pulse4.sharing.Group
@@ -161,6 +167,7 @@ fun GroupsScreen(
     sl: ServiceLocator,
     onOpenActivity: (String) -> Unit = {},
     onCompareActivities: (List<String>) -> Unit = {},
+    onOpenSharingOverview: () -> Unit = {},
 ) {
     val contacts by sl.db.contacts().all().collectAsState(emptyList())
     val groups by sl.db.grants().groups().collectAsState(emptyList())
@@ -171,6 +178,7 @@ fun GroupsScreen(
 
     val decodedGroups = remember(groups) {
         groups.mapNotNull { runCatching { Wire.json.decodeFromString(Group.serializer(), it.json) }.getOrNull() }
+            .filter { !it.dissolved }
     }
     val activeGrants = remember(grants) {
         grants.mapNotNull { runCatching { Wire.json.decodeFromString(ShareGrant.serializer(), it.json) }.getOrNull() }
@@ -180,10 +188,11 @@ fun GroupsScreen(
     val selfHash by io(Unit) { sl.bridge.ensureStarted().deliveryHash }
     val meId = selfHash ?: sl.bridge.info?.deliveryHash ?: "me"
 
-    // null = Jsme v kořeni stromu (Seznam skupin); jinak ID rozkliknuté skupiny (nebo ALL_FRIENDS_GROUP_ID)
+    // null = Jsme v kořeni stromu (Seznam kruhů); jinak ID rozkliknutého kruhu (nebo ALL_FRIENDS_GROUP_ID)
     var openedGroupId by remember { mutableStateOf<String?>(null) }
     var showPairingDialog by remember { mutableStateOf(false) }
     var showNewGroupDialog by remember { mutableStateOf(false) }
+    var showAddFamilyDialog by remember { mutableStateOf(false) }
 
     if (showPairingDialog) {
         PairingModalDialog(sl = sl, onDismiss = { showPairingDialog = false })
@@ -201,8 +210,20 @@ fun GroupsScreen(
         )
     }
 
+    if (showAddFamilyDialog) {
+        AddFamilyLinkModalDialog(
+            sl = sl,
+            contacts = contacts,
+            onOpenPairing = {
+                showAddFamilyDialog = false
+                showPairingDialog = true
+            },
+            onDismiss = { showAddFamilyDialog = false }
+        )
+    }
+
     if (openedGroupId == null) {
-        // ÚROVEŇ 1: Kořen stromu — Seznam skupin + Přidat skupinu + Kontakty
+        // ÚROVEŇ 1: Kořen stromu — Seznam kruhů + Přidat kruh + Kontakty
         GroupsTreeRootView(
             contacts = contacts,
             decodedGroups = decodedGroups,
@@ -212,10 +233,12 @@ fun GroupsScreen(
             meId = meId,
             onOpenGroup = { gId -> openedGroupId = gId },
             onOpenNewGroup = { showNewGroupDialog = true },
-            onOpenPairing = { showPairingDialog = true }
+            onOpenPairing = { showPairingDialog = true },
+            onOpenSharingOverview = onOpenSharingOverview,
+            onOpenAddFamily = { showAddFamilyDialog = true }
         )
     } else {
-        // ÚROVEŇ 2: Detail rozkliknuté skupiny (Metriky | Aktivity | Členové & Sdílení)
+        // ÚROVEŇ 2: Detail rozkliknutého kruhu (Metriky | Aktivity | Členové & Sdílení)
         val currentGroup = decodedGroups.firstOrNull { it.id == openedGroupId }
         GroupDetailBranchView(
             sl = sl,
@@ -229,6 +252,7 @@ fun GroupsScreen(
             myActs = myActs,
             onBackToTree = { openedGroupId = null },
             onOpenPairing = { showPairingDialog = true },
+            onOpenAddFamily = { showAddFamilyDialog = true },
             onOpenActivity = onOpenActivity,
             onCompareActivities = onCompareActivities
         )
@@ -237,7 +261,7 @@ fun GroupsScreen(
 
 /**
  * ÚROVEŇ 1 (Kořen stromu):
- * Přehledný seznam všech skupin s možností přidat novou skupinu, spárovat kontakt a rozkliknout libovolnou skupinu.
+ * Přehledný seznam všech kruhů s možností přidat nový kruh, spárovat kontakt a rozkliknout libovolný kruh.
  */
 @Composable
 private fun GroupsTreeRootView(
@@ -250,6 +274,8 @@ private fun GroupsTreeRootView(
     onOpenGroup: (String) -> Unit,
     onOpenNewGroup: () -> Unit,
     onOpenPairing: () -> Unit,
+    onOpenSharingOverview: () -> Unit,
+    onOpenAddFamily: () -> Unit,
 ) {
     val activeCatsTotal = remember(activeGrants) {
         activeGrants.flatMap { it.fields }.map { it.category }.distinct().size
@@ -371,7 +397,7 @@ private fun GroupsTreeRootView(
 
                     Spacer(Modifier.height(10.dp))
                     Text(
-                        "Kruhy Důvěry & Skupiny",
+                        "Kruhy Důvěry",
                         style = MaterialTheme.typography.headlineSmall,
                         fontWeight = FontWeight.ExtraBold,
                         color = Color.White
@@ -391,7 +417,7 @@ private fun GroupsTreeRootView(
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         listOf(
-                            Triple("SKUPINY", "${decodedGroups.size + 1}", Color(0xFF38BDF8)),
+                            Triple("KRUHY", "${decodedGroups.size + 1}", Color(0xFF38BDF8)),
                             Triple("P2P KONTAKTY", "${contacts.size}", Color(0xFF2DD4BF)),
                             Triple("SDÍLENÉ SEKCE", "$activeCatsTotal/6", Color(0xFFA855F7))
                         ).forEach { (lbl, valueStr, col) ->
@@ -447,7 +473,37 @@ private fun GroupsTreeRootView(
                         ) {
                             Icon(Icons.Outlined.GroupAdd, contentDescription = null, modifier = Modifier.size(17.dp))
                             Spacer(Modifier.width(6.dp))
-                            Text("Nová skupina", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, maxLines = 1)
+                            Text("Nový kruh", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, maxLines = 1)
+                        }
+                    }
+
+                    Spacer(Modifier.height(8.dp))
+
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = onOpenSharingOverview,
+                            shape = RoundedCornerShape(14.dp),
+                            border = BorderStroke(1.dp, Color(0xFF38BDF8).copy(alpha = 0.7f)),
+                            colors = ButtonDefaults.outlinedButtonColors(containerColor = Color(0xFF0A1924).copy(alpha = 0.75f)),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Outlined.Security, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(17.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Sdílení a oprávnění", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = Color(0xFF38BDF8), maxLines = 1)
+                        }
+                        OutlinedButton(
+                            onClick = onOpenAddFamily,
+                            shape = RoundedCornerShape(14.dp),
+                            border = BorderStroke(1.dp, Color(0xFFA855F7).copy(alpha = 0.7f)),
+                            colors = ButtonDefaults.outlinedButtonColors(containerColor = Color(0xFF150F24).copy(alpha = 0.75f)),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Outlined.FamilyRestroom, contentDescription = null, tint = Color(0xFFA855F7), modifier = Modifier.size(17.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Přidat dítě", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = Color(0xFFA855F7), maxLines = 1)
                         }
                     }
                 }
@@ -456,7 +512,7 @@ private fun GroupsTreeRootView(
 
         Spacer(Modifier.height(18.dp))
 
-        // Sekce 1: Strom skupin
+        // Sekce 1: Strom kruhů
         Row(
             Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -466,7 +522,7 @@ private fun GroupsTreeRootView(
                 Icon(Icons.Outlined.Folder, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(16.dp))
                 Spacer(Modifier.width(6.dp))
                 Text(
-                    "MOJE SKUPINY & KRUHY (${decodedGroups.size + 1})",
+                    "MOJE KRUHY (${decodedGroups.size + 1})",
                     style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.ExtraBold,
                     color = Color(0xFFCBD5E1),
@@ -522,7 +578,7 @@ private fun GroupsTreeRootView(
             GroupTreeFolderCard(
                 icon = Icons.Outlined.Group,
                 title = g.name,
-                subtitle = "Šifrovaná P2P skupina · revize v${g.version}",
+                subtitle = "Šifrovaný P2P kruh · revize v${g.version}",
                 memberNames = memberNames,
                 sharedDailyCount = groupDailyAuthors,
                 sharedActivitiesCount = groupActsCount,
@@ -586,7 +642,7 @@ private fun GroupsTreeRootView(
                         .padding(horizontal = 10.dp, vertical = 6.dp)
                 ) {
                     Text(
-                        "+ Nová",
+                        "+ Nový",
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.Bold,
                         color = Color(0xFF38BDF8)
@@ -959,6 +1015,7 @@ private fun GroupDetailBranchView(
     myActs: List<app.pulse4.android.data.ActivitySummaryRow>,
     onBackToTree: () -> Unit,
     onOpenPairing: () -> Unit,
+    onOpenAddFamily: () -> Unit,
     onOpenActivity: (String) -> Unit,
     onCompareActivities: (List<String>) -> Unit,
 ) {
@@ -1026,13 +1083,13 @@ private fun GroupDetailBranchView(
                         ) {
                             Icon(
                                 Icons.AutoMirrored.Outlined.ArrowBack,
-                                contentDescription = "Zpět na skupiny",
+                                contentDescription = "Zpět na kruhy",
                                 tint = Color(0xFF38BDF8),
                                 modifier = Modifier.size(16.dp)
                             )
                             Spacer(Modifier.width(4.dp))
                             Text(
-                                "Skupiny",
+                                "Kruhy",
                                 style = MaterialTheme.typography.labelMedium,
                                 fontWeight = FontWeight.Bold,
                                 color = Color(0xFF38BDF8),
@@ -1145,6 +1202,7 @@ private fun GroupDetailBranchView(
                 contacts = contacts,
                 activeGrants = activeGrants,
                 onOpenPairing = onOpenPairing,
+                onOpenAddFamily = onOpenAddFamily,
                 onBackToTree = onBackToTree
             )
         }
@@ -1314,7 +1372,7 @@ private fun GroupMetricsComparisonSection(
         )
 
         Spacer(Modifier.height(10.dp))
-        SectionTitle("Žebříček a statistiky členů skupiny (${participantIds.size})", icon = Icons.Outlined.EmojiEvents)
+        SectionTitle("Žebříček a statistiky členů kruhu (${participantIds.size})", icon = Icons.Outlined.EmojiEvents)
 
         val rankedParticipants = remember(participantIds, multiSeries, activeField) {
             participantIds.mapIndexed { idx, memberId ->
@@ -1456,7 +1514,7 @@ private fun GroupSharedActivitiesSection(
     onOpenActivity: (String) -> Unit,
     onCompareActivities: (List<String>) -> Unit,
 ) {
-    var filterMode by remember { mutableStateOf(0) } // 0 = Vše ve skupině, 1 = Od členů skupiny, 2 = Moje
+    var filterMode by remember { mutableStateOf(0) } // 0 = Vše v kruhu, 1 = Od členů kruhu, 2 = Moje
     var selectedActsForCompare by remember { mutableStateOf(setOf<String>()) }
 
     val allActivities = remember(myActs, receivedActs, contacts, participantIds) {
@@ -1593,7 +1651,7 @@ private fun GroupSharedActivitiesSection(
             }
         } else {
             Text(
-                "Zaškrtněte 2 až 4 aktivity členů skupiny pro překryvné porovnání tras, tempa a tepu.",
+                "Zaškrtněte 2 až 4 aktivity členů kruhu pro překryvné porovnání tras, tempa a tepu.",
                 style = MaterialTheme.typography.labelSmall,
                 color = Color(0xFF94A3B8),
                 modifier = Modifier.padding(vertical = 4.dp)
@@ -1609,7 +1667,7 @@ private fun GroupSharedActivitiesSection(
                 Column(Modifier.padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                     Text("Zatím žádné aktivity v tomto filtru", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
                     Text(
-                        "Jakmile členové této skupiny nasdílí své aktivity přes Reticulum P2P, objeví se zde.",
+                        "Jakmile členové tohoto kruhu nasdílí své aktivity přes Reticulum P2P, objeví se zde.",
                         style = MaterialTheme.typography.bodySmall,
                         color = Color(0xFF94A3B8)
                     )
@@ -1650,10 +1708,183 @@ private fun GroupBranchMembersAndSharingSection(
     contacts: List<ContactRow>,
     activeGrants: List<ShareGrant>,
     onOpenPairing: () -> Unit,
+    onOpenAddFamily: () -> Unit = {},
     onBackToTree: () -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     var notice by remember { mutableStateOf<String?>(null) }
+    var selectedSourceMode by remember { mutableStateOf(0) } // 0 = Všechny zdroje, 1 = Withings, 2 = Garmin
+    var pendingMinorGrant by remember { mutableStateOf<Pair<ShareGrant, String>?>(null) }
+    var showHandoverDialog by remember { mutableStateOf(false) }
+    var showDissolveConfirmDialog by remember { mutableStateOf(false) }
+
+    val isMinorAccount = sl.settings.ownAgeProfile == "MINOR"
+    val isSelfAdmin = currentGroup != null && meId in currentGroup.effectiveAdmins
+
+    // Dialog pro potvrzení zákonného zástupce u nezletilého účtu (MINOR)
+    pendingMinorGrant?.let { (grantToSave, catTitle) ->
+        var guardianChecked by remember { mutableStateOf(false) }
+        AlertDialog(
+            onDismissRequest = { pendingMinorGrant = null },
+            containerColor = Color(0xFF0A101B),
+            titleContentColor = Color.White,
+            textContentColor = Color(0xFFCBD5E1),
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Outlined.Security, contentDescription = null, tint = Color(0xFFF59E0B), modifier = Modifier.size(22.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Souhlas zákonného zástupce", fontWeight = FontWeight.ExtraBold)
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "Tento účet má profil nezletilého (MINOR). Aktivace sdílení sekce '$catTitle' vyžaduje ověřenou rodinnou vazbu a výslovný souhlas zákonného zástupce.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(checked = guardianChecked, onCheckedChange = { guardianChecked = it })
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            "Potvrzuji souhlas zákonného zástupce s aktivací tohoto sdílení.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFFFDE68A)
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    enabled = guardianChecked,
+                    onClick = {
+                        pendingMinorGrant = null
+                        scope.launch {
+                            notice = withContext(Dispatchers.IO) {
+                                val now = System.currentTimeMillis()
+                                val res = sl.shareService.saveGrantWithPolicy(grantToSave, guardianCoConsentAtMs = now)
+                                res.fold(
+                                    onSuccess = {
+                                        sl.shareService.planAndEnqueue(now)
+                                        "Sdílení sekce '$catTitle' do kruhu zapnuto (se souhlasem zákonného zástupce)."
+                                    },
+                                    onFailure = { it.message ?: "Aktivace sdílení selhala." }
+                                )
+                            }
+                        }
+                    }
+                ) {
+                    Text("Potvrdit a zapnout", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingMinorGrant = null }) {
+                    Text("Zrušit", color = Color(0xFF94A3B8))
+                }
+            }
+        )
+    }
+
+    // Dialog pro předání správy kruhu jinému členovi (poslední správce)
+    if (showHandoverDialog && currentGroup != null) {
+        val candidates = (currentGroup.members - meId).toList()
+        var selectedTarget by remember { mutableStateOf(candidates.firstOrNull()) }
+        AlertDialog(
+            onDismissRequest = { showHandoverDialog = false },
+            containerColor = Color(0xFF0A101B),
+            titleContentColor = Color.White,
+            textContentColor = Color(0xFFCBD5E1),
+            title = {
+                Text("Předat správu kruhu", fontWeight = FontWeight.ExtraBold)
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "Jste poslední správce kruhu '${currentGroup.name}'. Před odchodem vyberte nástupce, kterému předáte správu. Zůstáváte správcem, dokud nástupce převzetí nepotvrdí.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        candidates.forEach { candId ->
+                            val cName = contacts.firstOrNull { it.identity == candId }?.displayName ?: candId.take(10)
+                            FilterChip(
+                                selected = selectedTarget == candId,
+                                onClick = { selectedTarget = candId },
+                                label = { Text(cName) }
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    enabled = selectedTarget != null,
+                    onClick = {
+                        val targetId = selectedTarget ?: return@Button
+                        showHandoverDialog = false
+                        scope.launch {
+                            notice = withContext(Dispatchers.IO) {
+                                sl.shareService.initiateAdminHandover(currentGroup.id, targetId).fold(
+                                    onSuccess = {
+                                        val cName = contacts.firstOrNull { it.identity == targetId }?.displayName ?: targetId.take(10)
+                                        "Žádost o předání správy kruhu odeslána členovi '$cName'. Zůstáváte správcem, dokud ji nepotvrdí."
+                                    },
+                                    onFailure = { it.message ?: "Předání správy selhalo." }
+                                )
+                            }
+                        }
+                    }
+                ) {
+                    Text("Odeslat předání", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showHandoverDialog = false }) {
+                    Text("Zrušit", color = Color(0xFF94A3B8))
+                }
+            }
+        )
+    }
+
+    // Dialog pro zrušení kruhu
+    if (showDissolveConfirmDialog && currentGroup != null) {
+        AlertDialog(
+            onDismissRequest = { showDissolveConfirmDialog = false },
+            containerColor = Color(0xFF0A101B),
+            titleContentColor = Color.White,
+            textContentColor = Color(0xFFCBD5E1),
+            title = { Text("Zrušit kruh '${currentGroup.name}'?", fontWeight = FontWeight.ExtraBold) },
+            text = {
+                Text(
+                    "Kruh bude rozpuštěn a všechna aktivní sdílení vázaná na tento kruh budou odvolána.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            },
+            confirmButton = {
+                Button(
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFF43F5E)),
+                    onClick = {
+                        showDissolveConfirmDialog = false
+                        scope.launch {
+                            val res = withContext(Dispatchers.IO) {
+                                sl.shareService.dissolveCircle(currentGroup.id)
+                            }
+                            if (res.isSuccess) {
+                                onBackToTree()
+                            } else {
+                                notice = res.exceptionOrNull()?.message ?: "Kruh se nepodařilo zrušit."
+                            }
+                        }
+                    }
+                ) {
+                    Text("Zrušit kruh", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDissolveConfirmDialog = false }) {
+                    Text("Zpět", color = Color(0xFF94A3B8))
+                }
+            }
+        )
+    }
 
     val categories = listOf(
         Triple(Category.SLEEP, "Spánek" to "Doba spánku, skóre a fáze", R.drawable.img_motif_sleep_night),
@@ -1673,6 +1904,49 @@ private fun GroupBranchMembersAndSharingSection(
     }
 
     Column(Modifier.verticalScroll(rememberScrollState())) {
+        // Banner pro převzetí správy kruhu
+        if (currentGroup?.pendingAdminHandover?.targetMemberId == meId) {
+            val initiatorId = currentGroup.pendingAdminHandover!!.initiatedBy
+            val initiatorName = contacts.firstOrNull { it.identity == initiatorId }?.displayName ?: initiatorId.take(10)
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                border = BorderStroke(1.dp, Color(0xFFF59E0B).copy(alpha = 0.7f)),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF231807)),
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+            ) {
+                Column(Modifier.padding(14.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Outlined.AdminPanelSettings, contentDescription = null, tint = Color(0xFFF59E0B), modifier = Modifier.size(20.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Nabídka převzetí správy kruhu", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.ExtraBold, color = Color.White)
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "Správce $initiatorName vám předává správu tohoto kruhu.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFFFDE68A)
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Button(
+                        onClick = {
+                            scope.launch {
+                                notice = withContext(Dispatchers.IO) {
+                                    sl.shareService.acceptAdminHandover(currentGroup.id).fold(
+                                        onSuccess = { "Správa kruhu '${currentGroup.name}' byla úspěšně převzata." },
+                                        onFailure = { it.message ?: "Převzetí správy selhalo." }
+                                    )
+                                }
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFF59E0B), contentColor = Color.Black),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Převzít správu kruhu", fontWeight = FontWeight.ExtraBold)
+                    }
+                }
+            }
+        }
+
         notice?.let { msg ->
             Card(
                 shape = RoundedCornerShape(14.dp),
@@ -1684,7 +1958,7 @@ private fun GroupBranchMembersAndSharingSection(
             }
         }
 
-        // 1. Přepínače kategorií sdílených do této skupiny (atmosférická matice)
+        // 1. Přepínače kategorií sdílených do tohoto kruhu (atmosférická matice)
         Card(
             shape = RoundedCornerShape(20.dp),
             border = BorderStroke(1.dp, Color(0xFF232A3B)),
@@ -1709,11 +1983,41 @@ private fun GroupBranchMembersAndSharingSection(
                     color = Color(0xFF94A3B8)
                 )
 
+                if (isMinorAccount) {
+                    Spacer(Modifier.height(8.dp))
+                    Card(
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, Color(0xFFF59E0B).copy(alpha = 0.5f)),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF1F1607)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            "Účet nezletilého (MINOR): každé nové sdílení vyžaduje ověřenou rodinnou vazbu a potvrzení zákonného zástupce.",
+                            Modifier.padding(10.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFFFDE68A)
+                        )
+                    }
+                }
+
                 Spacer(Modifier.height(10.dp))
+                Text("Zdroj dat pro nová sdílení:", style = MaterialTheme.typography.labelSmall, color = Color(0xFFCBD5E1))
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.padding(top = 4.dp, bottom = 6.dp)
+                ) {
+                    listOf(0 to "Všechny zdroje", 1 to "Pouze Withings", 2 to "Pouze Garmin").forEach { (mode, lbl) ->
+                        FilterChip(
+                            selected = selectedSourceMode == mode,
+                            onClick = { selectedSourceMode = mode },
+                            label = { Text(lbl) }
+                        )
+                    }
+                }
 
                 if (targetRecipients.isEmpty()) {
                     Text(
-                        "V této skupině zatím není žádný další spárovaný příjemce. Přidejte člena níže nebo spárujte kontakt.",
+                        "V tomto kruhu zatím není žádný další spárovaný příjemce. Přidejte člena níže nebo spárujte kontakt.",
                         style = MaterialTheme.typography.bodySmall,
                         color = Color(0xFFF59E0B)
                     )
@@ -1727,6 +2031,14 @@ private fun GroupBranchMembersAndSharingSection(
                                 (g.groupId == currentGroup?.id || g.recipients.intersect(targetRecipients).isNotEmpty())
                         }
                         val isEnabled = matchingGrant != null
+                        val grantSourceText = matchingGrant?.let { g ->
+                            when {
+                                g.sources == null -> " · Všechny zdroje"
+                                Provider.WITHINGS_API in g.sources!! && Provider.GARMIN_PERSONAL !in g.sources!! -> " · Pouze Withings"
+                                Provider.GARMIN_PERSONAL in g.sources!! && Provider.WITHINGS_API !in g.sources!! -> " · Pouze Garmin"
+                                else -> ""
+                            }
+                        }.orEmpty()
 
                         Card(
                             shape = RoundedCornerShape(14.dp),
@@ -1772,31 +2084,53 @@ private fun GroupBranchMembersAndSharingSection(
                                         Spacer(Modifier.width(10.dp))
                                         Column {
                                             Text(title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.ExtraBold, color = Color.White)
-                                            Text(subtitle, style = MaterialTheme.typography.labelSmall, color = Color(0xFFCBD5E1))
+                                            Text("$subtitle$grantSourceText", style = MaterialTheme.typography.labelSmall, color = Color(0xFFCBD5E1))
                                         }
                                     }
                                     Switch(
                                         checked = isEnabled,
                                         onCheckedChange = { enable ->
-                                            scope.launch {
-                                                notice = withContext(Dispatchers.IO) {
-                                                    val now = System.currentTimeMillis()
-                                                    if (enable) {
+                                            if (enable) {
+                                                val chosenSources: Set<Provider>? = when (selectedSourceMode) {
+                                                    1 -> setOf(Provider.WITHINGS_API)
+                                                    2 -> setOf(Provider.GARMIN_PERSONAL, Provider.GARMIN_EXTENDED)
+                                                    else -> null
+                                                }
+                                                scope.launch {
+                                                    val preparedGrant = withContext(Dispatchers.IO) {
+                                                        val now = System.currentTimeMillis()
                                                         val self = sl.bridge.ensureStarted().deliveryHash
                                                         val today = LocalDate.now(ZoneId.of(sl.settings.zoneId))
-                                                        val newGrant = ShareGrant(
+                                                        ShareGrant(
                                                             id = UUID.randomUUID().toString(),
                                                             ownerId = self,
                                                             recipients = targetRecipients,
                                                             fields = catFields,
                                                             scope = TimeScope.continuousFrom(today.minusDays(60)),
                                                             groupId = currentGroup?.id,
-                                                            createdAtMs = now
+                                                            createdAtMs = now,
+                                                            sources = chosenSources
                                                         )
-                                                        sl.shareService.saveGrant(newGrant)
-                                                        sl.shareService.planAndEnqueue(now)
-                                                        "Sdílení sekce '$title' do skupiny zapnuto."
+                                                    }
+                                                    if (isMinorAccount) {
+                                                        pendingMinorGrant = preparedGrant to title
                                                     } else {
+                                                        notice = withContext(Dispatchers.IO) {
+                                                            val now = System.currentTimeMillis()
+                                                            sl.shareService.saveGrantWithPolicy(preparedGrant, null).fold(
+                                                                onSuccess = {
+                                                                    sl.shareService.planAndEnqueue(now)
+                                                                    "Sdílení sekce '$title' do kruhu zapnuto."
+                                                                },
+                                                                onFailure = { it.message ?: "Aktivace sdílení selhala." }
+                                                            )
+                                                        }
+                                                    }
+                                                }
+                                            } else {
+                                                scope.launch {
+                                                    notice = withContext(Dispatchers.IO) {
+                                                        val now = System.currentTimeMillis()
                                                         matchingGrant?.let { sl.shareService.revoke(it.id, now) }
                                                         "Sdílení sekce '$title' bylo odvoláno."
                                                     }
@@ -1814,7 +2148,7 @@ private fun GroupBranchMembersAndSharingSection(
 
         Spacer(Modifier.height(12.dp))
 
-        // 2. Členové této skupiny + možnost přidat/odebrat člena z kontaktů
+        // 2. Členové tohoto kruhu + role Správce/Člen + možnost přidat/odebrat člena
         Card(
             shape = RoundedCornerShape(20.dp),
             border = BorderStroke(1.dp, Color(0xFF232A3B)),
@@ -1837,74 +2171,147 @@ private fun GroupBranchMembersAndSharingSection(
                             color = Color.White
                         )
                     }
-                    TextButton(onClick = onOpenPairing) {
-                        Icon(Icons.Outlined.PersonAdd, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("Nový kontakt")
+                    Row {
+                        TextButton(onClick = onOpenAddFamily) {
+                            Icon(Icons.Outlined.FamilyRestroom, contentDescription = null, tint = Color(0xFFA855F7), modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Přidat dítě", color = Color(0xFFA855F7))
+                        }
+                        TextButton(onClick = onOpenPairing) {
+                            Icon(Icons.Outlined.PersonAdd, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Nový kontakt")
+                        }
                     }
                 }
 
+                val effectiveAdmins = currentGroup?.effectiveAdmins ?: emptySet()
                 participantIds.forEach { memberId ->
                     val isMe = memberId == meId
+                    val isAdmin = memberId in effectiveAdmins
                     val contact = contacts.firstOrNull { it.identity == memberId }
                     val name = if (isMe) "Já (vlastník zařízení)" else contact?.displayName ?: memberId.take(10)
-                    Row(
-                        Modifier.fillMaxWidth().padding(vertical = 6.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(Modifier.weight(1f)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(
-                                    if (isMe) Icons.Outlined.Star else Icons.Outlined.Person,
-                                    contentDescription = null,
-                                    tint = if (isMe) Color(0xFFFFB300) else Color(0xFF38BDF8),
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Spacer(Modifier.width(6.dp))
-                                Text(
-                                    name,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color.White
-                                )
-                            }
-                            Text(
-                                if (isMe) "Lokální suverénní uzel" else "KEY FP: ${contact?.fingerprint ?: memberId.take(12)}",
-                                style = MaterialTheme.typography.labelSmall,
-                                fontFamily = JetBrainsMonoFamily,
-                                color = Color(0xFF94A3B8),
-                                fontSize = 10.sp
-                            )
-                        }
-                        if (!isMe && currentGroup != null) {
-                            TextButton(
-                                onClick = {
-                                    scope.launch {
-                                        notice = withContext(Dispatchers.IO) {
-                                            val updated = currentGroup.copy(
-                                                members = currentGroup.members - memberId,
-                                                version = currentGroup.version + 1
+                    Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        if (isMe) Icons.Outlined.Star else Icons.Outlined.Person,
+                                        contentDescription = null,
+                                        tint = if (isMe) Color(0xFFFFB300) else Color(0xFF38BDF8),
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(
+                                        name,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.White
+                                    )
+                                    if (currentGroup != null) {
+                                        Spacer(Modifier.width(8.dp))
+                                        Box(
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(6.dp))
+                                                .background(
+                                                    if (isAdmin) Color(0xFFF59E0B).copy(alpha = 0.2f)
+                                                    else Color(0xFF38BDF8).copy(alpha = 0.14f)
+                                                )
+                                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                                        ) {
+                                            Text(
+                                                if (isAdmin) "Správce" else "Člen",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 10.sp,
+                                                color = if (isAdmin) Color(0xFFF59E0B) else Color(0xFF94A3B8)
                                             )
-                                            sl.shareService.saveGroup(updated)
-                                            "Člen '$name' odebrán ze skupiny."
                                         }
                                     }
                                 }
+                                Text(
+                                    if (isMe) "Lokální suverénní uzel" else "KEY FP: ${contact?.fingerprint ?: memberId.take(12)}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = JetBrainsMonoFamily,
+                                    color = Color(0xFF94A3B8),
+                                    fontSize = 10.sp
+                                )
+                            }
+                            if (!isMe && currentGroup != null) {
+                                TextButton(
+                                    onClick = {
+                                        scope.launch {
+                                            notice = withContext(Dispatchers.IO) {
+                                                val updated = currentGroup.copy(
+                                                    members = currentGroup.members - memberId,
+                                                    version = currentGroup.version + 1
+                                                )
+                                                sl.shareService.saveGroup(updated)
+                                                "Člen '$name' odebrán z kruhu."
+                                            }
+                                        }
+                                    }
+                                ) {
+                                    Text("Odebrat", color = Color(0xFFF43F5E))
+                                }
+                            }
+                        }
+                        if (!isMe && currentGroup != null && isSelfAdmin) {
+                            Row(
+                                Modifier.fillMaxWidth().padding(start = 22.dp, top = 2.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                Text("Odebrat", color = Color(0xFFF43F5E))
+                                if (!isAdmin) {
+                                    OutlinedButton(
+                                        onClick = {
+                                            scope.launch {
+                                                notice = withContext(Dispatchers.IO) {
+                                                    sl.shareService.promoteCircleAdmin(currentGroup.id, memberId).fold(
+                                                        onSuccess = { "Člen '$name' jmenován správcem kruhu." },
+                                                        onFailure = { it.message ?: "Nepodařilo se jmenovat správce." }
+                                                    )
+                                                }
+                                            }
+                                        },
+                                        shape = RoundedCornerShape(10.dp),
+                                        border = BorderStroke(1.dp, Color(0xFFF59E0B).copy(alpha = 0.5f))
+                                    ) {
+                                        Text("Jmenovat správcem", style = MaterialTheme.typography.labelSmall, color = Color(0xFFF59E0B))
+                                    }
+                                } else if (effectiveAdmins.size > 1) {
+                                    OutlinedButton(
+                                        onClick = {
+                                            scope.launch {
+                                                notice = withContext(Dispatchers.IO) {
+                                                    sl.shareService.demoteCircleAdmin(currentGroup.id, memberId).fold(
+                                                        onSuccess = { "Členu '$name' bylo odebráno správcovství." },
+                                                        onFailure = { it.message ?: "Nepodařilo se odebrat správcovství." }
+                                                    )
+                                                }
+                                            }
+                                        },
+                                        shape = RoundedCornerShape(10.dp),
+                                        border = BorderStroke(1.dp, Color(0xFF94A3B8).copy(alpha = 0.4f))
+                                    ) {
+                                        Text("Odebrat správcovství", style = MaterialTheme.typography.labelSmall, color = Color(0xFFCBD5E1))
+                                    }
+                                }
                             }
                         }
                     }
                 }
 
-                // Pokud jde o uživatelskou skupinu a máme kontakty, které ještě nejsou ve skupině, nabídneme jejich přidání
+                // Pokud jde o uživatelský kruh a máme kontakty, které ještě nejsou v kruhu, nabídneme jejich přidání
                 if (currentGroup != null) {
                     val nonMembers = contacts.filter { it.identity !in currentGroup.members }
                     if (nonMembers.isNotEmpty()) {
                         Spacer(Modifier.height(8.dp))
                         Text(
-                            "Přidat do skupiny z vašich kontaktů:",
+                            "Přidat do kruhu z vašich kontaktů:",
                             style = MaterialTheme.typography.labelSmall,
                             color = Color(0xFF94A3B8)
                         )
@@ -1935,7 +2342,7 @@ private fun GroupBranchMembersAndSharingSection(
                                                 sl.outbox.enqueue(
                                                     OutboxItem(e.eventId, c.identity, e.kind, e.objectType, e.objectId, e.objectVersion, null, Wire.encode(msg), now)
                                                 )
-                                                "Kontakt '${c.displayName}' byl přidán do skupiny '${updated.name}'."
+                                                "Kontakt '${c.displayName}' byl přidán do kruhu '${updated.name}'."
                                             }
                                         }
                                     },
@@ -1956,18 +2363,42 @@ private fun GroupBranchMembersAndSharingSection(
                     Spacer(Modifier.height(16.dp))
                     OutlinedButton(
                         onClick = {
-                            scope.launch {
-                                withContext(Dispatchers.IO) {
-                                    sl.db.grants().deleteGroup(currentGroup.id)
+                            val isLastAdmin = isSelfAdmin && currentGroup.effectiveAdmins.size == 1
+                            val otherMembers = currentGroup.members - meId
+                            if (isLastAdmin && otherMembers.isNotEmpty()) {
+                                showHandoverDialog = true
+                            } else if (isLastAdmin && otherMembers.isEmpty()) {
+                                showDissolveConfirmDialog = true
+                            } else {
+                                scope.launch {
+                                    val res = withContext(Dispatchers.IO) {
+                                        sl.shareService.leaveCircle(currentGroup.id)
+                                    }
+                                    if (res.isSuccess) {
+                                        onBackToTree()
+                                    } else {
+                                        notice = res.exceptionOrNull()?.message ?: "Kruh nelze opustit."
+                                    }
                                 }
-                                onBackToTree()
                             }
                         },
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFF43F5E)),
-                        border = BorderStroke(1.dp, Color(0xFFF43F5E).copy(alpha = 0.5f)),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFF59E0B)),
+                        border = BorderStroke(1.dp, Color(0xFFF59E0B).copy(alpha = 0.55f)),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text("Smazat skupinu '${currentGroup.name}'", fontWeight = FontWeight.Bold)
+                        Text("Opustit kruh", fontWeight = FontWeight.Bold)
+                    }
+
+                    if (isSelfAdmin) {
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedButton(
+                            onClick = { showDissolveConfirmDialog = true },
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFF43F5E)),
+                            border = BorderStroke(1.dp, Color(0xFFF43F5E).copy(alpha = 0.5f)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Zrušit kruh '${currentGroup.name}'", fontWeight = FontWeight.Bold)
+                        }
                     }
                 }
             }
@@ -2203,7 +2634,7 @@ private fun CreateGroupModalDialog(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Outlined.GroupAdd, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(22.dp))
                 Spacer(Modifier.width(8.dp))
-                Text("Vytvořit novou skupinu", fontWeight = FontWeight.ExtraBold)
+                Text("Vytvořit nový kruh", fontWeight = FontWeight.ExtraBold)
             }
         },
         text = {
@@ -2211,18 +2642,18 @@ private fun CreateGroupModalDialog(
                 OutlinedTextField(
                     value = name,
                     onValueChange = { name = it },
-                    label = { Text("Název skupiny (např. Běžci, Rodina)") },
+                    label = { Text("Název kruhu (např. Běžci, Rodina)") },
                     modifier = Modifier.fillMaxWidth()
                 )
                 Spacer(Modifier.height(8.dp))
                 if (contacts.isEmpty()) {
                     Text(
-                        "Zatím nemáte spárované kontakty — skupinu vytvoříte pro sebe a členy můžete přidat později.",
+                        "Zatím nemáte spárované kontakty — kruh vytvoříte pro sebe a členy můžete přidat později.",
                         style = MaterialTheme.typography.labelSmall,
                         color = Color(0xFF94A3B8)
                     )
                 } else {
-                    Text("Vyberte členy skupiny:", style = MaterialTheme.typography.labelMedium)
+                    Text("Vyberte členy kruhu:", style = MaterialTheme.typography.labelMedium)
                     FlowRow(Modifier.padding(top = 4.dp)) {
                         contacts.forEach { c ->
                             FilterChip(
@@ -2277,6 +2708,134 @@ private fun CreateGroupModalDialog(
         dismissButton = {
             TextButton(onClick = onDismiss) {
                 Text("Zrušit", color = Color(0xFF94A3B8))
+            }
+        }
+    )
+}
+
+/**
+ * Modální dialog pro přidání dítěte / rodinného člena z existujících P2P kontaktů.
+ */
+@Composable
+private fun AddFamilyLinkModalDialog(
+    sl: ServiceLocator,
+    contacts: List<ContactRow>,
+    onOpenPairing: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val scope = rememberCoroutineScope()
+    var selectedContact by remember { mutableStateOf(contacts.firstOrNull()) }
+    var selectedProfile by remember { mutableStateOf(AgeProfile.MINOR) }
+    var confirmationMessage by remember { mutableStateOf<String?>(null) }
+    var errorMsg by remember { mutableStateOf<String?>(null) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Color(0xFF0A101B),
+        titleContentColor = Color.White,
+        textContentColor = Color(0xFFCBD5E1),
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Outlined.FamilyRestroom, contentDescription = null, tint = Color(0xFFA855F7), modifier = Modifier.size(22.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Přidat dítě / člena rodiny", fontWeight = FontWeight.ExtraBold)
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                if (confirmationMessage != null) {
+                    Text(
+                        confirmationMessage!!,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFF10B981)
+                    )
+                } else if (contacts.isEmpty()) {
+                    Text(
+                        "Zatím nemáte žádný spárovaný kontakt. Nejprve spárujte zařízení dítěte nebo člena rodiny přes QR kód.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFFCBD5E1)
+                    )
+                    OutlinedButton(
+                        onClick = onOpenPairing,
+                        border = BorderStroke(1.dp, Color(0xFF2DD4BF).copy(alpha = 0.7f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Outlined.QrCode, contentDescription = null, tint = Color(0xFF2DD4BF), modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Spárovat nový kontakt", color = Color(0xFF2DD4BF))
+                    }
+                } else {
+                    Text("1. Vyberte spárovaný kontakt:", style = MaterialTheme.typography.labelMedium, color = Color.White)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        contacts.forEach { c ->
+                            FilterChip(
+                                selected = selectedContact?.identity == c.identity,
+                                onClick = { selectedContact = c },
+                                leadingIcon = {
+                                    Icon(Icons.Outlined.Person, contentDescription = null, modifier = Modifier.size(16.dp))
+                                },
+                                label = { Text(c.displayName) }
+                            )
+                        }
+                    }
+
+                    Text("2. Věkový profil účtu:", style = MaterialTheme.typography.labelMedium, color = Color.White)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        FilterChip(
+                            selected = selectedProfile == AgeProfile.MINOR,
+                            onClick = { selectedProfile = AgeProfile.MINOR },
+                            label = { Text("Dítě / nezletilý") }
+                        )
+                        FilterChip(
+                            selected = selectedProfile == AgeProfile.ADULT,
+                            onClick = { selectedProfile = AgeProfile.ADULT },
+                            label = { Text("Dospělý člen") }
+                        )
+                    }
+
+                    Text(
+                        "Po potvrzení nevznikne automatické sdílení zdravotních dat — oprávnění se nastavují zvlášť.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xFF94A3B8)
+                    )
+                }
+                errorMsg?.let {
+                    Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
+                }
+            }
+        },
+        confirmButton = {
+            if (confirmationMessage != null) {
+                Button(onClick = onDismiss) {
+                    Text("Hotovo", fontWeight = FontWeight.Bold)
+                }
+            } else if (contacts.isNotEmpty()) {
+                Button(
+                    enabled = selectedContact != null,
+                    onClick = {
+                        val contact = selectedContact ?: return@Button
+                        scope.launch {
+                            try {
+                                withContext(Dispatchers.IO) {
+                                    sl.shareService.sendFamilyLinkRequest(contact.identity, selectedProfile)
+                                }
+                                confirmationMessage =
+                                    "Žádost o rodinné propojení odeslána. Po potvrzení nevznikne automatické sdílení zdravotních dat — oprávnění se nastavují zvlášť."
+                            } catch (e: Exception) {
+                                errorMsg = "Chyba: ${e.message}"
+                            }
+                        }
+                    }
+                ) {
+                    Text("Odeslat žádost", fontWeight = FontWeight.Bold)
+                }
+            }
+        },
+        dismissButton = {
+            if (confirmationMessage == null) {
+                TextButton(onClick = onDismiss) {
+                    Text("Zrušit", color = Color(0xFF94A3B8))
+                }
             }
         }
     )

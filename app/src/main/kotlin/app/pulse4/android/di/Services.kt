@@ -22,6 +22,10 @@ import app.pulse4.provider.AreaResult
 import app.pulse4.provider.SyncArea
 import app.pulse4.provider.SyncEngine
 import app.pulse4.sharing.ActivityProjector
+import app.pulse4.sharing.AgeProfile
+import app.pulse4.sharing.CircleAdminPolicy
+import app.pulse4.sharing.FamilyLink
+import app.pulse4.sharing.FamilyLinkPolicy
 import app.pulse4.sharing.Field
 import app.pulse4.sharing.Group
 import app.pulse4.sharing.LapIn
@@ -30,10 +34,13 @@ import app.pulse4.sharing.Revocation
 import app.pulse4.sharing.RevocationPlan
 import app.pulse4.sharing.ShareGrant
 import app.pulse4.sync.EnqueueResult
+import app.pulse4.sync.HandlerResult
+import app.pulse4.sync.KindHandler
 import app.pulse4.sync.Kinds
 import app.pulse4.sync.MessageBuilder
 import app.pulse4.sync.OutboxItem
 import app.pulse4.sync.OutboxManager
+import app.pulse4.sync.RejectReason
 import app.pulse4.sync.ShareBuilder
 import app.pulse4.sync.Wire
 import app.pulse4.training.PlanService
@@ -58,21 +65,115 @@ class ServiceLocator(private val context: Context) {
     val planHandlers by lazy { PlanSyncHandlers(planService) }
     val transport by lazy {
         ReticulumTransport(bridge, settings, db, outbox) {
-            planHandlers.handlers() + (WithingsService.FAMILY_WEIGHT_PUSH_KIND to app.pulse4.sync.KindHandler { env, payload, _, nowMs ->
-                if (!settings.acceptWeightFromParent) return@KindHandler app.pulse4.sync.HandlerResult.Applied
-                val obs = runCatching {
-                    Wire.json.decodeFromString(app.pulse4.domain.MetricObservation.serializer(), payload)
-                }.getOrNull() ?: return@KindHandler app.pulse4.sync.HandlerResult.Rejected(app.pulse4.sync.RejectReason.INVALID_PAYLOAD)
-                val savedObs = obs.copy(
-                    accountId = "withings-family:${env.author.take(8)}",
-                    quality = app.pulse4.domain.Quality.OK,
-                    deleted = false
-                )
-                db.observations().upsert(listOf(savedObs.toRow()))
-                val prevW = db.areaStates().get("withings.WEIGHT")
-                db.areaStates().put(AreaStateRow("withings.WEIGHT", prevW?.cursorMs, nowMs, nowMs, null, null))
-                app.pulse4.sync.HandlerResult.Applied
-            })
+            planHandlers.handlers() + mapOf(
+                WithingsService.FAMILY_WEIGHT_PUSH_KIND to KindHandler { env, payload, _, nowMs ->
+                    if (!settings.acceptWeightFromParent) return@KindHandler HandlerResult.Applied
+                    val obs = runCatching {
+                        Wire.json.decodeFromString(app.pulse4.domain.MetricObservation.serializer(), payload)
+                    }.getOrNull() ?: return@KindHandler HandlerResult.Rejected(RejectReason.INVALID_PAYLOAD)
+                    val savedObs = obs.copy(
+                        accountId = "withings-family:${env.author.take(8)}",
+                        quality = app.pulse4.domain.Quality.OK,
+                        deleted = false
+                    )
+                    db.observations().upsert(listOf(savedObs.toRow()))
+                    val prevW = db.areaStates().get("withings.WEIGHT")
+                    db.areaStates().put(AreaStateRow("withings.WEIGHT", prevW?.cursorMs, nowMs, nowMs, null, null))
+                    HandlerResult.Applied
+                },
+                Kinds.FAMILY_LINK_REQUEST to KindHandler { env, payload, _, nowMs ->
+                    val link = runCatching {
+                        Wire.json.decodeFromString(FamilyLink.serializer(), payload)
+                    }.getOrNull() ?: return@KindHandler HandlerResult.Rejected(RejectReason.INVALID_PAYLOAD)
+                    if (link.childId != env.recipient || link.parentId != env.author) {
+                        return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
+                    }
+                    val existing = db.familyLinks().get(link.id)
+                    if (existing != null && link.version <= existing.version) {
+                        return@KindHandler HandlerResult.Stale
+                    }
+                    db.familyLinks().upsert(FamilyLinkRow(link.id, link.parentId, link.childId, link.status.name, link.version, payload))
+                    db.pendingRequests().upsert(
+                        PendingRequestRow(
+                            id = link.id,
+                            kind = "FAMILY_LINK_REQUEST",
+                            fromId = link.parentId,
+                            toId = link.childId,
+                            status = "PENDING",
+                            createdAtMs = nowMs,
+                            json = payload,
+                        )
+                    )
+                    HandlerResult.Applied
+                },
+                Kinds.FAMILY_LINK_RESPONSE to KindHandler { env, payload, _, _ ->
+                    val link = runCatching {
+                        Wire.json.decodeFromString(FamilyLink.serializer(), payload)
+                    }.getOrNull() ?: return@KindHandler HandlerResult.Rejected(RejectReason.INVALID_PAYLOAD)
+                    if (link.parentId != env.recipient || link.childId != env.author) {
+                        return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
+                    }
+                    val existing = db.familyLinks().get(link.id)
+                    if (existing != null && link.version <= existing.version) {
+                        return@KindHandler HandlerResult.Stale
+                    }
+                    db.familyLinks().upsert(FamilyLinkRow(link.id, link.parentId, link.childId, link.status.name, link.version, payload))
+                    HandlerResult.Applied
+                },
+                Kinds.ADMIN_HANDOVER_REQUEST to KindHandler { env, payload, store, nowMs ->
+                    val g = runCatching {
+                        Wire.json.decodeFromString(Group.serializer(), payload)
+                    }.getOrNull() ?: return@KindHandler HandlerResult.Rejected(RejectReason.INVALID_PAYLOAD)
+                    val handover = g.pendingAdminHandover
+                        ?: return@KindHandler HandlerResult.Rejected(RejectReason.INVALID_PAYLOAD)
+                    val existing = store.group(g.id)
+                    if (existing != null) {
+                        if (env.author !in existing.effectiveAdmins) {
+                            return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
+                        }
+                        if (g.version <= existing.version) return@KindHandler HandlerResult.Stale
+                    } else if (env.author !in g.effectiveAdmins) {
+                        return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
+                    }
+                    store.putGroup(g)
+                    if (handover.targetMemberId == env.recipient) {
+                        db.pendingRequests().upsert(
+                            PendingRequestRow(
+                                id = "handover-${g.id}",
+                                kind = "ADMIN_HANDOVER_REQUEST",
+                                fromId = handover.initiatedBy,
+                                toId = handover.targetMemberId,
+                                status = "PENDING",
+                                createdAtMs = nowMs,
+                                json = payload,
+                            )
+                        )
+                    }
+                    HandlerResult.Applied
+                },
+                Kinds.ADMIN_HANDOVER_ACCEPT to KindHandler { env, payload, store, _ ->
+                    val g = runCatching {
+                        Wire.json.decodeFromString(Group.serializer(), payload)
+                    }.getOrNull() ?: return@KindHandler HandlerResult.Rejected(RejectReason.INVALID_PAYLOAD)
+                    if (!g.dissolved && g.effectiveAdmins.isEmpty()) {
+                        return@KindHandler HandlerResult.Rejected(RejectReason.INVALID_PAYLOAD)
+                    }
+                    val existing = store.group(g.id)
+                    if (existing != null) {
+                        val permitted = env.author in existing.effectiveAdmins ||
+                            existing.pendingAdminHandover?.targetMemberId == env.author
+                        if (!permitted) return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
+                        if (g.version <= existing.version) return@KindHandler HandlerResult.Stale
+                    } else if (env.author !in g.effectiveAdmins) {
+                        return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
+                    }
+                    store.putGroup(g)
+                    db.pendingRequests().get("handover-${g.id}")?.let { req ->
+                        db.pendingRequests().upsert(req.copy(status = "ACCEPTED", json = payload))
+                    }
+                    HandlerResult.Applied
+                },
+            )
         }.also { t ->
             bridge.onEventReceived = { ev -> t.processEvent(ev) }
         }
@@ -1522,9 +1623,218 @@ class ShareService(private val sl: ServiceLocator) {
 
     fun grants(): List<ShareGrant> = sl.db.grants().allNow().map { json.decodeFromString(ShareGrant.serializer(), it.json) }
     fun groups(): Map<String, Group> = sl.db.grants().groupsNow().associate { it.id to json.decodeFromString(Group.serializer(), it.json) }
+    fun familyLinks(): List<FamilyLink> = sl.db.familyLinks().allNow().map { json.decodeFromString(FamilyLink.serializer(), it.json) }
+    fun pendingRequests(): List<PendingRequestRow> = sl.db.pendingRequests().pendingNow()
 
     fun saveGrant(g: ShareGrant) = sl.db.grants().upsert(GrantRow(g.id, !g.active, json.encodeToString(ShareGrant.serializer(), g)))
     fun saveGroup(g: Group) = sl.db.grants().upsertGroup(GroupRow(g.id, g.version, json.encodeToString(Group.serializer(), g)))
+
+    fun saveGrantWithPolicy(grant: ShareGrant, guardianCoConsentAtMs: Long? = null): Result<ShareGrant> {
+        val self = sl.bridge.ensureStarted().deliveryHash
+        val ageProfile = AgeProfile.valueOf(sl.settings.ownAgeProfile)
+        if (!FamilyLinkPolicy.canActivateShareGrant(self, ageProfile, grant, familyLinks(), guardianCoConsentAtMs)) {
+            return Result.failure(
+                IllegalStateException("Sdílení nelze aktivovat: pro nezletilý účet je nutná ověřená rodinná vazba a souhlas zákonného zástupce.")
+            )
+        }
+        saveGrant(grant)
+        return Result.success(grant)
+    }
+
+    fun sendFamilyLinkRequest(
+        childId: String,
+        childAgeProfile: AgeProfile = AgeProfile.MINOR,
+        nowMs: Long = System.currentTimeMillis(),
+    ): FamilyLink {
+        val self = sl.bridge.ensureStarted().deliveryHash
+        val link = FamilyLinkPolicy.createRequest(
+            id = java.util.UUID.randomUUID().toString(),
+            parentId = self,
+            childId = childId,
+            childAgeProfile = childAgeProfile,
+            nowMs = nowMs,
+        )
+        val linkJson = json.encodeToString(FamilyLink.serializer(), link)
+        sl.db.familyLinks().upsert(FamilyLinkRow(link.id, link.parentId, link.childId, link.status.name, link.version, linkJson))
+        val msg = MessageBuilder(self).build(
+            recipient = childId,
+            kind = Kinds.FAMILY_LINK_REQUEST,
+            objectType = "family_link",
+            objectId = link.id,
+            objectVersion = link.version,
+            payload = linkJson,
+            nowMs = nowMs,
+        )
+        val e = msg.envelope
+        sl.outbox.enqueue(OutboxItem(e.eventId, e.recipient, e.kind, e.objectType, e.objectId, e.objectVersion, null, Wire.encode(msg), nowMs))
+        return link
+    }
+
+    fun respondFamilyLink(
+        linkId: String,
+        accept: Boolean,
+        nowMs: Long = System.currentTimeMillis(),
+    ): FamilyLink? {
+        val row = sl.db.familyLinks().get(linkId) ?: return null
+        val link = json.decodeFromString(FamilyLink.serializer(), row.json)
+        val self = sl.bridge.ensureStarted().deliveryHash
+        val updated = runCatching { FamilyLinkPolicy.respond(link, self, accept, nowMs) }.getOrNull() ?: return null
+        val updatedJson = json.encodeToString(FamilyLink.serializer(), updated)
+        sl.db.familyLinks().upsert(FamilyLinkRow(updated.id, updated.parentId, updated.childId, updated.status.name, updated.version, updatedJson))
+        sl.db.pendingRequests().get(linkId)?.let { req ->
+            sl.db.pendingRequests().upsert(
+                req.copy(
+                    status = if (accept) "ACCEPTED" else "REJECTED",
+                    json = updatedJson,
+                )
+            )
+        }
+        val msg = MessageBuilder(self).build(
+            recipient = updated.parentId,
+            kind = Kinds.FAMILY_LINK_RESPONSE,
+            objectType = "family_link",
+            objectId = updated.id,
+            objectVersion = updated.version,
+            payload = updatedJson,
+            nowMs = nowMs,
+        )
+        val e = msg.envelope
+        sl.outbox.enqueue(OutboxItem(e.eventId, e.recipient, e.kind, e.objectType, e.objectId, e.objectVersion, null, Wire.encode(msg), nowMs))
+        return updated
+    }
+
+    fun promoteCircleAdmin(groupId: String, targetMemberId: String): Result<Group> {
+        val group = groups()[groupId] ?: return Result.failure(IllegalArgumentException("Kruh nenalezen."))
+        val self = sl.bridge.ensureStarted().deliveryHash
+        val updated = CircleAdminPolicy.promoteAdmin(group, self, targetMemberId)
+            ?: return Result.failure(IllegalStateException("Nelze povýšit člena na správce."))
+        saveGroup(updated)
+        broadcastMembershipUpdate(updated, System.currentTimeMillis())
+        return Result.success(updated)
+    }
+
+    fun demoteCircleAdmin(groupId: String, targetMemberId: String): Result<Group> {
+        val group = groups()[groupId] ?: return Result.failure(IllegalArgumentException("Kruh nenalezen."))
+        val self = sl.bridge.ensureStarted().deliveryHash
+        val updated = CircleAdminPolicy.demoteAdmin(group, self, targetMemberId)
+            ?: return Result.failure(IllegalStateException("Nelze odebrat roli správce (kruh musí mít alespoň jednoho správce)."))
+        saveGroup(updated)
+        broadcastMembershipUpdate(updated, System.currentTimeMillis())
+        return Result.success(updated)
+    }
+
+    fun initiateAdminHandover(
+        groupId: String,
+        targetMemberId: String,
+        nowMs: Long = System.currentTimeMillis(),
+    ): Result<Group> {
+        val group = groups()[groupId] ?: return Result.failure(IllegalArgumentException("Kruh nenalezen."))
+        val self = sl.bridge.ensureStarted().deliveryHash
+        val updated = CircleAdminPolicy.initiateHandover(group, self, targetMemberId, nowMs)
+            ?: return Result.failure(IllegalStateException("Nelze zahájit předání správy kruhu."))
+        saveGroup(updated)
+        broadcastMembershipUpdate(updated, nowMs)
+        val payload = json.encodeToString(Group.serializer(), updated)
+        val msg = MessageBuilder(self).build(
+            recipient = targetMemberId,
+            kind = Kinds.ADMIN_HANDOVER_REQUEST,
+            objectType = "group",
+            objectId = updated.id,
+            objectVersion = updated.version,
+            payload = payload,
+            nowMs = nowMs,
+        )
+        val e = msg.envelope
+        sl.outbox.enqueue(OutboxItem(e.eventId, e.recipient, e.kind, e.objectType, e.objectId, e.objectVersion, null, Wire.encode(msg), nowMs))
+        return Result.success(updated)
+    }
+
+    fun acceptAdminHandover(
+        groupId: String,
+        nowMs: Long = System.currentTimeMillis(),
+    ): Result<Group> {
+        val group = groups()[groupId] ?: return Result.failure(IllegalArgumentException("Kruh nenalezen."))
+        val self = sl.bridge.ensureStarted().deliveryHash
+        val initiator = group.pendingAdminHandover?.initiatedBy
+        val updated = CircleAdminPolicy.acceptHandover(group, self, nowMs, removeInitiator = true)
+            ?: return Result.failure(IllegalStateException("Žádost o předání správy není platná nebo vypršela."))
+        saveGroup(updated)
+        val payload = json.encodeToString(Group.serializer(), updated)
+        sl.db.pendingRequests().get("handover-${group.id}")?.let { req ->
+            sl.db.pendingRequests().upsert(req.copy(status = "ACCEPTED", json = payload))
+        }
+        val extra = setOfNotNull(initiator)
+        broadcastMembershipUpdate(updated, nowMs, extraRecipients = extra)
+        val builder = MessageBuilder(self)
+        for (r in (updated.members + extra) - self) {
+            val msg = builder.build(
+                recipient = r,
+                kind = Kinds.ADMIN_HANDOVER_ACCEPT,
+                objectType = "group",
+                objectId = updated.id,
+                objectVersion = updated.version,
+                payload = payload,
+                nowMs = nowMs,
+            )
+            val e = msg.envelope
+            sl.outbox.enqueue(OutboxItem(e.eventId, e.recipient, e.kind, e.objectType, e.objectId, e.objectVersion, null, Wire.encode(msg), nowMs))
+        }
+        return Result.success(updated)
+    }
+
+    fun leaveCircle(groupId: String): Result<Group> {
+        val group = groups()[groupId] ?: return Result.failure(IllegalArgumentException("Kruh nenalezen."))
+        val self = sl.bridge.ensureStarted().deliveryHash
+        if (!CircleAdminPolicy.canLeaveDirectly(group, self)) {
+            return Result.failure(
+                IllegalStateException("Jste poslední správce kruhu. Před odchodem musíte nejprve předat roli správce jinému členovi.")
+            )
+        }
+        val prevMembers = group.members
+        val updated = CircleAdminPolicy.leaveCircle(group, self)
+            ?: return Result.failure(IllegalStateException("Kruh nelze opustit."))
+        saveGroup(updated)
+        broadcastMembershipUpdate(updated, System.currentTimeMillis(), extraRecipients = prevMembers - updated.members - self)
+        return Result.success(updated)
+    }
+
+    fun dissolveCircle(groupId: String): Result<Group> {
+        val group = groups()[groupId] ?: return Result.failure(IllegalArgumentException("Kruh nenalezen."))
+        val self = sl.bridge.ensureStarted().deliveryHash
+        val prevMembers = group.members
+        val updated = CircleAdminPolicy.dissolveCircle(group, self)
+            ?: return Result.failure(IllegalStateException("Kruh může rozpustit pouze správce."))
+        saveGroup(updated)
+        val nowMs = System.currentTimeMillis()
+        for (g in grants().filter { it.active && it.groupId == groupId }) {
+            revoke(g.id, nowMs)
+        }
+        broadcastMembershipUpdate(updated, nowMs, extraRecipients = prevMembers - self)
+        return Result.success(updated)
+    }
+
+    private fun broadcastMembershipUpdate(
+        group: Group,
+        nowMs: Long,
+        extraRecipients: Set<String> = emptySet(),
+    ) {
+        val self = sl.bridge.ensureStarted().deliveryHash
+        val builder = MessageBuilder(self)
+        val payload = json.encodeToString(Group.serializer(), group)
+        for (r in (group.members + extraRecipients) - self) {
+            val msg = builder.build(
+                recipient = r,
+                kind = Kinds.MEMBERSHIP_UPDATE,
+                objectType = "group",
+                objectId = group.id,
+                objectVersion = group.version,
+                payload = payload,
+                nowMs = nowMs,
+            )
+            val e = msg.envelope
+            sl.outbox.enqueue(OutboxItem(e.eventId, e.recipient, e.kind, e.objectType, e.objectId, e.objectVersion, null, Wire.encode(msg), nowMs))
+        }
+    }
 
     /** Vytvoří projekce změněných dat pro každého skutečného příjemce a zařadí je do outboxu. Vrací počet zařazených. */
     fun planAndEnqueue(nowMs: Long): Int {
@@ -1535,14 +1845,12 @@ class ShareService(private val sl: ServiceLocator) {
         val earliestGrantFrom = activeGrants.mapNotNull { it.scope.from?.let { f -> runCatching { LocalDate.parse(f) }.getOrNull() } }.minOrNull()
         val from = earliestGrantFrom ?: today.minusDays(60)
         val dates = sl.db.observations().datesWithData(from.toString(), today.toString()).map(LocalDate::parse)
-        val days = dates.map { d ->
-            OwnerDayAssembler.assemble(d, sl.db.observations().forDate(d.toString()).map { it.toDomain() }, sl.settings.weightPreference.mapNotNull { runCatching { Provider.valueOf(it) }.getOrNull() })
-        }
+        val allObservations = sl.db.observations().forRange(from.toString(), today.toString()).map { it.toDomain() }
         // Nejdřív nahradit prošlé nepotvrzené souhrny čerstvým snapshotem.
         sl.outbox.expireStale(nowMs).forEach { (recipient, key) -> sl.sentLedger.record(recipient, key, (sl.sentLedger.last(recipient, key)?.version ?: 0), "expired") }
 
         var queued = 0
-        val plan = ShareBuilder(self, MessageBuilder(self)).plan(grants(), groups(), days, sl.sentLedger, nowMs)
+        val plan = ShareBuilder(self, MessageBuilder(self)).plan(grants(), groups(), dates, allObservations, sl.sentLedger, nowMs)
         for (p in plan) {
             val e = p.message.envelope
             val item = OutboxItem(e.eventId, e.recipient, e.kind, e.objectType, e.objectId, e.objectVersion, p.grantId, Wire.encode(p.message), nowMs)
@@ -1565,6 +1873,7 @@ class ShareService(private val sl: ServiceLocator) {
                 json.decodeFromString(kotlinx.serialization.builtins.ListSerializer(app.pulse4.domain.TrackPoint.serializer()), it.json)
             }.orEmpty()
             for (g in grants().filter { it.active && it.ownerId == self && it.fields.any { f -> f.category == app.pulse4.sharing.Category.ACTIVITY } }) {
+                if (!g.allowsProvider(act.provider)) continue
                 val proj = ActivityProjector.project(g, act, track, emptyList<LapIn>(), zones)
                 android.util.Log.i("Pulse4Sync", "act=${act.id}, grant=${g.id}, scope=${g.scope}, projIsNull=${proj == null}")
                 if (proj == null) continue

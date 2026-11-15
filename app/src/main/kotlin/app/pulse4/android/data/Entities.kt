@@ -144,3 +144,24 @@ data class SettingRow(@PrimaryKey val key: String, val value: String)
 /** Měření, která uživatel označil za chybná; přežije opakovaný import. */
 @Entity(tableName = "excluded_measurement")
 data class ExcludedRow(@PrimaryKey val observationId: String, val excludedAtMs: Long)
+
+@Entity(tableName = "family_link")
+data class FamilyLinkRow(
+    @PrimaryKey val id: String,
+    val parentId: String,
+    val childId: String,
+    val status: String,
+    val version: Long,
+    val json: String,
+)
+
+@Entity(tableName = "pending_request")
+data class PendingRequestRow(
+    @PrimaryKey val id: String,
+    val kind: String,
+    val fromId: String,
+    val toId: String,
+    val status: String,
+    val createdAtMs: Long,
+    val json: String,
+)

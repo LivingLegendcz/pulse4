@@ -1186,7 +1186,7 @@ fun OuraCirclesMeshSection(
                         )
                     }
                     Text(
-                        "Skupiny & QR ›",
+                        "Kruhy & QR ›",
                         style = MaterialTheme.typography.labelSmall,
                         color = Color(0xFF38BDF8),
                         fontWeight = FontWeight.SemiBold,

@@ -61,7 +61,7 @@ object ActivityProjector {
         originalFit: AttachmentRef? = null,
         chartBuckets: Int = 80,
     ): ActivityProjection? {
-        if (!grant.active) return null
+        if (!grant.active || !grant.allowsProvider(activity.provider)) return null
         val date = TimeRules.localDate(activity.startUtcMs, activity.zoneId)
         if (!grant.scope.covers(date)) return null
         val omitted = mutableListOf<String>()

@@ -1,5 +1,6 @@
 package app.pulse4.sharing
 
+import app.pulse4.domain.Provider
 import java.time.LocalDate
 import kotlinx.serialization.Serializable
 
@@ -78,11 +79,21 @@ data class ShareGrant(
     val groupId: String? = null,
     val createdAtMs: Long,
     val revokedAtMs: Long? = null,
+    val sources: Set<Provider>? = null,
 ) {
     val active: Boolean get() = revokedAtMs == null
     fun allows(f: Field) = active && f in fields
+    fun allowsProvider(provider: Provider): Boolean = active && (sources == null || provider in sources)
     fun planRight(planId: String): PlanRight? = if (active) planRights[planId] else null
 }
+
+@Serializable
+data class AdminHandover(
+    val targetMemberId: String,
+    val initiatedBy: String,
+    val initiatedAtMs: Long,
+    val expiresAtMs: Long,
+)
 
 @Serializable
 data class Group(
@@ -92,7 +103,128 @@ data class Group(
     val adminId: String,
     val members: Set<String>,
     val version: Long,
-)
+    val admins: Set<String> = emptySet(),
+    val pendingAdminHandover: AdminHandover? = null,
+    val dissolved: Boolean = false,
+) {
+    val effectiveAdmins: Set<String>
+        get() = when {
+            dissolved -> emptySet()
+            admins.isNotEmpty() -> admins
+            adminId.isNotBlank() -> setOf(adminId)
+            else -> emptySet()
+        }
+}
+
+object CircleAdminPolicy {
+    fun promoteAdmin(group: Group, actorId: String, targetMemberId: String): Group? {
+        if (group.dissolved) return null
+        val currentAdmins = group.effectiveAdmins
+        if (actorId !in currentAdmins || targetMemberId !in group.members) return null
+        return group.copy(
+            admins = currentAdmins + targetMemberId,
+            version = group.version + 1,
+        )
+    }
+
+    fun demoteAdmin(group: Group, actorId: String, targetMemberId: String): Group? {
+        if (group.dissolved) return null
+        val currentAdmins = group.effectiveAdmins
+        if (actorId !in currentAdmins || targetMemberId !in currentAdmins) return null
+        val remaining = currentAdmins - targetMemberId
+        if (remaining.isEmpty()) return null
+        val nextAdminId = if (targetMemberId == group.adminId) remaining.first() else group.adminId
+        return group.copy(
+            adminId = nextAdminId,
+            admins = remaining,
+            version = group.version + 1,
+        )
+    }
+
+    fun initiateHandover(
+        group: Group,
+        actorId: String,
+        targetMemberId: String,
+        nowMs: Long,
+        ttlMs: Long = 7L * 24 * 3600 * 1000,
+    ): Group? {
+        if (group.dissolved) return null
+        if (actorId !in group.effectiveAdmins || targetMemberId !in group.members || targetMemberId == actorId) return null
+        return group.copy(
+            pendingAdminHandover = AdminHandover(
+                targetMemberId = targetMemberId,
+                initiatedBy = actorId,
+                initiatedAtMs = nowMs,
+                expiresAtMs = nowMs + ttlMs,
+            ),
+            version = group.version + 1,
+        )
+    }
+
+    fun acceptHandover(
+        group: Group,
+        actorId: String,
+        nowMs: Long,
+        removeInitiator: Boolean = true,
+    ): Group? {
+        if (group.dissolved) return null
+        val handover = group.pendingAdminHandover ?: return null
+        if (handover.targetMemberId != actorId || nowMs > handover.expiresAtMs) return null
+        if (actorId !in group.members) return null
+        val baseAdmins = group.effectiveAdmins + actorId
+        val newAdmins = if (removeInitiator) baseAdmins - handover.initiatedBy else baseAdmins
+        if (newAdmins.isEmpty()) return null
+        val newMembers = if (removeInitiator) group.members - handover.initiatedBy else group.members
+        val newAdminId = if (group.adminId in newAdmins) group.adminId else actorId
+        return group.copy(
+            adminId = newAdminId,
+            admins = newAdmins,
+            members = newMembers,
+            pendingAdminHandover = null,
+            version = group.version + 1,
+        )
+    }
+
+    fun canLeaveDirectly(group: Group, actorId: String): Boolean {
+        val remainingMembers = group.members - actorId
+        val remainingAdmins = group.effectiveAdmins - actorId
+        return !(remainingMembers.isNotEmpty() && remainingAdmins.isEmpty())
+    }
+
+    fun leaveCircle(group: Group, actorId: String): Group? {
+        if (group.dissolved || actorId !in group.members) return null
+        if (!canLeaveDirectly(group, actorId)) return null
+        val remainingMembers = group.members - actorId
+        if (remainingMembers.isEmpty()) {
+            return group.copy(
+                members = emptySet(),
+                admins = emptySet(),
+                pendingAdminHandover = null,
+                dissolved = true,
+                version = group.version + 1,
+            )
+        }
+        val remainingAdmins = group.effectiveAdmins - actorId
+        val nextAdminId = if (group.adminId == actorId) remainingAdmins.first() else group.adminId
+        return group.copy(
+            adminId = nextAdminId,
+            members = remainingMembers,
+            admins = remainingAdmins,
+            version = group.version + 1,
+        )
+    }
+
+    fun dissolveCircle(group: Group, actorId: String): Group? {
+        if (group.dissolved || actorId !in group.effectiveAdmins) return null
+        return group.copy(
+            members = emptySet(),
+            admins = emptySet(),
+            pendingAdminHandover = null,
+            dissolved = true,
+            version = group.version + 1,
+        )
+    }
+}
 
 object MembershipPolicy {
     /**

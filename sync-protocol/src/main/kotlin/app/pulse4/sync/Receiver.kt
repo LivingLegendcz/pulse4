@@ -158,14 +158,22 @@ object BuiltInHandlers {
         HandlerResult.Applied
     }
 
-    /** Změnu členství podepisuje správce; samo o sobě nerozšiřuje souhlas vlastníků dat. */
+    /** Změnu členství podepisuje správce nebo cíl probíhajícího předání; samo o sobě nerozšiřuje souhlas vlastníků dat. */
     val membershipUpdate = KindHandler { env, payload, store, _ ->
         val g = runCatching { json.decodeFromString<Group>(payload) }.getOrNull()
             ?: return@KindHandler HandlerResult.Rejected(RejectReason.INVALID_PAYLOAD)
-        if (env.author != g.adminId) return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
+        if (!g.dissolved && g.effectiveAdmins.isEmpty()) {
+            return@KindHandler HandlerResult.Rejected(RejectReason.INVALID_PAYLOAD)
+        }
         val existing = store.group(g.id)
-        if (existing != null && existing.adminId != env.author) return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
-        if (existing != null && g.version <= existing.version) return@KindHandler HandlerResult.Stale
+        if (existing != null) {
+            val permitted = env.author in existing.effectiveAdmins ||
+                existing.pendingAdminHandover?.targetMemberId == env.author
+            if (!permitted) return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
+            if (g.version <= existing.version) return@KindHandler HandlerResult.Stale
+        } else {
+            if (env.author !in g.effectiveAdmins) return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
+        }
         store.putGroup(g)
         HandlerResult.Applied
     }

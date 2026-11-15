@@ -365,7 +365,16 @@ class ReticulumBridge(
     /** Spustí klientské spojení k Reticulum TCP uzlu v internetu */
     @Synchronized
     fun startGatewayClient() {
-        val host = settings.gatewayHost.ifBlank { "reticulum.hispagatos.org" }
+        val host = settings.gatewayHost.trim()
+        if (host.isBlank()) {
+            tcpJob?.cancel()
+            val oldSocket = tcpSocket
+            tcpSocket = null
+            tcpWriter = null
+            isGatewayOnline = false
+            runCatching { oldSocket?.close() }
+            return
+        }
         val port = settings.gatewayPort.takeIf { it > 0 } ?: 4242
         if (port == 80 || port == 443) return
 
@@ -602,6 +611,20 @@ class ReticulumBridge(
         }
     }
 
+    fun probeNodeReachability(host: String, port: Int, timeoutMs: Int = 2500): Boolean {
+        val cleanHost = host.trim()
+        if (cleanHost.isBlank() || port !in 1..65535) return false
+        val socket = Socket()
+        return try {
+            socket.connect(InetSocketAddress(cleanHost, port), timeoutMs)
+            true
+        } catch (_: Exception) {
+            false
+        } finally {
+            runCatching { socket.close() }
+        }
+    }
+
     fun announce() {
         val inf = info ?: return
         startNsd(inf.deliveryHash)
@@ -671,10 +694,10 @@ class ReticulumBridge(
                 return
             }
 
-            // 3. Fallback na HTTP Relay Mailbox (pokud je nakonfigurován port 80 nebo 443)
-            val relayHost = settings.gatewayHost.ifBlank { "relay.pulse4.app" }
+            // 3. Fallback na HTTP Relay Mailbox (pokud je nakonfigurován host a port 80 nebo 443)
+            val relayHost = settings.gatewayHost.trim()
             val relayPort = settings.gatewayPort.takeIf { it > 0 } ?: 443
-            if (relayPort == 80 || relayPort == 443) {
+            if (relayHost.isNotBlank() && (relayPort == 80 || relayPort == 443)) {
                 val scheme = if (relayPort == 443) "https" else "http"
                 val relayUrl = "$scheme://$relayHost:$relayPort/mailbox/$destHash"
 
@@ -702,7 +725,8 @@ class ReticulumBridge(
     fun syncInbox() {
         if (settings.networkMode == NetworkMode.LOCAL_ONLY) return
         val selfInfo = info ?: return
-        val relayHost = settings.gatewayHost.ifBlank { "relay.pulse4.app" }
+        val relayHost = settings.gatewayHost.trim()
+        if (relayHost.isBlank()) return
         val relayPort = settings.gatewayPort.takeIf { it > 0 } ?: 443
         if (relayPort != 80 && relayPort != 443) return
         val scheme = if (relayPort == 443) "https" else "http"

@@ -51,5 +51,13 @@ object OwnerDayAssembler {
         return OwnerDay(date, values, day.maxOfOrNull { it.endUtcMs ?: it.startUtcMs })
     }
 
+    /** Sestaví den jen z pozorování povolených zdrojovým filtrem grantu (`ShareGrant.sources`). */
+    fun assembleForGrant(
+        date: LocalDate,
+        observations: List<MetricObservation>,
+        grant: ShareGrant,
+        weightPreference: List<Provider> = listOf(Provider.WITHINGS_API, Provider.HEALTH_CONNECT, Provider.MANUAL, Provider.GARMIN_PERSONAL),
+    ): OwnerDay = assemble(date, observations.filter { grant.allowsProvider(it.provider) }, weightPreference)
+
     private fun series(o: List<MetricObservation>) = JsonArray(o.map { JsonArray(listOf(JsonPrimitive(it.startUtcMs), JsonPrimitive(it.value))) })
 }

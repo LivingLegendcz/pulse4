@@ -110,13 +110,17 @@ import kotlinx.coroutines.withContext
 /**
  * Sjednocené Centrum Nastavení na jednom místě:
  * 0 -> Obecné & Jednotky (Metrické vs Imperiální, jméno profilu)
- * 1 -> Globální Sdílení (přepínače sdílení po sekcích pro kontakty a skupiny)
+ * 1 -> Globální Sdílení (přepínače sdílení po sekcích pro kontakty a kruhy)
  * 2 -> Zdroje dat & Integrace (Garmin, Withings, senzory, Health Connect, rodinné profily)
  * 3 -> Reticulum P2P Síť (režim, brány, propagation uzel, identita, fronta)
  * 4 -> Soukromí & Záloha (zóny soukromí, mapy, šifrovaný export/obnova)
  */
 @Composable
-fun SettingsHubScreen(sl: ServiceLocator, initialTab: Int = 0) {
+fun SettingsHubScreen(
+    sl: ServiceLocator,
+    initialTab: Int = 0,
+    onOpenSharingOverview: (() -> Unit)? = null,
+) {
     var selectedTab by remember { mutableStateOf(initialTab) }
     val tabs = listOf(
         Triple("Jednotky & Mapy", "KALIBRACE", 0),
@@ -318,7 +322,7 @@ fun SettingsHubScreen(sl: ServiceLocator, initialTab: Int = 0) {
 
         when (selectedTab) {
             0 -> GeneralAndUnitsSection(sl)
-            1 -> GlobalSharingSection(sl)
+            1 -> GlobalSharingSection(sl, onOpenSharingOverview)
             2 -> SourcesSettingsSection(sl)
             3 -> ReticulumSettingsSection(sl)
             4 -> PrivacyAndBackupSection(sl)
@@ -578,7 +582,7 @@ private fun GeneralAndUnitsSection(sl: ServiceLocator) {
                 OutlinedTextField(
                     value = displayName,
                     onValueChange = { displayName = it },
-                    label = { Text("Moje jméno (zobrazí se v QR kódu a skupině)") },
+                    label = { Text("Moje jméno (zobrazí se v QR kódu a kruhu)") },
                     modifier = Modifier.fillMaxWidth()
                 )
                 Spacer(Modifier.height(10.dp))
@@ -789,10 +793,13 @@ private fun GeneralAndUnitsSection(sl: ServiceLocator) {
 /**
  * Globální sdílení po sekcích na jednom místě:
  * Uživatel si zapne/vypne přepínače jednotlivých sekcí (Spánek, Body Battery, Tep, HRV, Aktivity, Tělo)
- * a zvolí, zda sdílet všem kontaktům nebo vybrané skupině.
+ * a zvolí, zda sdílet všem kontaktům nebo vybranému kruhu.
  */
 @Composable
-private fun GlobalSharingSection(sl: ServiceLocator) {
+private fun GlobalSharingSection(
+    sl: ServiceLocator,
+    onOpenSharingOverview: (() -> Unit)? = null,
+) {
     val scope = rememberCoroutineScope()
     val grants by sl.db.grants().all().collectAsState(emptyList())
     val contacts by sl.db.contacts().all().collectAsState(emptyList())
@@ -956,7 +963,7 @@ private fun GlobalSharingSection(sl: ServiceLocator) {
                 Text("Příjemci globálního sdílení:", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
                 if (contacts.isEmpty()) {
                     Text(
-                        "Zatím nemáte spárované žádné kontakty (přidejte je v záložce Skupiny → Kontakty).",
+                        "Zatím nemáte spárované žádné kontakty (přidejte je v záložce Kruhy → Kontakty).",
                         style = MaterialTheme.typography.bodySmall,
                         color = Color(0xFF94A3B8),
                         modifier = Modifier.padding(vertical = 4.dp)
@@ -1018,6 +1025,16 @@ private fun GlobalSharingSection(sl: ServiceLocator) {
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text("Uložit globální profil sdílení")
+                }
+
+                if (onOpenSharingOverview != null) {
+                    Spacer(Modifier.height(6.dp))
+                    OutlinedButton(
+                        onClick = onOpenSharingOverview,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Otevřít Sdílení a oprávnění")
+                    }
                 }
             }
         }
@@ -2009,7 +2026,7 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                             )
                             if (contacts.isEmpty()) {
                                 Text(
-                                    "Zatím nemáte spárované žádné kontakty. Spárujte telefon dítěte v záložce Skupiny → QR kód.",
+                                    "Zatím nemáte spárované žádné kontakty. Spárujte telefon dítěte v záložce Kruhy → QR kód.",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = Color(0xFFF59E0B)
                                 )
@@ -2708,6 +2725,10 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
     var tick by remember { mutableStateOf(0) }
     var feedback by remember { mutableStateOf<String?>(null) }
     var showAdvancedP2p by remember { mutableStateOf(false) }
+    var showOnboarding by remember { mutableStateOf(false) }
+    var showPublicNodes by remember { mutableStateOf(false) }
+    var showQrShare by remember { mutableStateOf(false) }
+    var showQrImport by remember { mutableStateOf(false) }
 
     val netData by io(tick) {
         listOf(
@@ -2715,7 +2736,9 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
             sl.settings.gatewayHost,
             sl.settings.gatewayPort.toString(),
             sl.settings.propagationNode,
-            sl.settings.savedGatewayNodes.joinToString(",")
+            sl.settings.savedGatewayNodes.joinToString(","),
+            sl.settings.rnsOnboardingCompleted.toString(),
+            sl.settings.rnsAdvancedMode.toString()
         )
     }
     val myInfo by io(tick) {
@@ -2725,11 +2748,15 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
     var mode by remember(netData) {
         mutableStateOf(netData?.getOrNull(0)?.let { runCatching { NetworkMode.valueOf(it) }.getOrNull() } ?: NetworkMode.AUTO)
     }
-    var host by remember(netData) { mutableStateOf(netData?.getOrNull(1) ?: "rns.xali.cz") }
+    var host by remember(netData) { mutableStateOf(netData?.getOrNull(1) ?: "") }
     var port by remember(netData) { mutableStateOf(netData?.getOrNull(2) ?: "4242") }
     var propagationNode by remember(netData) { mutableStateOf(netData?.getOrNull(3) ?: "") }
     val savedNodes = remember(netData) {
-        netData?.getOrNull(4)?.split(',')?.filter { it.isNotBlank() } ?: listOf("rns.xali.cz:4242", "reticulum.betavine.net:4242")
+        netData?.getOrNull(4)?.split(',')?.filter { it.isNotBlank() } ?: emptyList()
+    }
+    val onboardingCompleted = netData?.getOrNull(5)?.toBooleanStrictOrNull() ?: true
+    var advancedMode by remember(netData) {
+        mutableStateOf(netData?.getOrNull(6)?.toBooleanStrictOrNull() ?: false)
     }
     var newNodeHost by remember { mutableStateOf("") }
     var newNodePort by remember { mutableStateOf("4242") }
@@ -2740,7 +2767,50 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
             .verticalScroll(rememberScrollState())
             .padding(14.dp)
     ) {
-        // 1. Srozumitelná volba spojení pro běžného uživatele (BFU)
+        // Přepínač úrovně rozhraní: Běžný režim vs Pokročilý režim
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            FilterChip(
+                selected = !advancedMode,
+                onClick = {
+                    advancedMode = false
+                    scope.launch(Dispatchers.IO) {
+                        sl.settings.rnsAdvancedMode = false
+                        tick++
+                    }
+                },
+                label = { Text("Běžný režim") },
+                modifier = Modifier.weight(1f)
+            )
+            FilterChip(
+                selected = advancedMode,
+                onClick = {
+                    advancedMode = true
+                    scope.launch(Dispatchers.IO) {
+                        sl.settings.rnsAdvancedMode = true
+                        tick++
+                    }
+                },
+                label = { Text("Pokročilý režim") },
+                modifier = Modifier.weight(1f)
+            )
+        }
+
+        if (!onboardingCompleted || showOnboarding) {
+            RnsOnboardingCard(
+                sl = sl,
+                onCompleted = {
+                    showOnboarding = false
+                    tick++
+                },
+                onFeedback = { feedback = it }
+            )
+            Spacer(Modifier.height(12.dp))
+        }
+
+        // 1. Srozumitelná volba spojení
         Card(
             shape = RoundedCornerShape(22.dp),
             border = BorderStroke(1.dp, Color(0xFFA855F7).copy(alpha = 0.40f)),
@@ -2765,7 +2835,7 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
                         .padding(16.dp)
                 ) {
                     Text(
-                        "REŽIM KRYPTOGRAFICKÉHO SPOJENÍ RETICULUM",
+                        if (advancedMode) "REŽIM KRYPTOGRAFICKÉHO SPOJENÍ RETICULUM" else "ZPŮSOB PŘIPOJENÍ KE KRUHŮM",
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.ExtraBold,
                         color = Color(0xFFA855F7),
@@ -2793,7 +2863,7 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
                         Triple(
                             NetworkMode.MANUAL,
                             "Vlastní vybraný uzel",
-                            "Připojení pouze k serveru (uzlu), který si ručně vyberete nebo přidáte níže."
+                            "Připojení pouze k uzlu, který si ručně vyberete nebo přidáte."
                         )
                     )
 
@@ -2812,6 +2882,7 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
                                     mode = m
                                     scope.launch(Dispatchers.IO) {
                                         sl.settings.networkMode = m
+                                        runCatching { sl.bridge.applyPropagationNode() }
                                         feedback = "Nastaven režim spojení: $title"
                                         tick++
                                     }
@@ -2848,7 +2919,7 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
                         },
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text("Synchronizovat se skupinou hned teď")
+                        Text("Synchronizovat s kruhem hned teď")
                     }
                 }
             }
@@ -2865,297 +2936,506 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
 
         Spacer(Modifier.height(14.dp))
 
-        // 2. Správa P2P uzlů (seznam uzlů s možností přepnout, přidat nový nebo ODEBRAT)
-        Card(
-            shape = RoundedCornerShape(22.dp),
-            border = BorderStroke(1.dp, Color(0xFF38BDF8).copy(alpha = 0.35f)),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF0A101B)),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Column(Modifier.padding(16.dp)) {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            "ULOŽENÉ PROPOJOVACÍ UZLY (${savedNodes.size})",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = Color(0xFF38BDF8),
-                            letterSpacing = 0.8.sp
-                        )
-                        Text(
-                            "Aktivní uzel: $host:$port",
-                            style = MaterialTheme.typography.bodySmall,
-                            fontFamily = JetBrainsMonoFamily,
-                            color = Color(0xFF2DD4BF),
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                    TextButton(
-                        onClick = {
-                            scope.launch(Dispatchers.IO) {
-                                sl.settings.savedGatewayNodes = listOf("rns.xali.cz:4242", "reticulum.betavine.net:4242")
-                                sl.settings.gatewayHost = "rns.xali.cz"
-                                sl.settings.gatewayPort = 4242
-                                feedback = "↺ Obnoveny výchozí propojovací uzly."
-                                tick++
-                            }
-                        }
-                    ) {
-                        Text("↺ Výchozí", style = MaterialTheme.typography.labelSmall, maxLines = 1, softWrap = false)
-                    }
-                }
-
-                Spacer(Modifier.height(8.dp))
-
-                if (savedNodes.isEmpty()) {
-                    Text(
-                        "Nemáte uložené žádné uzly. Aplikace komunikuje pouze napřímo přes lokální Wi-Fi.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color(0xFF94A3B8)
-                    )
-                } else {
-                    savedNodes.forEach { entry ->
-                        val parts = entry.split(':')
-                        val nHost = parts.getOrNull(0) ?: entry
-                        val nPort = parts.getOrNull(1)?.toIntOrNull() ?: 4242
-                        val isActive = host == nHost && port == nPort.toString()
-
-                        Card(
-                            shape = RoundedCornerShape(14.dp),
-                            border = BorderStroke(1.dp, if (isActive) Color(0xFF10B981).copy(alpha = 0.65f) else Color(0xFF1E293B)),
-                            colors = CardDefaults.cardColors(containerColor = Color(0xFF0E1524)),
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)
-                        ) {
-                            Row(
-                                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(Modifier.weight(1f)) {
-                                    Text(
-                                        "$nHost:$nPort",
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        fontFamily = JetBrainsMonoFamily,
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (isActive) Color(0xFF10B981) else Color.White
-                                    )
-                                    Text(
-                                        if (isActive) "Právě používaný uzel" else "Uložený uzel",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = if (isActive) Color(0xFF10B981) else Color(0xFF94A3B8)
-                                    )
-                                }
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    if (!isActive) {
-                                        TextButton(
-                                            onClick = {
-                                                host = nHost
-                                                port = nPort.toString()
-                                                scope.launch(Dispatchers.IO) {
-                                                    sl.settings.gatewayHost = nHost
-                                                    sl.settings.gatewayPort = nPort
-                                                    runCatching { sl.bridge.announce() }
-                                                    feedback = "Přepnuto na uzel $nHost:$nPort"
-                                                    tick++
-                                                }
-                                            }
-                                        ) {
-                                            Text("Použít", maxLines = 1, softWrap = false)
-                                        }
-                                    }
-                                    TextButton(
-                                        onClick = {
-                                            scope.launch(Dispatchers.IO) {
-                                                val remaining = savedNodes.filterNot { it == entry }
-                                                sl.settings.savedGatewayNodes = remaining
-                                                if (isActive) {
-                                                    val next = remaining.firstOrNull()
-                                                    if (next != null) {
-                                                        val np = next.split(':')
-                                                        sl.settings.gatewayHost = np.getOrNull(0) ?: ""
-                                                        sl.settings.gatewayPort = np.getOrNull(1)?.toIntOrNull() ?: 4242
-                                                    } else {
-                                                        sl.settings.gatewayHost = ""
-                                                        sl.settings.networkMode = NetworkMode.LOCAL_ONLY
-                                                    }
-                                                }
-                                                feedback = "Uzel $entry byl odebrán."
-                                                tick++
-                                            }
-                                        }
-                                    ) {
-                                        Text("Odebrat", color = MaterialTheme.colorScheme.error, maxLines = 1, softWrap = false)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                Spacer(Modifier.height(10.dp))
-                Text("Přidat nový uzel do seznamu:", style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8))
-                Spacer(Modifier.height(4.dp))
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    OutlinedTextField(
-                        value = newNodeHost,
-                        onValueChange = { newNodeHost = it },
-                        label = { Text("Adresa / IP uzlu") },
-                        singleLine = true,
-                        modifier = Modifier.weight(1.8f)
-                    )
-                    OutlinedTextField(
-                        value = newNodePort,
-                        onValueChange = { newNodePort = it.filter(Char::isDigit) },
-                        label = { Text("Port") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        singleLine = true,
-                        modifier = Modifier.weight(0.9f)
-                    )
-                    Button(
-                        enabled = newNodeHost.isNotBlank(),
-                        onClick = {
-                            val h = newNodeHost.trim()
-                            val p = newNodePort.toIntOrNull() ?: 4242
-                            val combined = "$h:$p"
-                            scope.launch(Dispatchers.IO) {
-                                sl.settings.savedGatewayNodes = (savedNodes + combined).distinct()
-                                sl.settings.gatewayHost = h
-                                sl.settings.gatewayPort = p
-                                newNodeHost = ""
-                                feedback = "Uzel $combined přidán a aktivován."
-                                tick++
-                            }
-                        }
-                    ) {
-                        Text("Přidat", maxLines = 1, softWrap = false)
-                    }
-                }
+        if (!advancedMode) {
+            // ─── BĚŽNÝ REŽIM ───
+            val activeNodeText = if (mode == NetworkMode.LOCAL_ONLY || host.isBlank()) {
+                "Pouze místní Wi-Fi"
+            } else {
+                "$host:$port"
             }
-        }
+            val statusBadge = when {
+                mode == NetworkMode.LOCAL_ONLY || host.isBlank() -> "Lokální Wi-Fi"
+                sl.bridge.isGatewayOnline -> "Připojeno"
+                else -> "Nepřipojeno"
+            }
+            val statusColor = when (statusBadge) {
+                "Připojeno" -> Color(0xFF10B981)
+                "Lokální Wi-Fi" -> Color(0xFF38BDF8)
+                else -> Color(0xFFF59E0B)
+            }
 
-        Spacer(Modifier.height(14.dp))
-
-        // 3. Pokročilé detaily (Moje P2P adresa, Offline schránka s možností odebrat, Fronta zpráv)
-        Card(
-            shape = RoundedCornerShape(22.dp),
-            border = BorderStroke(1.dp, Color(0xFF2DD4BF).copy(alpha = 0.35f)),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF0A101B)),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Column(Modifier.padding(16.dp)) {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        "KRYPTOGRAFICKÁ ADRESA & ODCHOZÍ FRONTA (${outbox.size})",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = Color(0xFF2DD4BF),
-                        modifier = Modifier.weight(1f)
-                    )
-                    TextButton(onClick = { showAdvancedP2p = !showAdvancedP2p }) {
-                        Text(if (showAdvancedP2p) "Skrýt ▲" else "Zobrazit ▼", maxLines = 1, softWrap = false)
-                    }
-                }
-
-                if (showAdvancedP2p) {
-                    Spacer(Modifier.height(8.dp))
-                    Text("Moje P2P doručovací adresa:", style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8))
+            Card(
+                shape = RoundedCornerShape(22.dp),
+                border = BorderStroke(1.dp, Color(0xFF38BDF8).copy(alpha = 0.35f)),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF0A101B)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Row(
                         Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            myInfo?.deliveryHash ?: "Načítání…",
-                            style = MaterialTheme.typography.bodySmall,
-                            fontFamily = JetBrainsMonoFamily,
-                            fontWeight = FontWeight.SemiBold,
+                            "PŘIPOJOVACÍ UZEL",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.ExtraBold,
                             color = Color(0xFF38BDF8),
-                            modifier = Modifier.weight(1f)
+                            letterSpacing = 0.8.sp
                         )
-                        TextButton(
-                            onClick = {
-                                myInfo?.deliveryHash?.let {
-                                    clipboard.setText(AnnotatedString(it))
-                                    feedback = "Adresa zkopírována do schránky"
-                                }
-                            }
+                        Text(
+                            statusBadge,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = JetBrainsMonoFamily,
+                            fontWeight = FontWeight.Bold,
+                            color = statusColor
+                        )
+                    }
+
+                    Text(
+                        activeNodeText,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontFamily = JetBrainsMonoFamily,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
+
+                    Text(
+                        "Uzel pro doručování zpráv: ${if (propagationNode.isBlank()) "Nenastaveno" else "Aktivní"}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFF94A3B8)
+                    )
+
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        OutlinedButton(onClick = { showOnboarding = !showOnboarding }) {
+                            Text("Nastavit připojení")
+                        }
+                        OutlinedButton(onClick = { showPublicNodes = true }) {
+                            Text("Veřejné uzly")
+                        }
+                        OutlinedButton(
+                            enabled = host.isNotBlank(),
+                            onClick = { showQrShare = true }
                         ) {
-                            Text("Kopírovat", maxLines = 1, softWrap = false)
+                            Text("Sdílet připojení")
+                        }
+                        OutlinedButton(onClick = { showQrImport = true }) {
+                            Text("Načíst QR kód")
+                        }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(14.dp))
+
+            val pendingCount = outbox.count {
+                val st = runCatching { DeliveryState.valueOf(it.state) }.getOrNull()
+                st == DeliveryState.QUEUED || st == DeliveryState.HANDED_TO_TRANSPORT || st == DeliveryState.STORED_IN_PROPAGATION
+            }
+            val deliveredCount = outbox.count {
+                val st = runCatching { DeliveryState.valueOf(it.state) }.getOrNull()
+                st == DeliveryState.ACKED
+            }
+
+            Card(
+                shape = RoundedCornerShape(22.dp),
+                border = BorderStroke(1.dp, Color(0xFF2DD4BF).copy(alpha = 0.35f)),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF0A101B)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "ČEKAJÍCÍ ZPRÁVY",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Color(0xFF2DD4BF),
+                        letterSpacing = 0.8.sp
+                    )
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Čeká na odeslání: $pendingCount", style = MaterialTheme.typography.bodyMedium, color = Color.White)
+                        Text("Doručeno: $deliveredCount", style = MaterialTheme.typography.bodyMedium, color = Color(0xFF10B981))
+                    }
+
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "MOJE SÍŤOVÁ IDENTITA",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Color(0xFF94A3B8),
+                        letterSpacing = 0.8.sp
+                    )
+                    Text(
+                        myInfo?.let { app.pulse4.sync.Pairing.fingerprint(it.publicKeyB64) } ?: "Načítání…",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = JetBrainsMonoFamily,
+                        color = Color(0xFF38BDF8)
+                    )
+                }
+            }
+        } else {
+            // ─── POKROČILÝ REŽIM ───
+            // 2. Správa P2P uzlů (seznam uzlů s možností přepnout, přidat nový nebo ODEBRAT)
+            Card(
+                shape = RoundedCornerShape(22.dp),
+                border = BorderStroke(1.dp, Color(0xFF38BDF8).copy(alpha = 0.35f)),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF0A101B)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(Modifier.padding(16.dp)) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                "ULOŽENÉ PROPOJOVACÍ UZLY (${savedNodes.size})",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Color(0xFF38BDF8),
+                                letterSpacing = 0.8.sp
+                            )
+                            Text(
+                                if (host.isBlank()) "Aktivní uzel: nenastaven (pouze místní Wi-Fi)" else "Aktivní uzel: $host:$port",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = JetBrainsMonoFamily,
+                                color = Color(0xFF2DD4BF),
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        TextButton(onClick = { showOnboarding = !showOnboarding }) {
+                            Text("Průvodce", style = MaterialTheme.typography.labelSmall, maxLines = 1, softWrap = false)
                         }
                     }
 
                     Spacer(Modifier.height(8.dp))
-                    Text("Schránka pro offline zprávy (Propagation Node):", style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8))
+
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        OutlinedButton(onClick = { showPublicNodes = true }) {
+                            Text("Veřejné uzly")
+                        }
+                        OutlinedButton(
+                            enabled = host.isNotBlank(),
+                            onClick = { showQrShare = true }
+                        ) {
+                            Text("Sdílet připojení")
+                        }
+                        OutlinedButton(onClick = { showQrImport = true }) {
+                            Text("Načíst QR kód")
+                        }
+                    }
+
+                    Spacer(Modifier.height(8.dp))
+
+                    if (savedNodes.isEmpty()) {
+                        Text(
+                            "Nemáte uložené žádné uzly. Aplikace komunikuje pouze napřímo přes lokální Wi-Fi.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFF94A3B8)
+                        )
+                    } else {
+                        savedNodes.forEach { entry ->
+                            val parts = entry.split(':')
+                            val nHost = parts.getOrNull(0) ?: entry
+                            val nPort = parts.getOrNull(1)?.toIntOrNull() ?: 4242
+                            val isActive = host == nHost && port == nPort.toString()
+
+                            Card(
+                                shape = RoundedCornerShape(14.dp),
+                                border = BorderStroke(1.dp, if (isActive) Color(0xFF10B981).copy(alpha = 0.65f) else Color(0xFF1E293B)),
+                                colors = CardDefaults.cardColors(containerColor = Color(0xFF0E1524)),
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)
+                            ) {
+                                Row(
+                                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text(
+                                            "$nHost:$nPort",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontFamily = JetBrainsMonoFamily,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (isActive) Color(0xFF10B981) else Color.White
+                                        )
+                                        Text(
+                                            if (isActive) "Právě používaný uzel" else "Uložený uzel",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = if (isActive) Color(0xFF10B981) else Color(0xFF94A3B8)
+                                        )
+                                    }
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        if (!isActive) {
+                                            TextButton(
+                                                onClick = {
+                                                    host = nHost
+                                                    port = nPort.toString()
+                                                    scope.launch(Dispatchers.IO) {
+                                                        sl.settings.gatewayHost = nHost
+                                                        sl.settings.gatewayPort = nPort
+                                                        sl.settings.rnsOnboardingCompleted = true
+                                                        runCatching { sl.bridge.applyPropagationNode() }
+                                                        feedback = "Přepnuto na uzel $nHost:$nPort"
+                                                        tick++
+                                                    }
+                                                }
+                                            ) {
+                                                Text("Použít", maxLines = 1, softWrap = false)
+                                            }
+                                        }
+                                        TextButton(
+                                            onClick = {
+                                                scope.launch(Dispatchers.IO) {
+                                                    val remaining = savedNodes.filterNot { it == entry }
+                                                    sl.settings.savedGatewayNodes = remaining
+                                                    if (isActive) {
+                                                        val next = remaining.firstOrNull()
+                                                        if (next != null) {
+                                                            val np = next.split(':')
+                                                            sl.settings.gatewayHost = np.getOrNull(0) ?: ""
+                                                            sl.settings.gatewayPort = np.getOrNull(1)?.toIntOrNull() ?: 4242
+                                                        } else {
+                                                            sl.settings.gatewayHost = ""
+                                                            sl.settings.networkMode = NetworkMode.LOCAL_ONLY
+                                                        }
+                                                        runCatching { sl.bridge.applyPropagationNode() }
+                                                    }
+                                                    feedback = "Uzel $entry byl odebrán."
+                                                    tick++
+                                                }
+                                            }
+                                        ) {
+                                            Text("Odebrat", color = MaterialTheme.colorScheme.error, maxLines = 1, softWrap = false)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(Modifier.height(10.dp))
+                    Text("Přidat nový uzel do seznamu:", style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8))
+                    Spacer(Modifier.height(4.dp))
                     Row(
                         Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         OutlinedTextField(
-                            value = propagationNode,
-                            onValueChange = { propagationNode = it.trim() },
-                            label = { Text("Hash schránky (volitelné)") },
+                            value = newNodeHost,
+                            onValueChange = { newNodeHost = it },
+                            label = { Text("Adresa / IP uzlu") },
                             singleLine = true,
-                            modifier = Modifier.weight(1f)
+                            modifier = Modifier.weight(1.8f)
                         )
-                        if (propagationNode.isNotBlank()) {
-                            TextButton(
-                                onClick = {
-                                    propagationNode = ""
-                                    scope.launch(Dispatchers.IO) {
-                                        sl.settings.propagationNode = ""
-                                        runCatching { sl.bridge.applyPropagationNode() }
-                                        feedback = "Offline schránka odebrána."
-                                        tick++
-                                    }
-                                }
-                            ) {
-                                Text("Odebrat", color = MaterialTheme.colorScheme.error, maxLines = 1, softWrap = false)
-                            }
-                        }
+                        OutlinedTextField(
+                            value = newNodePort,
+                            onValueChange = { newNodePort = it.filter(Char::isDigit) },
+                            label = { Text("Port") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            singleLine = true,
+                            modifier = Modifier.weight(0.9f)
+                        )
                         Button(
+                            enabled = newNodeHost.isNotBlank(),
                             onClick = {
+                                val h = newNodeHost.trim()
+                                val p = newNodePort.toIntOrNull() ?: 4242
+                                val combined = "$h:$p"
                                 scope.launch(Dispatchers.IO) {
-                                    sl.settings.propagationNode = propagationNode
+                                    sl.settings.savedGatewayNodes = (savedNodes + combined).distinct()
+                                    sl.settings.gatewayHost = h
+                                    sl.settings.gatewayPort = p
+                                    sl.settings.rnsOnboardingCompleted = true
+                                    if (sl.settings.networkMode == NetworkMode.LOCAL_ONLY) {
+                                        sl.settings.networkMode = NetworkMode.AUTO
+                                    }
                                     runCatching { sl.bridge.applyPropagationNode() }
-                                    feedback = "Nastavení offline schránky uloženo."
+                                    newNodeHost = ""
+                                    feedback = "Uzel $combined přidán a aktivován."
                                     tick++
                                 }
                             }
                         ) {
-                            Text("Uložit", maxLines = 1, softWrap = false)
+                            Text("Přidat", maxLines = 1, softWrap = false)
+                        }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(14.dp))
+
+            // 3. Pokročilé detaily (Moje P2P adresa, Offline schránka s možností odebrat, Fronta zpráv)
+            Card(
+                shape = RoundedCornerShape(22.dp),
+                border = BorderStroke(1.dp, Color(0xFF2DD4BF).copy(alpha = 0.35f)),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF0A101B)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(Modifier.padding(16.dp)) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "KRYPTOGRAFICKÁ ADRESA & ODCHOZÍ FRONTA (${outbox.size})",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color(0xFF2DD4BF),
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextButton(onClick = { showAdvancedP2p = !showAdvancedP2p }) {
+                            Text(if (showAdvancedP2p) "Skrýt ▲" else "Zobrazit ▼", maxLines = 1, softWrap = false)
                         }
                     }
 
-                    Spacer(Modifier.height(10.dp))
-                    Text("Odchozí fronta zpráv (${outbox.size}):", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = Color(0xFF94A3B8))
-                    if (outbox.isEmpty()) {
-                        Text("Všechny zprávy byly odeslány, fronta je prázdná.", style = MaterialTheme.typography.bodySmall, color = Color(0xFF94A3B8))
-                    }
-                    outbox.take(10).forEach { o ->
-                        val line = Status.outboxLine(o.kind, "${o.objectType}/${o.objectId}", o.recipient, DeliveryState.valueOf(o.state), o.attempts, o.lastError)
-                        Row(Modifier.fillMaxWidth().padding(vertical = 3.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Column(Modifier.weight(1f)) {
-                                Text(line.title, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
-                                Text(line.state + (line.detail?.let { " · $it" } ?: ""), style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8))
+                    if (showAdvancedP2p) {
+                        Spacer(Modifier.height(8.dp))
+                        Text("Moje P2P doručovací adresa (deliveryHash):", style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8))
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                myInfo?.deliveryHash ?: "Načítání…",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = JetBrainsMonoFamily,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color(0xFF38BDF8),
+                                modifier = Modifier.weight(1f)
+                            )
+                            TextButton(
+                                onClick = {
+                                    myInfo?.deliveryHash?.let {
+                                        clipboard.setText(AnnotatedString(it))
+                                        feedback = "Adresa zkopírována do schránky"
+                                    }
+                                }
+                            ) {
+                                Text("Kopírovat", maxLines = 1, softWrap = false)
+                            }
+                        }
+
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            "Diagnostika: TCP Gateway ${if (sl.bridge.isGatewayOnline) "ONLINE" else "OFFLINE"} · AutoInterface aktivní",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = JetBrainsMonoFamily,
+                            color = Color(0xFF94A3B8)
+                        )
+
+                        Spacer(Modifier.height(8.dp))
+                        Text("Schránka pro offline zprávy (Propagation Node):", style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8))
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            OutlinedTextField(
+                                value = propagationNode,
+                                onValueChange = { propagationNode = it.trim() },
+                                label = { Text("Hash schránky (volitelné)") },
+                                singleLine = true,
+                                modifier = Modifier.weight(1f)
+                            )
+                            if (propagationNode.isNotBlank()) {
+                                TextButton(
+                                    onClick = {
+                                        propagationNode = ""
+                                        scope.launch(Dispatchers.IO) {
+                                            sl.settings.propagationNode = ""
+                                            runCatching { sl.bridge.applyPropagationNode() }
+                                            feedback = "Offline schránka odebrána."
+                                            tick++
+                                        }
+                                    }
+                                ) {
+                                    Text("Odebrat", color = MaterialTheme.colorScheme.error, maxLines = 1, softWrap = false)
+                                }
+                            }
+                            Button(
+                                onClick = {
+                                    scope.launch(Dispatchers.IO) {
+                                        sl.settings.propagationNode = propagationNode
+                                        runCatching { sl.bridge.applyPropagationNode() }
+                                        feedback = "Nastavení offline schránky uloženo."
+                                        tick++
+                                    }
+                                }
+                            ) {
+                                Text("Uložit", maxLines = 1, softWrap = false)
+                            }
+                        }
+
+                        Spacer(Modifier.height(10.dp))
+                        Text("Odchozí fronta zpráv (${outbox.size}):", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = Color(0xFF94A3B8))
+                        if (outbox.isEmpty()) {
+                            Text("Všechny zprávy byly odeslány, fronta je prázdná.", style = MaterialTheme.typography.bodySmall, color = Color(0xFF94A3B8))
+                        }
+                        outbox.take(10).forEach { o ->
+                            val line = Status.outboxLine(o.kind, "${o.objectType}/${o.objectId}", o.recipient, DeliveryState.valueOf(o.state), o.attempts, o.lastError)
+                            Row(Modifier.fillMaxWidth().padding(vertical = 3.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(line.title, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
+                                    Text(line.state + (line.detail?.let { " · $it" } ?: ""), style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8))
+                                }
                             }
                         }
                     }
                 }
             }
         }
+    }
+
+    if (showPublicNodes) {
+        RnsPublicNodePickerDialog(
+            sl = sl,
+            onSelectNode = { chosenHost, chosenPort ->
+                scope.launch(Dispatchers.IO) {
+                    val combined = "$chosenHost:$chosenPort"
+                    sl.settings.savedGatewayNodes = (sl.settings.savedGatewayNodes + combined).distinct()
+                    sl.settings.gatewayHost = chosenHost
+                    sl.settings.gatewayPort = chosenPort
+                    if (sl.settings.networkMode == NetworkMode.LOCAL_ONLY) {
+                        sl.settings.networkMode = NetworkMode.AUTO
+                    }
+                    sl.settings.rnsOnboardingCompleted = true
+                    runCatching { sl.bridge.applyPropagationNode() }
+                    withContext(Dispatchers.Main) {
+                        showPublicNodes = false
+                        feedback = "Vybrán veřejný uzel $combined."
+                        tick++
+                    }
+                }
+            },
+            onDismiss = { showPublicNodes = false }
+        )
+    }
+
+    if (showQrShare) {
+        RnsQrShareDialog(
+            nodeName = host,
+            host = host,
+            port = port.toIntOrNull() ?: 4242,
+            propagationNode = propagationNode,
+            onDismiss = { showQrShare = false }
+        )
+    }
+
+    if (showQrImport) {
+        RnsQrImportDialog(
+            sl = sl,
+            onImported = { cfg ->
+                showQrImport = false
+                feedback = "Načtena konfigurace uzlu ${cfg.name} (${cfg.host}:${cfg.port})."
+                tick++
+            },
+            onDismiss = { showQrImport = false }
+        )
     }
 }
 
@@ -3238,7 +3518,7 @@ private fun PrivacyAndBackupSection(sl: ServiceLocator) {
                     )
                     Spacer(Modifier.height(6.dp))
                     Text(
-                        "Uloží všechna vaše naměřená zdravotní data, aktivity, tréninkové plány a skupiny do jednoho zašifrovaného souboru v telefonu (např. před přechodem na nový telefon).",
+                        "Uloží všechna vaše naměřená zdravotní data, aktivity, tréninkové plány a kruhy do jednoho zašifrovaného souboru v telefonu (např. před přechodem na nový telefon).",
                         style = MaterialTheme.typography.bodySmall,
                         color = Color(0xFFCBD5E1)
                     )
@@ -3308,7 +3588,7 @@ private fun PrivacyAndBackupSection(sl: ServiceLocator) {
                     )
                     Spacer(Modifier.height(6.dp))
                     Text(
-                        "Stejně jako na Stravě nebo Garminu: když nasdílíte svůj běh nebo jízdu kamarádům do skupiny, aplikace automaticky ořízne začátek a konec GPS trasy v okruhu např. 200 m kolem vašeho domu, aby nikdo neviděl, kde přesně bydlíte.",
+                        "Stejně jako na Stravě nebo Garminu: když nasdílíte svůj běh nebo jízdu kamarádům do kruhu, aplikace automaticky ořízne začátek a konec GPS trasy v okruhu např. 200 m kolem vašeho domu, aby nikdo neviděl, kde přesně bydlíte.",
                         style = MaterialTheme.typography.bodySmall,
                         color = Color(0xFFCBD5E1)
                     )

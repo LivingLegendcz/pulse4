@@ -162,3 +162,22 @@ interface ExclusionDao {
     @Query("SELECT COUNT(*) FROM excluded_measurement WHERE observationId = :id") fun count(id: String): Int
     @Query("DELETE FROM excluded_measurement WHERE observationId = :id") fun remove(id: String)
 }
+
+@Dao
+interface FamilyLinkDao {
+    @Query("SELECT * FROM family_link") fun all(): Flow<List<FamilyLinkRow>>
+    @Query("SELECT * FROM family_link") fun allNow(): List<FamilyLinkRow>
+    @Query("SELECT * FROM family_link WHERE id = :id") fun get(id: String): FamilyLinkRow?
+    @Insert(onConflict = OnConflictStrategy.REPLACE) fun upsert(row: FamilyLinkRow)
+    @Query("DELETE FROM family_link WHERE id = :id") fun delete(id: String)
+}
+
+@Dao
+interface PendingRequestDao {
+    @Query("SELECT * FROM pending_request ORDER BY createdAtMs DESC") fun all(): Flow<List<PendingRequestRow>>
+    @Query("SELECT * FROM pending_request ORDER BY createdAtMs DESC") fun allNow(): List<PendingRequestRow>
+    @Query("SELECT * FROM pending_request WHERE status = 'PENDING' ORDER BY createdAtMs DESC") fun pendingNow(): List<PendingRequestRow>
+    @Query("SELECT * FROM pending_request WHERE id = :id") fun get(id: String): PendingRequestRow?
+    @Insert(onConflict = OnConflictStrategy.REPLACE) fun upsert(row: PendingRequestRow)
+    @Query("DELETE FROM pending_request WHERE id = :id") fun delete(id: String)
+}

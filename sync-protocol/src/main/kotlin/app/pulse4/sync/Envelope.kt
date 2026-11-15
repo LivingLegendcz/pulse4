@@ -24,6 +24,10 @@ object Kinds {
     const val PLAN_DECISION = "plan.decision"
     const val SNAPSHOT_REQUEST = "snapshot.request"
     const val ACK = "ack"
+    const val FAMILY_LINK_REQUEST = "family.link.request"
+    const val FAMILY_LINK_RESPONSE = "family.link.response"
+    const val ADMIN_HANDOVER_REQUEST = "admin.handover.request"
+    const val ADMIN_HANDOVER_ACCEPT = "admin.handover.accept"
 
     /** Novější souhrn může nahradit starší nedoručený; revize plánů a odvolání se nikdy neslučují. */
     val supersedable = setOf(PROJECTION_UPSERT)

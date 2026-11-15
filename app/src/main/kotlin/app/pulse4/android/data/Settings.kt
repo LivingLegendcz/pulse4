@@ -88,16 +88,28 @@ class Settings(private val db: AppDatabase) {
     var zoneId: String get() = get("zoneId", java.time.ZoneId.systemDefault().id); set(v) = put("zoneId", v)
 
     var networkMode: NetworkMode get() = NetworkMode.valueOf(get("networkMode", NetworkMode.AUTO.name)); set(v) = put("networkMode", v.name)
-    var gatewayHost: String get() = get("gatewayHost", "rns.xali.cz"); set(v) = put("gatewayHost", v)
+    var gatewayHost: String get() = get("gatewayHost", ""); set(v) = put("gatewayHost", v)
     var gatewayPort: Int get() = get("gatewayPort", "4242").toInt(); set(v) = put("gatewayPort", v.toString())
     /** Uložený seznam P2P uzlů (ve tvaru host:port), které lze v nastavení přepínat, přidávat i odebírat. */
     var savedGatewayNodes: List<String>
-        get() = get("savedGatewayNodes", "rns.xali.cz:4242,reticulum.betavine.net:4242")
+        get() = get("savedGatewayNodes", "")
             .split(',')
             .map { it.trim() }
             .filter { it.isNotBlank() }
             .distinct()
         set(v) = put("savedGatewayNodes", v.map { it.trim() }.filter { it.isNotBlank() }.distinct().joinToString(","))
+    var rnsOnboardingCompleted: Boolean
+        get() {
+            val saved = db.settings().get("rnsOnboardingCompleted")
+            if (saved != null) return saved.toBoolean()
+            val existingHost = db.settings().get("gatewayHost")
+            return !existingHost.isNullOrBlank()
+        }
+        set(v) = put("rnsOnboardingCompleted", v.toString())
+    var rnsAdvancedMode: Boolean get() = get("rnsAdvancedMode", "false").toBoolean(); set(v) = put("rnsAdvancedMode", v.toString())
+    var ownAgeProfile: String
+        get() = get("ownAgeProfile", "ADULT").let { if (it == "MINOR") "MINOR" else "ADULT" }
+        set(v) = put("ownAgeProfile", if (v == "MINOR") "MINOR" else "ADULT")
     /** Hash LXMF propagation destination; prázdné = bez schránky (jen přímá výměna). */
     var propagationNode: String get() = get("propagationNode", ""); set(v) = put("propagationNode", v.trim().lowercase())
 

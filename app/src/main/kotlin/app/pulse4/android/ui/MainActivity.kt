@@ -508,7 +508,7 @@ private fun Root(sl: app.pulse4.android.di.ServiceLocator) {
         Dest("metrics", "Metriky", Icons.Outlined.QueryStats),
         Dest("activities", "Aktivity", PulseIcons.Steps),
         Dest("training", "Tréninky", Icons.Outlined.Timer),
-        Dest("groups", "Skupiny", Icons.Outlined.Group),
+        Dest("groups", "Kruhy", Icons.Outlined.Group),
         Dest("settings", "Nastavení", Icons.Outlined.Settings)
     )
     val entry by nav.currentBackStackEntryAsState()
@@ -650,10 +650,19 @@ private fun Root(sl: app.pulse4.android.di.ServiceLocator) {
                     onCompareActivities = { ids ->
                         val encoded = ids.joinToString(",") { Uri.encode(it) }
                         nav.navigate("compare/$encoded")
-                    }
+                    },
+                    onOpenSharingOverview = { nav.navigate("sharing_overview") }
                 )
             }
-            composable("settings") { SettingsHubScreen(sl) }
+            composable("sharing_overview") {
+                SharingOverviewScreen(sl = sl, onBack = { nav.popBackStack() })
+            }
+            composable("settings") {
+                SettingsHubScreen(
+                    sl = sl,
+                    onOpenSharingOverview = { nav.navigate("sharing_overview") }
+                )
+            }
         }
     }
 }

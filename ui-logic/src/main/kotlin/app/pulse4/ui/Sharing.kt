@@ -32,7 +32,7 @@ data class GrantDraft(
     val canSave get() = recipients.isNotEmpty() && fields.isNotEmpty()
 
     fun problems(): List<String> = buildList {
-        if (recipients.isEmpty()) add("Vyberte aspoň jednoho příjemce nebo skupinu.")
+        if (recipients.isEmpty()) add("Vyberte aspoň jednoho příjemce nebo kruh.")
         if (fields.isEmpty()) add("Vyberte aspoň jedno pole – výchozí stav je nesdílet nic.")
         if (Field.ACT_FULL_RECORD in fields) add("Úplný záznam: při nastavené zóně soukromí se původní FIT nepřikládá.")
         if (Field.WEIGHT in fields || Field.BODY_FAT in fields) add("Váha a složení těla jsou citlivé; sdílejí se jen jednoznačná měření.")

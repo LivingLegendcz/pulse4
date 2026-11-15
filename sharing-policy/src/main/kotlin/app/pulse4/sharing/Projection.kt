@@ -1,5 +1,7 @@
 package app.pulse4.sharing
 
+import app.pulse4.domain.MetricObservation
+import app.pulse4.domain.Provider
 import java.time.LocalDate
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -44,6 +46,17 @@ object Projector {
             measuredAtUtcMs = day.measuredAtUtcMs,
             producedAtMs = nowMs,
         )
+    }
+
+    fun project(
+        grant: ShareGrant,
+        date: LocalDate,
+        observations: List<MetricObservation>,
+        nowMs: Long,
+        weightPreference: List<Provider> = listOf(Provider.WITHINGS_API, Provider.HEALTH_CONNECT, Provider.MANUAL, Provider.GARMIN_PERSONAL),
+    ): SharedProjection? {
+        if (!grant.active || !grant.scope.covers(date)) return null
+        return project(grant, OwnerDayAssembler.assembleForGrant(date, observations, grant, weightPreference), nowMs)
     }
 
     /** Přesně tyto bajty uvidí uživatel v náhledu a přesně tyto odejdou do fronty. */

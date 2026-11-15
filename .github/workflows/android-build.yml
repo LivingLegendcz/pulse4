@@ -19,7 +19,7 @@ concurrency:
 jobs:
   verify:
     name: Verify Android build and tests
-    if: github.event_name != 'release'
+    # Run for every push, PR and release; publishing requires this job to pass.
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -51,6 +51,8 @@ jobs:
 
   publish:
     name: Publish Android release to internal testing
+    # Never publish if the verification job failed or was cancelled.
+    needs: verify
     if: github.event_name == 'release' && github.event.release.prerelease == false
     runs-on: ubuntu-latest
     permissions:
@@ -129,7 +131,7 @@ jobs:
           chmod 600 "$RUNNER_TEMP/pulse4-upload.jks"
           test -s "$RUNNER_TEMP/pulse4-upload.jks"
 
-      - name: Test and build signed Android App Bundle
+      - name: Build signed Android App Bundle
         env:
           PULSE4_STORE_FILE: ${{ runner.temp }}/pulse4-upload.jks
           PULSE4_STORE_PASSWORD: ${{ secrets.PULSE4_STORE_PASSWORD }}
@@ -137,7 +139,7 @@ jobs:
           PULSE4_KEY_PASSWORD: ${{ secrets.PULSE4_KEY_PASSWORD }}
         run: |
           chmod +x gradlew
-          ./gradlew :app:testDebugUnitTest :app:bundleRelease --stacktrace
+          ./gradlew :app:bundleRelease --stacktrace
 
       - name: Verify AAB signature and mapping
         shell: bash

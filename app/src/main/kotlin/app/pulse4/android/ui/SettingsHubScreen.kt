@@ -1493,13 +1493,32 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                                     scope.launch {
                                         syncing = true
                                         notice = withContext(Dispatchers.IO) {
-                                            sl.secrets.putString(SecretStore.GARMIN_API_KEY, trimmed)
-                                            // Smažeme případnou umělou expiraci – nastaví se pouze tehdy, když ji vrátí samo API
-                                            sl.secrets.delete(SecretStore.GARMIN_API_KEY_EXPIRES)
-                                            apiKey = ""
-                                            editingGarminKey = false
-                                            val res = runCatching { sl.importService.runAll(System.currentTimeMillis()) }.getOrNull()
-                                            "Klíč uložen. " + summarizeGarminSync(res)
+                                            if (trimmed.startsWith("W3") || (trimmed.startsWith("[") && trimmed.contains("oauth_token"))) {
+                                                val parsed = sl.garminExt.parseTokens(trimmed)
+                                                if (parsed != null) {
+                                                    sl.secrets.delete(SecretStore.GARMIN_API_KEY)
+                                                    sl.secrets.delete(SecretStore.GARMIN_API_KEY_EXPIRES)
+                                                    apiKey = ""
+                                                    editingGarminKey = false
+                                                    val res = runCatching { sl.importService.runAll(System.currentTimeMillis()) }.getOrNull()
+                                                    "Garmin relace (Garth) úspěšně rozpoznána a uložena. " + summarizeGarminSync(res)
+                                                } else {
+                                                    sl.secrets.putString(SecretStore.GARMIN_API_KEY, trimmed)
+                                                    sl.secrets.delete(SecretStore.GARMIN_API_KEY_EXPIRES)
+                                                    apiKey = ""
+                                                    editingGarminKey = false
+                                                    val res = runCatching { sl.importService.runAll(System.currentTimeMillis()) }.getOrNull()
+                                                    "Klíč uložen. " + summarizeGarminSync(res)
+                                                }
+                                            } else {
+                                                sl.secrets.putString(SecretStore.GARMIN_API_KEY, trimmed)
+                                                // Smažeme případnou umělou expiraci – nastaví se pouze tehdy, když ji vrátí samo API
+                                                sl.secrets.delete(SecretStore.GARMIN_API_KEY_EXPIRES)
+                                                apiKey = ""
+                                                editingGarminKey = false
+                                                val res = runCatching { sl.importService.runAll(System.currentTimeMillis()) }.getOrNull()
+                                                "Klíč uložen. " + summarizeGarminSync(res)
+                                            }
                                         }
                                         syncing = false
                                         tick++

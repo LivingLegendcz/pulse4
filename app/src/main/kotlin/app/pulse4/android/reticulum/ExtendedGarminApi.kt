@@ -541,6 +541,59 @@ class ExtendedGarminApi(
         )
     }
 
+    fun parseTokens(raw: String): GarminExtTokens? {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty()) return null
+
+        // 1. Přímá deserializace nativního formátu GarminExtTokens
+        val direct = runCatching { json.decodeFromString<GarminExtTokens>(trimmed) }.getOrNull()
+        if (direct != null && direct.accessToken.isNotBlank()) return direct
+
+        // 2. Podpora pro formát Garth session dump (Base64 řetězec začínající W3... nebo JSON pole)
+        val jsonText = if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+            trimmed
+        } else {
+            runCatching {
+                String(Base64.decode(trimmed, Base64.DEFAULT), Charsets.UTF_8).trim()
+            }.getOrNull() ?: ""
+        }
+
+        if (jsonText.startsWith("[") && jsonText.endsWith("]")) {
+            return runCatching {
+                val array = json.parseToJsonElement(jsonText).jsonArray
+                if (array.size >= 2) {
+                    val o1 = array[0].jsonObject
+                    val o2 = array[1].jsonObject
+                    val oauth1Token = o1["oauth_token"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                    val oauth1Secret = o1["oauth_token_secret"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                    val accessToken = o2["access_token"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                    val refreshToken = o2["refresh_token"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                    val expiresAtSec = o2["expires_at"]?.jsonPrimitive?.longOrNull
+                        ?: (o2["expires_in"]?.jsonPrimitive?.longOrNull?.let { System.currentTimeMillis() / 1000L + it })
+                        ?: (System.currentTimeMillis() / 1000L + 86400L)
+                    val refreshExpiresAtSec = o2["refresh_token_expires_at"]?.jsonPrimitive?.longOrNull
+                        ?: (o2["refresh_token_expires_in"]?.jsonPrimitive?.longOrNull?.let { System.currentTimeMillis() / 1000L + it })
+
+                    val expiresAtMs = if (expiresAtSec > 20000000000L) expiresAtSec else expiresAtSec * 1000L
+                    val refreshExpiresAtMs = refreshExpiresAtSec?.let { if (it > 20000000000L) it else it * 1000L }
+
+                    val parsed = GarminExtTokens(
+                        oauth1Token = oauth1Token,
+                        oauth1Secret = oauth1Secret,
+                        accessToken = accessToken,
+                        refreshToken = refreshToken,
+                        expiresAtMs = expiresAtMs,
+                        refreshExpiresAtMs = refreshExpiresAtMs
+                    )
+                    // Znormalizované tokeny rovnou zapíšeme zpět do SecretStore
+                    saveTokens(parsed)
+                    parsed
+                } else null
+            }.getOrNull()
+        }
+        return null
+    }
+
     /**
      * Proaktivní keepalive: zkontroluje expiraci přístupového tokenu a v případě potřeby
      * provede tichou obnovu přes DI-OAuth2 refresh token nebo dlouhodobý OAuth 1.0 token.
@@ -548,7 +601,7 @@ class ExtendedGarminApi(
     @Synchronized
     fun ensureSession(): Boolean {
         val raw = secrets.getString(SecretStore.GARMIN_EXT_TOKENS) ?: return false
-        val tokens = runCatching { json.decodeFromString<GarminExtTokens>(raw) }.getOrNull() ?: return false
+        val tokens = parseTokens(raw) ?: return false
         val now = System.currentTimeMillis()
 
         // Pokud tokenu zbývá více než 10 minut platnosti, je relace v pořádku
@@ -585,7 +638,7 @@ class ExtendedGarminApi(
     private fun getValidAccessToken(): String {
         ensureSession()
         val raw = secrets.getString(SecretStore.GARMIN_EXT_TOKENS) ?: throw ProviderError.Unauthorized()
-        val tokens = json.decodeFromString<GarminExtTokens>(raw)
+        val tokens = parseTokens(raw) ?: throw ProviderError.Unauthorized()
         return tokens.accessToken
     }
 

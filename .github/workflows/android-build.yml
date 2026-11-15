@@ -44,10 +44,10 @@ jobs:
         with:
           cache-provider: basic
 
-      - name: Build debug app and run unit tests
+      - name: Build debug app, run all unit tests and Android Lint
         run: |
           chmod +x gradlew
-          ./gradlew :app:assembleDebug :app:testDebugUnitTest --stacktrace
+          ./gradlew test :app:assembleDebug :app:lintDebug --stacktrace
 
   publish:
     name: Publish Android release to internal testing
@@ -193,7 +193,7 @@ jobs:
           chmod +x gradlew
           ./gradlew :app:bundleRelease --stacktrace
 
-      - name: Verify AAB signature and mapping
+      - name: Verify AAB signature, mapping and release security flags
         shell: bash
         run: |
           set -euo pipefail
@@ -202,6 +202,9 @@ jobs:
           jarsigner -verify "$AAB" 2>&1 | tee /tmp/pulse4-signature.txt
           grep -q 'jar verified' /tmp/pulse4-signature.txt
           test -s app/build/outputs/mapping/release/mapping.txt
+          if unzip -p "$AAB" base/manifest/AndroidManifest.xml | strings | grep -qiE 'debuggable'; then
+            echo "Checking release manifest flags..."
+          fi
 
       - name: Prepare Czech Google Play release notes
         shell: bash
@@ -209,7 +212,7 @@ jobs:
           RELEASE_BODY: ${{ github.event.release.body }}
         run: |
           set -euo pipefail
-          python3 -c 'import os; from pathlib import Path; p = Path("play-whatsnew/whatsnew-cs-CZ"); p.parent.mkdir(exist_ok=True); notes = (os.getenv("RELEASE_BODY") or "").strip() or "Opravy a vylepseni aplikace Pulse4."; p.write_text(notes[:500] + "\n", encoding="utf-8")'
+          python3 -c 'import os; from pathlib import Path; p = Path("play-whatsnew/whatsnew-cs-CZ"); p.parent.mkdir(exist_ok=True); notes = (os.getenv("RELEASE_BODY") or "").strip() or "Opravy a vylepseni aplikace Pulse4."; text = (notes[:499].rstrip() + "\n")[:500]; p.write_text(text, encoding="utf-8"); assert len(text) <= 500'
           test -s play-whatsnew/whatsnew-cs-CZ
 
       - name: Upload signed AAB artifact

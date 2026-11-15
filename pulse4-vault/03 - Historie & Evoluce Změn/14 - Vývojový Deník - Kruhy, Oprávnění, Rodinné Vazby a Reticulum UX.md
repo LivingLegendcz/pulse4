@@ -1,7 +1,13 @@
 # 14 – Vývojový Deník: Kruhy, Oprávnění, Rodinné Vazby a Reticulum UX
 
 **Datum:** 2026-11-15  
-**Stav:** Implementováno, otestováno (`./gradlew test :app:assembleDebug` prošlo)
+**Stav:** Implementováno, otestováno (`./gradlew test :app:assembleDebug` + `:app:connectedDebugAndroidTest` na emulátoru `pulse4_emu` prošlo), vydáno jako `Pulse4 0.1.7` na Google Play `internal` track.
+
+### Doplnění (Notifikace nedostupného uzlu & Emulator `androidTest`)
+- **`ReticulumBridge.kt` & `MainActivity.kt`:** Přidán `StateFlow<GatewayHealth>` (`UNCONFIGURED`, `CONNECTING`, `ONLINE`, `UNREACHABLE`). Pokud nakonfigurovaný RNS uzel přestane existovat nebo je nedostupný (mimo `LOCAL_ONLY`), zobrazí se v horní části aplikace notifikační lišta *„Připojovací uzel ... je nedostupný“* s tlačítkem **„Vybrat uzel“** (přechod do Nastavení) a v `SettingsHubScreen.kt` přímé klikací odkazy na `rmap.world` a `directory.rns.recipes`.
+- **Instrumentované testy v emulátoru (`app/src/androidTest/`):**
+  - `DatabaseMigrationTest.kt`: ověření Room `MIGRATION_2_3` na reálném Android SQLite runtime (zachování v2 dat + nové tabulky `family_link` a `pending_request`).
+  - `Pulse4EmulatorUiTest.kt`: ověření navigace a terminologie (*Kruhy*, *Sdílení a oprávnění*), nepřítomnosti `xali.cz` a zobrazení notifikační lišty při nedostupném uzlu.
 
 ---
 

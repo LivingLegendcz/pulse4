@@ -3017,6 +3017,33 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
                             Text("Načíst QR kód")
                         }
                     }
+
+                    val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "Veřejné RNS zdroje:",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFF94A3B8)
+                        )
+                        Text(
+                            "rmap.world ↗",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFF38BDF8),
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.clickable { runCatching { uriHandler.openUri("https://rmap.world") } }
+                        )
+                        Text(
+                            "directory.rns.recipes ↗",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFF38BDF8),
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.clickable { runCatching { uriHandler.openUri("https://directory.rns.recipes") } }
+                        )
+                    }
                 }
             }
 

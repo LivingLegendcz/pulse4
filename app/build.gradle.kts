@@ -23,6 +23,7 @@ android {
         // Android 9+
         minSdk = 28
         targetSdk = 36
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // Google Play vyzaduje pro kazde nove vydani
         // vyssi versionCode nez u predchoziho vydani.
@@ -241,4 +242,12 @@ dependencies {
     // Testy.
     testImplementation(kotlin("test"))
     testImplementation("junit:junit:4.13.2")
+
+    // Instrumentovane emulator testy.
+    androidTestImplementation(compose)
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.room:room-testing:2.7.2")
 }

@@ -27,6 +27,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
@@ -49,6 +51,16 @@ data class BridgeInfo(
     val identityHash: String,
     val publicKeyB64: String,
     val localPort: Int? = null,
+)
+
+enum class GatewayHealthState { UNCONFIGURED, CONNECTING, ONLINE, UNREACHABLE }
+
+data class GatewayHealth(
+    val host: String = "",
+    val port: Int = 4242,
+    val state: GatewayHealthState = GatewayHealthState.UNCONFIGURED,
+    val consecutiveFailures: Int = 0,
+    val lastError: String? = null,
 )
 
 sealed interface BridgeEvent {
@@ -81,6 +93,19 @@ class ReticulumBridge(
 ) {
     var info: BridgeInfo? = null
         private set
+
+    private val _gatewayHealth = MutableStateFlow(GatewayHealth())
+    val gatewayHealth: StateFlow<GatewayHealth> get() = _gatewayHealth
+
+    fun reportGatewayUnreachableForTest(host: String, port: Int, reason: String? = "Nedostupný") {
+        _gatewayHealth.value = GatewayHealth(
+            host = host,
+            port = port,
+            state = GatewayHealthState.UNREACHABLE,
+            consecutiveFailures = 1,
+            lastError = reason,
+        )
+    }
 
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     private val pendingEvents = mutableListOf<BridgeEvent>()
@@ -372,6 +397,7 @@ class ReticulumBridge(
             tcpSocket = null
             tcpWriter = null
             isGatewayOnline = false
+            _gatewayHealth.value = GatewayHealth(state = GatewayHealthState.UNCONFIGURED)
             runCatching { oldSocket?.close() }
             return
         }
@@ -387,9 +413,11 @@ class ReticulumBridge(
         tcpSocket = null
         tcpWriter = null
         isGatewayOnline = false
+        _gatewayHealth.value = GatewayHealth(host = host, port = port, state = GatewayHealthState.CONNECTING)
         runCatching { oldSocket?.close() }
 
         tcpJob = scope.launch {
+            var failures = 0
             while (isActive) {
                 var currentSocket: Socket? = null
                 try {
@@ -399,11 +427,13 @@ class ReticulumBridge(
                     s.tcpNoDelay = true
                     s.keepAlive = true
                     s.connect(InetSocketAddress(host, port), 6000)
+                    failures = 0
                     synchronized(this@ReticulumBridge) {
                         tcpSocket = s
                         tcpWriter = s.getOutputStream()
                         isGatewayOnline = true
                     }
+                    _gatewayHealth.value = GatewayHealth(host = host, port = port, state = GatewayHealthState.ONLINE)
                     android.util.Log.i("PulseSync", "Úspěšně připojeno k Reticulum gateway $host:$port")
 
                     // Odešli úvodní Announce paket
@@ -430,6 +460,14 @@ class ReticulumBridge(
                         }
                     }
                 } catch (e: Exception) {
+                    failures++
+                    _gatewayHealth.value = GatewayHealth(
+                        host = host,
+                        port = port,
+                        state = GatewayHealthState.UNREACHABLE,
+                        consecutiveFailures = failures,
+                        lastError = e.message ?: "Spojení se nezdařilo",
+                    )
                     android.util.Log.w("PulseSync", "Chyba Reticulum gateway spojení ($host:$port): ${e.message}")
                 } finally {
                     synchronized(this@ReticulumBridge) {

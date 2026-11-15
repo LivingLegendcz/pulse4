@@ -9,6 +9,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -40,6 +41,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -597,7 +601,58 @@ private fun Root(sl: app.pulse4.android.di.ServiceLocator) {
             }
         },
     ) { pad ->
-        NavHost(nav, "today", Modifier.padding(pad).fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        val gwHealth by sl.bridge.gatewayHealth.collectAsState()
+        var dismissedUnreachableKey by remember { mutableStateOf<String?>(null) }
+        val healthKey = "${gwHealth.host}:${gwHealth.port}"
+        val showUnreachableBar =
+            gwHealth.state == app.pulse4.android.reticulum.GatewayHealthState.UNREACHABLE &&
+                gwHealth.host.isNotBlank() &&
+                sl.settings.networkMode != app.pulse4.android.data.NetworkMode.LOCAL_ONLY &&
+                dismissedUnreachableKey != healthKey
+
+        Column(Modifier.padding(pad).fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+            if (showUnreachableBar) {
+                Surface(
+                    color = Color(0xFF3B1A1E),
+                    contentColor = Color(0xFFFCA5A5),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                "Připojovací uzel ${gwHealth.host}:${gwHealth.port} je nedostupný",
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 13.sp,
+                                color = Color(0xFFFEE2E2)
+                            )
+                            Text(
+                                "Zkontrolujte síť nebo si v Nastavení vyberte jiný uzel ze seznamu veřejných zdrojů.",
+                                fontSize = 11.sp,
+                                color = Color(0xFFFCA5A5)
+                            )
+                        }
+                        TextButton(
+                            onClick = {
+                                nav.navigate("settings") { launchSingleTop = true }
+                            }
+                        ) {
+                            Text("Vybrat uzel", color = Color(0xFF38BDF8), fontWeight = FontWeight.Bold)
+                        }
+                        TextButton(
+                            onClick = { dismissedUnreachableKey = healthKey }
+                        ) {
+                            Text("✕", color = Color(0xFFFCA5A5))
+                        }
+                    }
+                }
+            }
+            NavHost(nav, "today", Modifier.weight(1f).fillMaxSize()) {
             composable("today") {
                 TodayScreen(
                     sl = sl,
@@ -663,6 +718,7 @@ private fun Root(sl: app.pulse4.android.di.ServiceLocator) {
                     onOpenSharingOverview = { nav.navigate("sharing_overview") }
                 )
             }
+        }
         }
     }
 }

@@ -37,10 +37,6 @@ import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -95,10 +91,9 @@ internal data class EncryptedEnvelope(
 
 /**
  * Nativní Kotlin transportní most (PulseSync):
- * 1. Plné end-to-end šifrování (E2EE) s využitím AES-256-GCM a HMAC-SHA256.
+ * 1. Plné end-to-end šifrování (E2EE v2: X25519 ECDH + Ed25519 podpis + AES-256-GCM).
  * 2. Tier 1: Lokální Wi-Fi přenos s nulovou konfigurací přes Android NSD (mDNS) a vestavěný mikro-server.
- * 3. Tier 2: Směrování přes Reticulum (RNS) TCP uzel v internetu s HDLC paketovým rámováním.
- * 4. Tier 3: Asynchronní doručení přes Zero-Knowledge Blind Mailbox Relay pro HTTP/HTTPS relay servery.
+ * 3. Tier 2: Směrování přes Reticulum (RNS) TCP uzel v internetu s HDLC paketovým rámováním a nativní LXMF Propagation schránkou.
  */
 class ReticulumBridge(
     private val context: Context,
@@ -509,7 +504,6 @@ class ReticulumBridge(
             return
         }
         val port = settings.gatewayPort.takeIf { it > 0 } ?: 4242
-        if (port == 80 || port == 443) return
 
         if (tcpJob?.isActive == true && isGatewayOnline && tcpSocket?.isConnected == true && tcpSocket?.isClosed == false) {
             return
@@ -931,8 +925,7 @@ class ReticulumBridge(
     /**
      * Odešle zprávu příjemci.
      * 1. Pokusí se o bleskový přímý přenos po lokální Wi-Fi (pokud je peer online v místní síti).
-     * 2. Pokusí se o směrování přes Reticulum (RNS) TCP uzel v internetu (pokud je gateway online).
-     * 3. Pokud není TCP gateway dostupná, zkusí Zero-Knowledge Blind Mailbox Relay pro HTTP porty.
+     * 2. Pokusí se o směrování přes Reticulum (RNS) TCP uzel a volitelně uložení do LXMF Propagation uzlu.
      */
     fun send(destHash: String, content: String, propagated: Boolean, eventId: String, forceGateway: Boolean = false) {
         val selfInfo = ensureStarted()
@@ -980,28 +973,6 @@ class ReticulumBridge(
                 emitEvent(BridgeEvent.Delivery(eventId, if (storedInLxmf) "STORED" else "HANDED", null))
                 return
             }
-
-            // 3. Fallback na HTTP Relay Mailbox (pokud je nakonfigurován host a port 80 nebo 443)
-            val relayHost = settings.gatewayHost.trim()
-            val relayPort = settings.gatewayPort.takeIf { it > 0 } ?: 443
-            if (relayHost.isNotBlank() && (relayPort == 80 || relayPort == 443)) {
-                val scheme = if (relayPort == 443) "https" else "http"
-                val relayUrl = "$scheme://$relayHost:$relayPort/mailbox/$destHash"
-
-                val relayDelivered = runCatching {
-                    val req = Request.Builder()
-                        .url(relayUrl)
-                        .header("X-Event-Id", eventId)
-                        .post(jsonPayload.toRequestBody("application/json".toMediaType()))
-                        .build()
-                    http.newCall(req).execute().use { res -> res.isSuccessful }
-                }.getOrDefault(false)
-
-                if (relayDelivered) {
-                    emitEvent(BridgeEvent.Delivery(eventId, "STORED", null))
-                    return
-                }
-            }
         }
 
         emitEvent(BridgeEvent.Delivery(eventId, "FAILED", "Žádná dostupná transportní cesta"))
@@ -1034,56 +1005,15 @@ class ReticulumBridge(
         }
     }.getOrDefault(false)
 
-    /** Vyzvedne čekající zašifrované zprávy z LXMF propagation uzlu nebo ze slepého HTTP relay serveru; maže až po potvrzeném uložení. */
-    fun syncInbox(onEnvelope: ((BridgeEvent.Message) -> Boolean)? = null) {
+    /** Vyzvedne čekající zašifrované zprávy z LXMF propagation uzlu přes aktivní RNS Link. */
+    fun syncInbox(@Suppress("UNUSED_PARAMETER") onEnvelope: ((BridgeEvent.Message) -> Boolean)? = null) {
         if (settings.networkMode == NetworkMode.LOCAL_ONLY) return
-        val selfInfo = info ?: return
-        val relayHost = settings.gatewayHost.trim()
-        if (relayHost.isBlank()) return
-        val relayPort = settings.gatewayPort.takeIf { it > 0 } ?: 4242
-
-        // 1. Nativní LXMF Propagation sync přes RNS Link (port != 80/443)
-        if (relayPort != 80 && relayPort != 443) {
-            val propHash = settings.propagationNode.trim()
-            if (propHash.length == 32 && isGatewayOnline) {
-                val link = ensurePropagationLink() ?: return
-                val reqData = LxmfCodec.buildGetMessagesRequest()
-                val (_, reqPkt) = link.buildRequestPacket(LxmfCodec.MESSAGE_GET_PATH, reqData) ?: return
-                sendRawRnsPacket(reqPkt)
-            }
-            return
-        }
-
-        // 2. HTTP Blind Mailbox sync (port 80/443)
-        val scheme = if (relayPort == 443) "https" else "http"
-        val mailboxUrl = "$scheme://$relayHost:$relayPort/mailbox/${selfInfo.deliveryHash}"
-
-        runCatching {
-            val req = Request.Builder().url(mailboxUrl).get().build()
-            val body = http.newCall(req).execute().use { res ->
-                if (!res.isSuccessful) return@runCatching
-                res.body?.string().orEmpty()
-            }
-            val root = json.parseToJsonElement(body)
-            val items = if (root is kotlinx.serialization.json.JsonArray) root else root.jsonObject["messages"]?.jsonArray
-            items?.forEach { elem ->
-                val rawText = elem.jsonObject.toString()
-                val msg = decodeIncomingEncryptedEnvelope(rawText, selfInfo.deliveryHash) ?: return@forEach
-                val persisted = if (onEnvelope != null) {
-                    onEnvelope(msg)
-                } else {
-                    emitEvent(msg)
-                    false
-                }
-                if (persisted) {
-                    val msgId = elem.jsonObject["eventId"]?.jsonPrimitive?.contentOrNull
-                    if (!msgId.isNullOrBlank()) {
-                        val delReq = Request.Builder().url("$mailboxUrl/$msgId").delete().build()
-                        runCatching { http.newCall(delReq).execute().close() }
-                    }
-                }
-            }
-        }
+        val propHash = settings.propagationNode.trim()
+        if (propHash.length != 32 || !isGatewayOnline) return
+        val link = ensurePropagationLink() ?: return
+        val reqData = LxmfCodec.buildGetMessagesRequest()
+        val (_, reqPkt) = link.buildRequestPacket(LxmfCodec.MESSAGE_GET_PATH, reqData) ?: return
+        sendRawRnsPacket(reqPkt)
     }
 
     private fun decodeIncomingEncryptedEnvelope(rawJson: String, selfHash: String): BridgeEvent.Message? {
@@ -1246,6 +1176,7 @@ class ReticulumBridge(
         val hasLocal = localServerSocket != null && !localServerSocket!!.isClosed
         val peerCount = localPeerMap.size
         val gwOnline = isGatewayOnline
-        return """{"status":"online","interfaces":[{"name":"Local Wi-Fi (mDNS)","online":$hasLocal,"peers":$peerCount},{"name":"Reticulum TCP Gateway","online":$gwOnline},{"name":"Blind Mailbox Relay","online":true}]}"""
+        val lxmfReady = propagationLink?.state == RnsLinkSession.State.ACTIVE
+        return """{"status":"online","interfaces":[{"name":"Local Wi-Fi (mDNS)","online":$hasLocal,"peers":$peerCount},{"name":"Reticulum TCP Gateway","online":$gwOnline},{"name":"LXMF Propagation","online":$lxmfReady}]}"""
     }
 }

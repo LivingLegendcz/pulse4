@@ -181,4 +181,165 @@ class ReticulumCryptoTest {
 
         assertEquals(secretA.toList(), secretB.toList())
     }
+
+    @Test
+    fun testMsgPackCanonicalRoundtrip() {
+        val sample = listOf(
+            false,
+            1731700000L,
+            true,
+            128L,
+            -42L,
+            3.14159,
+            "Pulse4-ČŘŽ",
+            byteArrayOf(1, 2, 3, 4),
+            mapOf("cost" to 16L, "mode" to "sync"),
+        )
+        val encoded = MsgPack.encode(sample)
+        val (decoded, consumed) = MsgPack.decode(encoded)
+        assertEquals(encoded.size, consumed)
+        val list = decoded as List<*>
+        assertEquals(false, list[0])
+        assertEquals(1731700000L, list[1])
+        assertEquals(true, list[2])
+        assertEquals(128L, list[3])
+        assertEquals(-42L, list[4])
+        assertEquals("Pulse4-ČŘŽ", list[6])
+        assertEquals(listOf(1.toByte(), 2.toByte(), 3.toByte(), 4.toByte()), (list[7] as ByteArray).toList())
+        assertEquals(16L, (list[8] as Map<*, *>)["cost"])
+    }
+
+    @Test
+    fun testRnsSignallingAndFernetIdentityRoundtrip() {
+        val sig3 = RnsCrypto.encodeSignalling(mtu = 32768, mode = 1)
+        val (mtu, mode) = RnsCrypto.decodeSignalling(sig3)
+        assertEquals(32768, mtu)
+        assertEquals(1, mode)
+
+        val seed = ByteArray(32) { (it + 9).toByte() }
+        val xPriv = X25519PrivateKeyParameters(MessageDigest.getInstance("SHA-256").digest(seed), 0)
+        val xPub = xPriv.generatePublicKey().encoded
+        val identHash = ByteArray(16) { 0x42 }
+
+        val pt = "Tajná zpráva pro LXMF".toByteArray(Charsets.UTF_8)
+        val ct = RnsCrypto.encryptForIdentity(pt, xPub, identHash)
+        val decrypted = RnsCrypto.decryptForIdentity(ct, xPriv, identHash)
+        assertNotNull(decrypted)
+        assertEquals("Tajná zpráva pro LXMF", String(decrypted, Charsets.UTF_8))
+
+        // Tamper HMAC -> must reject
+        val tampered = ct.copyOf()
+        tampered[tampered.size - 1] = (tampered[tampered.size - 1].toInt() xor 0xFF).toByte()
+        assertEquals(null, RnsCrypto.decryptForIdentity(tampered, xPriv, identHash))
+    }
+
+    @Test
+    fun testRnsAnnounceParserWithRatchetAndLxmfPropagationAppData() {
+        val seed = ByteArray(32) { (it + 3).toByte() }
+        val edPriv = Ed25519PrivateKeyParameters(seed, 0)
+        val edPub = edPriv.generatePublicKey()
+        val xPriv = X25519PrivateKeyParameters(MessageDigest.getInstance("SHA-256").digest(seed), 0)
+        val pubKey64 = xPriv.generatePublicKey().encoded + edPub.encoded
+
+        val sha = MessageDigest.getInstance("SHA-256")
+        val identHash = sha.digest(pubKey64).copyOf(16)
+        val nameHash = sha.digest("lxmf.propagation".toByteArray(Charsets.UTF_8)).copyOf(10)
+        val dest16 = sha.digest(nameHash + identHash).copyOf(16)
+        val randomHash = ByteArray(10) { 0x11 }
+        val ratchet32 = ByteArray(32) { 0x22 }
+        val appData = MsgPack.encode(
+            listOf(false, 1731700000L, true, 512L, 2048L, listOf(12L, 2L, 18L), mapOf("name" to "xali"))
+        )
+
+        val signed = dest16 + pubKey64 + nameHash + randomHash + ratchet32 + appData
+        val signer = Ed25519Signer().apply { init(true, edPriv) }
+        signer.update(signed, 0, signed.size)
+        val sig64 = signer.generateSignature()
+
+        // HEADER_1 (0), contextFlag=1 (0x20), ANNOUNCE (0x01) -> flags = 0x21
+        val pkt = byteArrayOf(0x21, 0x00) + dest16 + byteArrayOf(0x00) +
+            pubKey64 + nameHash + randomHash + ratchet32 + sig64 + appData
+
+        val parsed = RnsAnnounceParser.parse(pkt)
+        assertNotNull(parsed)
+        assertTrue(parsed.verified)
+        assertEquals(ReticulumBridge.bytesToHex(dest16), parsed.destinationHash)
+        assertNotNull(parsed.ratchetPub32)
+
+        val propInfo = LxmfCodec.parsePropagationAnnounceAppData(parsed.appData)
+        assertNotNull(propInfo)
+        assertTrue(propInfo.acceptingMessages)
+        assertEquals(512L, propInfo.perTransferLimitKb)
+        assertEquals(12, propInfo.stampCost)
+        assertEquals("xali", propInfo.metadata["name"])
+    }
+
+    @Test
+    fun testRnsLinkHandshakeAndLxmfPropagationEnvelopeRoundtrip() {
+        val aliceSeed = ByteArray(32) { (it + 11).toByte() }
+        val bobSeed = ByteArray(32) { (it + 55).toByte() }
+
+        val aliceEdPriv = Ed25519PrivateKeyParameters(aliceSeed, 0)
+        val aliceEdPub = aliceEdPriv.generatePublicKey()
+        val aliceXPriv = X25519PrivateKeyParameters(MessageDigest.getInstance("SHA-256").digest(aliceSeed), 0)
+        val alicePub64 = aliceXPriv.generatePublicKey().encoded + aliceEdPub.encoded
+
+        val bobEdPriv = Ed25519PrivateKeyParameters(bobSeed, 0)
+        val bobEdPub = bobEdPriv.generatePublicKey()
+        val bobXPriv = X25519PrivateKeyParameters(MessageDigest.getInstance("SHA-256").digest(bobSeed), 0)
+        val bobPub64 = bobXPriv.generatePublicKey().encoded + bobEdPub.encoded
+
+        val sha = MessageDigest.getInstance("SHA-256")
+        val aliceIdent16 = sha.digest(alicePub64).copyOf(16)
+        val bobIdent16 = sha.digest(bobPub64).copyOf(16)
+        val aliceDestHex = ReticulumBridge.bytesToHex(aliceIdent16)
+        val bobDestHex = ReticulumBridge.bytesToHex(bobIdent16)
+
+        // 1. RNS Link handshake
+        val link = RnsLinkSession(bobDestHex, bobPub64)
+        val reqPkt = link.buildLinkRequestPacket()
+        val initEphXPub = reqPkt.copyOfRange(19, 51)
+        val bobLinkXPriv = X25519PrivateKeyParameters(ByteArray(32) { 0x77 }, 0)
+        val bobLinkXPub = bobLinkXPriv.generatePublicKey().encoded
+        val bobSig3 = RnsCrypto.encodeSignalling(32768, 1)
+        val proofSigned = link.linkIdBytes + bobLinkXPub + bobEdPub.encoded + bobSig3
+        val proofSig = Ed25519Signer().run {
+            init(true, bobEdPriv)
+            update(proofSigned, 0, proofSigned.size)
+            generateSignature()
+        }
+        val rttPkt = link.handleLinkProof(proofSig + bobLinkXPub + bobSig3)
+        assertNotNull(rttPkt)
+        assertEquals(RnsLinkSession.State.ACTIVE, link.state)
+        assertEquals(32768, link.negotiatedMtu)
+
+        // 2. LXMF message pack -> propagation deposit -> unpack -> verify
+        val lxmfWire = LxmfCodec.pack(
+            destinationHash = bobDestHex,
+            sourceHash = aliceDestHex,
+            edPriv = aliceEdPriv,
+            content = """{"hello":"xali"}""".toByteArray(Charsets.UTF_8),
+        )
+        val deposit = LxmfCodec.packPropagationDeposit(
+            lxmfWire = lxmfWire,
+            recipientX25519Pub32 = bobXPriv.generatePublicKey().encoded,
+            recipientIdentityHash16 = bobIdent16,
+        )
+        val decodedDeposit = MsgPack.decode(deposit).first as List<*>
+        val storedList = decodedDeposit[1] as List<*>
+        val storedEncrypted = storedList[0] as ByteArray
+
+        val recoveredWire = LxmfCodec.unpackPropagationMessage(storedEncrypted, bobXPriv, bobIdent16)
+        assertNotNull(recoveredWire)
+        val recoveredMsg = LxmfCodec.unpack(recoveredWire, aliceEdPub.encoded)
+        assertNotNull(recoveredMsg)
+        assertTrue(recoveredMsg.signatureValid)
+        assertEquals("""{"hello":"xali"}""", String(recoveredMsg.content, Charsets.UTF_8))
+
+        // 3. LXMF PoW Stamp
+        val material = sha.digest(lxmfWire)
+        val stamp = LxmfStamper.generateStamp(material, targetCost = 4, expandRounds = 8)
+        assertNotNull(stamp)
+        assertTrue(LxmfStamper.verifyStamp(stamp, material, targetCost = 4, expandRounds = 8))
+    }
 }

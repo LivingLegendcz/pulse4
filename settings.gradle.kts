@@ -28,37 +28,6 @@ pluginManagement {
 
         mavenCentral()
     }
-
-    // R8 override pro Kotlin 2.4.21.
-    //
-    // AGP 8.13.2 obsahuje starsi R8, ktery muze
-    // hlasit chyby pri parsovani Kotlin metadat.
-    //
-    // Kotlin 2.4 vyzaduje R8 9.1.29 nebo novejsi.
-    //
-    // R8 9.1.29 je dostupny v oficialnim
-    // Google Cloud Storage Maven repozitari.
-    buildscript {
-
-        repositories {
-            maven {
-                url = uri(
-                    "https://storage.googleapis.com/r8-releases/raw"
-                )
-            }
-
-            google()
-            mavenCentral()
-        }
-
-        dependencies {
-            if (android) {
-                classpath(
-                    "com.android.tools:r8:9.1.29"
-                )
-            }
-        }
-    }
 }
 
 dependencyResolutionManagement {

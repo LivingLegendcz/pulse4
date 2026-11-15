@@ -1403,7 +1403,11 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                                     var loginSucceeded = false
                                     val loginMsg = withContext(Dispatchers.IO) {
                                         try {
-                                            val r = if (needMfa || mfa.isNotBlank()) sl.garminExt.resumeMfa(mfa) else sl.garminExt.loginPassword(email, password)
+                                            val r = if (mfa.isNotBlank() && (needMfa || sl.garminExt.hasPendingMfa())) {
+                                                sl.garminExt.resumeMfa(mfa)
+                                            } else {
+                                                sl.garminExt.loginPassword(email, password)
+                                            }
                                             when (r) {
                                                 LoginResult.Ok -> {
                                                     loginSucceeded = true

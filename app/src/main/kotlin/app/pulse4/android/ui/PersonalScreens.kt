@@ -1254,7 +1254,20 @@ fun TodayScreen(
             }
         }
 
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(16.dp))
+        Row(
+            Modifier.fillMaxWidth().padding(bottom = 16.dp),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "Pulse4 v${app.pulse4.android.BuildConfig.VERSION_NAME} (${app.pulse4.android.BuildConfig.VERSION_CODE})",
+                style = MaterialTheme.typography.labelSmall,
+                color = Color(0xFF64748B).copy(alpha = 0.6f),
+                fontFamily = app.pulse4.android.ui.theme.JetBrainsMonoFamily,
+                fontSize = 10.sp
+            )
+        }
     }
 }
 

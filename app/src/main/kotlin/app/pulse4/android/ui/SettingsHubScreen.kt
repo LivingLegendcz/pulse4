@@ -226,14 +226,33 @@ fun SettingsHubScreen(sl: ServiceLocator, initialTab: Int = 0) {
                                 fontSize = 9.sp
                             )
                         }
-                        Text(
-                            "SEKCE 0${selectedTab + 1}/05",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontFamily = JetBrainsMonoFamily,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFFCBD5E1),
-                            fontSize = 10.sp
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                "v${app.pulse4.android.BuildConfig.VERSION_NAME}",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontFamily = JetBrainsMonoFamily,
+                                fontWeight = FontWeight.Bold,
+                                color = heroAccent.copy(alpha = 0.85f),
+                                fontSize = 9.5.sp
+                            )
+                            Text(
+                                "·",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFF64748B),
+                                fontSize = 10.sp
+                            )
+                            Text(
+                                "SEKCE 0${selectedTab + 1}/05",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontFamily = JetBrainsMonoFamily,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFCBD5E1),
+                                fontSize = 10.sp
+                            )
+                        }
                     }
 
                     Spacer(Modifier.height(8.dp))
@@ -683,6 +702,75 @@ private fun GeneralAndUnitsSection(sl: ServiceLocator) {
                 ) {
                     Text("Uložit profil")
                 }
+            }
+        }
+
+        Spacer(Modifier.height(14.dp))
+
+        // O aplikaci & Informace o sestavení
+        val clipboardManager = LocalClipboardManager.current
+        Card(
+            shape = RoundedCornerShape(22.dp),
+            border = BorderStroke(1.dp, Color(0xFF64748B).copy(alpha = 0.35f)),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF0A101B)),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable {
+                    val info = "Pulse4 v${app.pulse4.android.BuildConfig.VERSION_NAME} (build ${app.pulse4.android.BuildConfig.VERSION_CODE}) · SDK ${android.os.Build.VERSION.SDK_INT}"
+                    clipboardManager.setText(AnnotatedString(info))
+                    feedback = "Informace o verzi zkopírovány do schránky."
+                }
+        ) {
+            Column(Modifier.fillMaxWidth().padding(16.dp)) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text(
+                            "O APLIKACI · SESTAVENÍ",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color(0xFF94A3B8),
+                            letterSpacing = 0.8.sp
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "Pulse4 Sovereign Biometrics",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                    }
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color(0xFF1E293B))
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            "v${app.pulse4.android.BuildConfig.VERSION_NAME}",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = JetBrainsMonoFamily,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF38BDF8)
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(10.dp))
+                LabeledRow("Kód sestavení (build)", "${app.pulse4.android.BuildConfig.VERSION_CODE}")
+                LabeledRow("Cílová platforma", "Android 15+ (API ${android.os.Build.VERSION.SDK_INT})")
+                LabeledRow("Typ buildu", if (app.pulse4.android.BuildConfig.DEBUG) "Debug (vývojový)" else "Release (Google Play)")
+
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Klepnutím zkopírujete verzi a podrobnosti do schránky.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFF64748B),
+                    fontSize = 11.sp
+                )
             }
         }
 

@@ -1,15 +1,18 @@
 package app.pulse4.android.reticulum
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.net.wifi.WifiManager
 import app.pulse4.android.data.NetworkMode
 import app.pulse4.android.data.Settings
 import app.pulse4.android.security.SecretStore
-import java.io.BufferedReader
 import java.io.ByteArrayOutputStream
-import java.io.InputStreamReader
+import java.io.InputStream
 import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.net.ServerSocket
@@ -42,8 +45,11 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.bouncycastle.crypto.agreement.X25519Agreement
 import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters
+import org.bouncycastle.crypto.params.Ed25519PublicKeyParameters
 import org.bouncycastle.crypto.params.X25519PrivateKeyParameters
+import org.bouncycastle.crypto.params.X25519PublicKeyParameters
 import org.bouncycastle.crypto.signers.Ed25519Signer
 
 data class BridgeInfo(
@@ -141,7 +147,17 @@ class ReticulumBridge(
         private set
 
     private var ed25519PrivKey: Ed25519PrivateKeyParameters? = null
+    private var x25519PrivKey: X25519PrivateKeyParameters? = null
+    private val nsdResolveLock = Any()
+    private val nsdResolveQueue = ArrayDeque<NsdServiceInfo>()
+    private var nsdResolving = false
+    private var wifiNetworkCallback: ConnectivityManager.NetworkCallback? = null
+
     var onEventReceived: ((BridgeEvent) -> Unit)? = null
+    var onLocalPeerDiscovered: ((String) -> Unit)? = null
+
+    fun localPeerHashes(): Set<String> = localPeerMap.keys.toSet()
+    fun hasRegisteredContacts(): Boolean = registeredContacts.isNotEmpty()
 
     private fun emitEvent(ev: BridgeEvent) {
         val handler = onEventReceived
@@ -238,6 +254,7 @@ class ReticulumBridge(
 
         val xSeed = MessageDigest.getInstance("SHA-256").digest(privBytes)
         val xPriv = X25519PrivateKeyParameters(xSeed, 0)
+        this.x25519PrivKey = xPriv
         val xPub = xPriv.generatePublicKey()
 
         // 64-bajtový veřejný klíč Reticulum (X25519 32B + Ed25519 32B)
@@ -265,12 +282,32 @@ class ReticulumBridge(
         info = bi
 
         startNsd(bi.deliveryHash)
+        registerWifiCallback(bi.deliveryHash)
 
         if (settings.networkMode != NetworkMode.LOCAL_ONLY) {
             startGatewayClient()
         }
 
         return bi
+    }
+
+    private fun registerWifiCallback(selfHash: String) {
+        if (wifiNetworkCallback != null) return
+        val cm = context.applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+        val req = NetworkRequest.Builder()
+            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+            .build()
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                acquireMulticast()
+                startNsd(selfHash)
+            }
+            override fun onLost(network: Network) {
+                localPeerMap.clear()
+            }
+        }
+        wifiNetworkCallback = cb
+        runCatching { cm.registerNetworkCallback(req, cb) }
     }
 
     private fun acquireMulticast() {
@@ -301,28 +338,39 @@ class ReticulumBridge(
         }
     }
 
+    private fun readHttpLine(input: InputStream): String? {
+        val baos = ByteArrayOutputStream(128)
+        while (true) {
+            val b = input.read()
+            if (b == -1) return if (baos.size() == 0) null else baos.toString(Charsets.UTF_8.name())
+            if (b == '\n'.code) break
+            if (b != '\r'.code) baos.write(b)
+        }
+        return baos.toString(Charsets.UTF_8.name())
+    }
+
     private fun handleLocalSocket(socket: Socket, selfHash: String) {
         try {
             socket.soTimeout = 5000
-            val reader = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.UTF_8))
-            var line = reader.readLine() ?: return
+            val input = socket.getInputStream()
+            var line = readHttpLine(input) ?: return
             var contentLength = 0
             while (line.isNotEmpty()) {
                 val lower = line.lowercase()
                 if (lower.startsWith("content-length:")) {
                     contentLength = lower.substringAfter(":").trim().toIntOrNull() ?: 0
                 }
-                line = reader.readLine() ?: break
+                line = readHttpLine(input) ?: break
             }
             if (contentLength > 0) {
-                val buf = CharArray(contentLength)
+                val buf = ByteArray(contentLength)
                 var read = 0
                 while (read < contentLength) {
-                    val r = reader.read(buf, read, contentLength - read)
+                    val r = input.read(buf, read, contentLength - read)
                     if (r == -1) break
                     read += r
                 }
-                val body = String(buf, 0, read)
+                val body = String(buf, 0, read, Charsets.UTF_8)
                 processIncomingEncryptedEnvelope(body, selfHash)
             }
             val out: OutputStream = socket.getOutputStream()
@@ -337,11 +385,19 @@ class ReticulumBridge(
     }
 
     /** Publikuje a vyhledává _pulse4._tcp služby v lokální Wi-Fi přes Android NSD (mDNS). */
+    @Synchronized
     private fun startNsd(selfHash: String) {
         val server = localServerSocket ?: return
         val port = server.localPort
         val nsd = context.applicationContext.getSystemService(Context.NSD_SERVICE) as? NsdManager ?: return
         nsdManager = nsd
+
+        discoveryListener?.let { old -> runCatching { nsd.stopServiceDiscovery(old) } }
+        registrationListener?.let { old -> runCatching { nsd.unregisterService(old) } }
+        synchronized(nsdResolveLock) {
+            nsdResolveQueue.clear()
+            nsdResolving = false
+        }
 
         val serviceInfo = NsdServiceInfo().apply {
             serviceType = "_pulse4._tcp"
@@ -364,24 +420,59 @@ class ReticulumBridge(
             override fun onDiscoveryStarted(serviceType: String) {}
             override fun onDiscoveryStopped(serviceType: String) {}
             override fun onServiceFound(info: NsdServiceInfo) {
-                if (info.serviceType.contains("_pulse4")) {
-                    nsd.resolveService(info, object : NsdManager.ResolveListener {
-                        override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {}
-                        override fun onServiceResolved(serviceInfo: NsdServiceInfo) {
-                            val addrBytes = serviceInfo.attributes["addr"] ?: return
-                            val peerHash = String(addrBytes, Charsets.UTF_8).trim()
-                            if (peerHash.isNotBlank() && peerHash != selfHash) {
-                                val host = serviceInfo.host.hostAddress
-                                val peerPort = serviceInfo.port
-                                localPeerMap[peerHash] = "http://$host:$peerPort"
-                            }
-                        }
-                    })
+                if (info.serviceType.contains("_pulse4") && !info.serviceName.endsWith(selfHash)) {
+                    synchronized(nsdResolveLock) {
+                        nsdResolveQueue.addLast(info)
+                    }
+                    drainNsdResolveQueue(nsd, selfHash)
                 }
             }
-            override fun onServiceLost(serviceInfo: NsdServiceInfo) {}
+            override fun onServiceLost(serviceInfo: NsdServiceInfo) {
+                val lostHash = serviceInfo.serviceName.removePrefix("Pulse4-").trim()
+                if (lostHash.isNotBlank()) {
+                    localPeerMap.remove(lostHash)
+                }
+            }
         }
         runCatching { nsd.discoverServices("_pulse4._tcp", NsdManager.PROTOCOL_DNS_SD, discoveryListener) }
+    }
+
+    private fun drainNsdResolveQueue(nsd: NsdManager, selfHash: String) {
+        val next = synchronized(nsdResolveLock) {
+            if (nsdResolving || nsdResolveQueue.isEmpty()) return
+            nsdResolving = true
+            nsdResolveQueue.removeFirst()
+        }
+        runCatching {
+            @Suppress("DEPRECATION")
+            nsd.resolveService(next, object : NsdManager.ResolveListener {
+                override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
+                    synchronized(nsdResolveLock) { nsdResolving = false }
+                    drainNsdResolveQueue(nsd, selfHash)
+                }
+                override fun onServiceResolved(serviceInfo: NsdServiceInfo) {
+                    runCatching {
+                        val addrBytes = serviceInfo.attributes["addr"]
+                        val peerHash = addrBytes?.let { String(it, Charsets.UTF_8).trim() }
+                            ?: serviceInfo.serviceName.removePrefix("Pulse4-").trim()
+                        val host = serviceInfo.host?.hostAddress
+                        val peerPort = serviceInfo.port
+                        if (peerHash.isNotBlank() && peerHash != selfHash && !host.isNullOrBlank() && peerPort > 0) {
+                            val endpoint = "http://$host:$peerPort"
+                            val prev = localPeerMap.put(peerHash, endpoint)
+                            if (prev != endpoint) {
+                                onLocalPeerDiscovered?.invoke(peerHash)
+                            }
+                        }
+                    }
+                    synchronized(nsdResolveLock) { nsdResolving = false }
+                    drainNsdResolveQueue(nsd, selfHash)
+                }
+            })
+        }.onFailure {
+            synchronized(nsdResolveLock) { nsdResolving = false }
+            drainNsdResolveQueue(nsd, selfHash)
+        }
     }
 
     /** Manuální registrace peer endpointu (užitečné při spojení emulátor-telefon bez mDNS) */
@@ -739,8 +830,7 @@ class ReticulumBridge(
                     .url("$localEndpoint/pulse4/sync")
                     .post(jsonPayload.toRequestBody("application/json".toMediaType()))
                     .build()
-                val res = http.newCall(req).execute()
-                res.isSuccessful
+                http.newCall(req).execute().use { res -> res.isSuccessful }
             }.onFailure { e ->
                 android.util.Log.w("PulseSync", "Přímé Wi-Fi odeslání na $localEndpoint selhalo: ${e.message}")
             }.getOrDefault(false)
@@ -749,6 +839,9 @@ class ReticulumBridge(
                 android.util.Log.i("PulseSync", "Zpráva pro $destHash úspěšně doručena přímo přes lokální Wi-Fi: $localEndpoint")
                 emitEvent(BridgeEvent.Delivery(eventId, "HANDED", null))
                 return
+            } else {
+                // Odstranit mrtvý endpoint, aby další zprávy ve frontě nečekaly na opakované 5s timeouty
+                localPeerMap.remove(destHash, localEndpoint)
             }
         }
 
@@ -773,8 +866,7 @@ class ReticulumBridge(
                         .header("X-Event-Id", eventId)
                         .post(jsonPayload.toRequestBody("application/json".toMediaType()))
                         .build()
-                    val res = http.newCall(req).execute()
-                    res.isSuccessful
+                    http.newCall(req).execute().use { res -> res.isSuccessful }
                 }.getOrDefault(false)
 
                 if (relayDelivered) {
@@ -787,8 +879,8 @@ class ReticulumBridge(
         emitEvent(BridgeEvent.Delivery(eventId, "FAILED", "Žádná dostupná transportní cesta"))
     }
 
-    /** Vyzvedne čekající zašifrované zprávy ze slepého relay serveru. */
-    fun syncInbox() {
+    /** Vyzvedne čekající zašifrované zprávy ze slepého relay serveru; maže až po potvrzeném uložení. */
+    fun syncInbox(onEnvelope: ((BridgeEvent.Message) -> Boolean)? = null) {
         if (settings.networkMode == NetworkMode.LOCAL_ONLY) return
         val selfInfo = info ?: return
         val relayHost = settings.gatewayHost.trim()
@@ -800,42 +892,110 @@ class ReticulumBridge(
 
         runCatching {
             val req = Request.Builder().url(mailboxUrl).get().build()
-            val res = http.newCall(req).execute()
-            if (!res.isSuccessful) return@runCatching
-            val body = res.body?.string().orEmpty()
+            val body = http.newCall(req).execute().use { res ->
+                if (!res.isSuccessful) return@runCatching
+                res.body?.string().orEmpty()
+            }
             val root = json.parseToJsonElement(body)
             val items = if (root is kotlinx.serialization.json.JsonArray) root else root.jsonObject["messages"]?.jsonArray
             items?.forEach { elem ->
                 val rawText = elem.jsonObject.toString()
-                processIncomingEncryptedEnvelope(rawText, selfInfo.deliveryHash)
-                val msgId = elem.jsonObject["eventId"]?.jsonPrimitive?.contentOrNull
-                if (!msgId.isNullOrBlank()) {
-                    val delReq = Request.Builder().url("$mailboxUrl/$msgId").delete().build()
-                    runCatching { http.newCall(delReq).execute() }
+                val msg = decodeIncomingEncryptedEnvelope(rawText, selfInfo.deliveryHash) ?: return@forEach
+                val persisted = if (onEnvelope != null) {
+                    onEnvelope(msg)
+                } else {
+                    emitEvent(msg)
+                    false
+                }
+                if (persisted) {
+                    val msgId = elem.jsonObject["eventId"]?.jsonPrimitive?.contentOrNull
+                    if (!msgId.isNullOrBlank()) {
+                        val delReq = Request.Builder().url("$mailboxUrl/$msgId").delete().build()
+                        runCatching { http.newCall(delReq).execute().close() }
+                    }
                 }
             }
         }
     }
 
-    private fun processIncomingEncryptedEnvelope(rawJson: String, selfHash: String) {
+    private fun decodeIncomingEncryptedEnvelope(rawJson: String, selfHash: String): BridgeEvent.Message? {
         val env = runCatching { json.decodeFromString<EncryptedEnvelope>(rawJson) }
             .onFailure { android.util.Log.w("PulseSync", "Chyba dekódování JSON obálky: ${it.message}, preview=${rawJson.take(100)}") }
-            .getOrNull() ?: return
+            .getOrNull() ?: return null
         if (env.recipient != selfHash) {
             android.util.Log.w("PulseSync", "Příjemce v obálce nesouhlasí: ${env.recipient} != $selfHash")
-            return
+            return null
         }
 
         val decrypted = decryptPayload(env)
-        if (decrypted != null) {
-            android.util.Log.i("PulseSync", "Úspěšně dešifrována zpráva od ${env.sender} (len=${decrypted.length})")
-            emitEvent(BridgeEvent.Message(source = env.sender, validated = true, content = decrypted))
+        return if (decrypted != null) {
+            android.util.Log.i("PulseSync", "Úspěšně dešifrována zpráva od ${env.sender} (v=${env.v}, len=${decrypted.length})")
+            BridgeEvent.Message(source = env.sender, validated = true, content = decrypted)
         } else {
-            android.util.Log.w("PulseSync", "Dešifrování selhalo pro zprávu od ${env.sender}")
+            android.util.Log.w("PulseSync", "Dešifrování nebo ověření podpisu selhalo pro zprávu od ${env.sender}")
+            null
         }
     }
 
-    private fun encryptPayload(sender: String, recipient: String, content: String, eventId: String): EncryptedEnvelope {
+    private fun processIncomingEncryptedEnvelope(rawJson: String, selfHash: String) {
+        decodeIncomingEncryptedEnvelope(rawJson, selfHash)?.let { emitEvent(it) }
+    }
+
+    private fun decodeContactPubKey64(pubKeyB64: String): Pair<X25519PublicKeyParameters, Ed25519PublicKeyParameters>? = runCatching {
+        val raw = Base64.getDecoder().decode(pubKeyB64)
+        if (raw.size < 64) return null
+        X25519PublicKeyParameters(raw, 0) to Ed25519PublicKeyParameters(raw, 32)
+    }.getOrNull()
+
+    private fun deriveE2eeAesKey(sharedSecret: ByteArray, sender: String, recipient: String): ByteArray {
+        val (a, b) = if (sender <= recipient) sender to recipient else recipient to sender
+        val md = MessageDigest.getInstance("SHA-256")
+        md.update(sharedSecret)
+        md.update("pulse4-e2ee-v2".toByteArray(Charsets.UTF_8))
+        md.update(a.toByteArray(Charsets.UTF_8))
+        md.update(b.toByteArray(Charsets.UTF_8))
+        return md.digest()
+    }
+
+    private fun canonicalSignatureInput(sender: String, recipient: String, ivB64: String, ciphertextB64: String, eventId: String?): ByteArray =
+        "pulse4-v2:$sender:$recipient:$ivB64:$ciphertextB64:${eventId ?: ""}".toByteArray(Charsets.UTF_8)
+
+    internal fun encryptPayload(sender: String, recipient: String, content: String, eventId: String): EncryptedEnvelope {
+        val recipientPub = registeredContacts[recipient]?.let { decodeContactPubKey64(it) }
+        val xPriv = x25519PrivKey
+        val edPriv = ed25519PrivKey
+        if (recipientPub != null && xPriv != null && edPriv != null) {
+            val agreement = X25519Agreement()
+            agreement.init(xPriv)
+            val sharedSecret = ByteArray(agreement.agreementSize)
+            agreement.calculateAgreement(recipientPub.first, sharedSecret, 0)
+            val aesBytes = deriveE2eeAesKey(sharedSecret, sender, recipient)
+            val key = SecretKeySpec(aesBytes, "AES")
+
+            val iv = ByteArray(12).also { SecureRandom().nextBytes(it) }
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(128, iv))
+            val ciphertext = cipher.doFinal(content.toByteArray(Charsets.UTF_8))
+            val ivB64 = Base64.getEncoder().encodeToString(iv)
+            val ctB64 = Base64.getEncoder().encodeToString(ciphertext)
+
+            val sigInput = canonicalSignatureInput(sender, recipient, ivB64, ctB64, eventId)
+            val signer = Ed25519Signer()
+            signer.init(true, edPriv)
+            signer.update(sigInput, 0, sigInput.size)
+            val sigBytes = signer.generateSignature()
+
+            return EncryptedEnvelope(
+                v = 2,
+                sender = sender,
+                recipient = recipient,
+                iv = ivB64,
+                ciphertext = ctB64,
+                mac = bytesToHex(sigBytes),
+                eventId = eventId
+            )
+        }
+
         val secretBytes = MessageDigest.getInstance("SHA-256")
             .digest(("pulse-shared-key:$sender:$recipient").toByteArray(Charsets.UTF_8))
         val key = SecretKeySpec(secretBytes, "AES")
@@ -855,23 +1015,55 @@ class ReticulumBridge(
             recipient = recipient,
             iv = Base64.getEncoder().encodeToString(iv),
             ciphertext = Base64.getEncoder().encodeToString(ciphertext),
-            mac = macBytes.joinToString("") { "%02x".format(it) },
+            mac = bytesToHex(macBytes),
             eventId = eventId
         )
     }
 
-    private fun decryptPayload(env: EncryptedEnvelope): String? = runCatching {
-        val secretBytes = MessageDigest.getInstance("SHA-256")
-            .digest(("pulse-shared-key:${env.sender}:${env.recipient}").toByteArray(Charsets.UTF_8))
-        val key = SecretKeySpec(secretBytes, "AES")
+    internal fun decryptPayload(env: EncryptedEnvelope): String? = runCatching {
+        when (env.v) {
+            2 -> {
+                val senderPub = registeredContacts[env.sender]?.let { decodeContactPubKey64(it) } ?: return null
+                val xPriv = x25519PrivKey ?: return null
+                val sigBytes = hexToBytes(env.mac)
+                if (sigBytes.size != 64) return null
+                val sigInput = canonicalSignatureInput(env.sender, env.recipient, env.iv, env.ciphertext, env.eventId)
+                val verifier = Ed25519Signer()
+                verifier.init(false, senderPub.second)
+                verifier.update(sigInput, 0, sigInput.size)
+                if (!verifier.verifySignature(sigBytes)) return null
 
-        val iv = Base64.getDecoder().decode(env.iv)
-        val cipherBytes = Base64.getDecoder().decode(env.ciphertext)
+                val agreement = X25519Agreement()
+                agreement.init(xPriv)
+                val sharedSecret = ByteArray(agreement.agreementSize)
+                agreement.calculateAgreement(senderPub.first, sharedSecret, 0)
+                val aesBytes = deriveE2eeAesKey(sharedSecret, env.sender, env.recipient)
+                val key = SecretKeySpec(aesBytes, "AES")
 
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, iv))
-        val plaintext = cipher.doFinal(cipherBytes)
-        String(plaintext, Charsets.UTF_8)
+                val iv = Base64.getDecoder().decode(env.iv)
+                val cipherBytes = Base64.getDecoder().decode(env.ciphertext)
+                val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+                cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, iv))
+                String(cipher.doFinal(cipherBytes), Charsets.UTF_8)
+            }
+            1 -> {
+                val secretBytes = MessageDigest.getInstance("SHA-256")
+                    .digest(("pulse-shared-key:${env.sender}:${env.recipient}").toByteArray(Charsets.UTF_8))
+                val iv = Base64.getDecoder().decode(env.iv)
+                val cipherBytes = Base64.getDecoder().decode(env.ciphertext)
+                val macEngine = Mac.getInstance("HmacSHA256")
+                macEngine.init(SecretKeySpec(secretBytes, "HmacSHA256"))
+                val expectedMac = macEngine.doFinal(cipherBytes)
+                val actualMac = hexToBytes(env.mac)
+                if (!MessageDigest.isEqual(expectedMac, actualMac)) return null
+
+                val key = SecretKeySpec(secretBytes, "AES")
+                val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+                cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, iv))
+                String(cipher.doFinal(cipherBytes), Charsets.UTF_8)
+            }
+            else -> null
+        }
     }.getOrNull()
 
     fun drainEvents(): List<BridgeEvent> {

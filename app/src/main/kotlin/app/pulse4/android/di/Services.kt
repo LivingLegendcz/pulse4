@@ -176,6 +176,11 @@ class ServiceLocator(private val context: Context) {
             )
         }.also { t ->
             bridge.onEventReceived = { ev -> t.processEvent(ev) }
+            bridge.onLocalPeerDiscovered = { peerHash ->
+                if (settings.networkMode != app.pulse4.android.data.NetworkMode.MANUAL && outbox.hasPendingFor(peerHash)) {
+                    app.pulse4.android.work.Scheduler.shareNow(context)
+                }
+            }
         }
     }
     val garminExt by lazy { ExtendedGarminApi(context, secrets) }
@@ -1867,7 +1872,7 @@ class ShareService(private val sl: ServiceLocator) {
         var queued = 0
         val acts = sl.db.activities().since(from.atStartOfDay(ZoneId.of(sl.settings.zoneId)).toInstant().toEpochMilli())
         android.util.Log.i("Pulse4Sync", "enqueueActivities: from=$from, acts=${acts.size}, activeGrants=${grants().filter { it.active }.size}")
-        for (row in acts.take(20)) {
+        for (row in acts) {
             val act = json.decodeFromString(Activity.serializer(), row.json)
             val track = sl.db.activities().track(row.id)?.let {
                 json.decodeFromString(kotlinx.serialization.builtins.ListSerializer(app.pulse4.domain.TrackPoint.serializer()), it.json)
@@ -1892,8 +1897,9 @@ class ShareService(private val sl: ServiceLocator) {
                     val e = msg.envelope
                     val res = sl.outbox.enqueue(OutboxItem(e.eventId, r, e.kind, e.objectType, e.objectId, e.objectVersion, g.id, Wire.encode(msg), nowMs))
                     android.util.Log.i("Pulse4Sync", "act=${act.id} enqueue result: $res")
-                    if (res is EnqueueResult.Queued) {
-                        sl.sentLedger.record(r, key, e.objectVersion, hash); queued++
+                    when (res) {
+                        is EnqueueResult.Queued -> { sl.sentLedger.record(r, key, e.objectVersion, hash); queued++ }
+                        EnqueueResult.OverQuota -> return queued
                     }
                 }
             }

@@ -160,4 +160,25 @@ class ReticulumCryptoTest {
         val h2Payload = h2.copyOfRange(35, h2.size)
         assertEquals("HELLO_PULSE", String(h2Payload, Charsets.UTF_8))
     }
+
+    @Test
+    fun testX25519EcdhSharedSecretAgreement() {
+        val aliceSeed = ByteArray(32) { (it + 1).toByte() }
+        val bobSeed = ByteArray(32) { (it + 101).toByte() }
+
+        val aliceXPriv = X25519PrivateKeyParameters(MessageDigest.getInstance("SHA-256").digest(aliceSeed), 0)
+        val aliceXPub = aliceXPriv.generatePublicKey()
+        val bobXPriv = X25519PrivateKeyParameters(MessageDigest.getInstance("SHA-256").digest(bobSeed), 0)
+        val bobXPub = bobXPriv.generatePublicKey()
+
+        val a1 = org.bouncycastle.crypto.agreement.X25519Agreement().apply { init(aliceXPriv) }
+        val secretA = ByteArray(a1.agreementSize)
+        a1.calculateAgreement(bobXPub, secretA, 0)
+
+        val a2 = org.bouncycastle.crypto.agreement.X25519Agreement().apply { init(bobXPriv) }
+        val secretB = ByteArray(a2.agreementSize)
+        a2.calculateAgreement(aliceXPub, secretB, 0)
+
+        assertEquals(secretA.toList(), secretB.toList())
+    }
 }

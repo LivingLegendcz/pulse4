@@ -202,4 +202,36 @@ class SyncExtensionsTest {
         assertEquals(DeliveryState.ACKED, outboxStore.find("ev-1")?.state)
         assertTrue(mgr.due(1_000L + 240_000L).isEmpty())
     }
+
+    @Test
+    fun storedInPropagationFastTracksWhenRecipientIsInLocalPeersAndMarkAttemptDoesNotDoubleCount() {
+        val outboxStore = InMemoryOutboxStore()
+        val mgr = OutboxManager(outboxStore)
+        val item = OutboxItem("ev-prop", "bob", Kinds.PROJECTION_UPSERT, "daily", "2026-11-15", 1L, "g-1", byteArrayOf(1, 2), 1_000L)
+        mgr.enqueue(item)
+
+        mgr.onTransportResult("ev-prop", TransportResult.StoredInPropagation, 1_000L)
+        assertEquals(DeliveryState.STORED_IN_PROPAGATION, outboxStore.find("ev-prop")?.state)
+        assertEquals(1, outboxStore.find("ev-prop")?.attempts)
+
+        // Not due when bob is not on local Wi-Fi
+        assertTrue(mgr.due(2_000L).isEmpty())
+
+        // Fast-tracked immediately when bob appears on local Wi-Fi
+        val localDue = mgr.due(2_000L, localPeers = setOf("bob"))
+        assertEquals(1, localDue.size)
+        assertEquals("ev-prop", localDue.single().eventId)
+
+        // markAttempt sets in-flight wait without double-counting attempts
+        mgr.markAttempt("ev-prop", 2_000L, 15_000L)
+        assertEquals(1, outboxStore.find("ev-prop")?.attempts)
+        assertTrue(mgr.due(10_000L, localPeers = setOf("bob")).isEmpty())
+
+        mgr.onTransportResult("ev-prop", TransportResult.Handed, 2_100L)
+        assertEquals(DeliveryState.HANDED_TO_TRANSPORT, outboxStore.find("ev-prop")?.state)
+        assertEquals(2, outboxStore.find("ev-prop")?.attempts)
+
+        assertTrue(mgr.onAck("bob", Ack("ev-prop", Ack.Status.ACCEPTED)))
+        assertEquals(DeliveryState.ACKED, outboxStore.find("ev-prop")?.state)
+    }
 }

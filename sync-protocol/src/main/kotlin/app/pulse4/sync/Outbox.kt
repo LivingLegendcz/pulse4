@@ -67,11 +67,17 @@ class OutboxManager(
 ) {
     private val open = setOf(DeliveryState.QUEUED, DeliveryState.HANDED_TO_TRANSPORT, DeliveryState.STORED_IN_PROPAGATION)
 
-    fun queuedBytes(): Long = store.all().filter { it.state in open }.sumOf { it.sizeBytes.toLong() }
+    fun queuedBytes(): Long = synchronized(this) {
+        store.all().filter { it.state in open }.sumOf { it.sizeBytes.toLong() }
+    }
 
-    fun enqueue(item: OutboxItem): EnqueueResult {
-        if (item.sizeBytes > limits.maxEventBytes) return EnqueueResult.OverQuota
-        if (queuedBytes() + item.sizeBytes > limits.maxQueueBytes) return EnqueueResult.OverQuota
+    fun hasPendingFor(recipient: String): Boolean = synchronized(this) {
+        store.all().any { it.recipient == recipient && it.state in open }
+    }
+
+    fun enqueue(item: OutboxItem): EnqueueResult = synchronized(this) {
+        if (item.sizeBytes > limits.maxEventBytes) return@synchronized EnqueueResult.OverQuota
+        if (queuedBytes() + item.sizeBytes > limits.maxQueueBytes) return@synchronized EnqueueResult.OverQuota
         val superseded = mutableListOf<String>()
         if (item.kind in Kinds.supersedable) {
             // Nahrazuje se jen to, co ještě neopustilo telefon; co už leží na cizím uzlu, vyřeší pořadí verzí u příjemce.
@@ -84,20 +90,22 @@ class OutboxManager(
             }
         }
         store.insert(item)
-        return EnqueueResult.Queued(superseded)
+        EnqueueResult.Queued(superseded)
     }
 
     /** Položky připravené k pokusu, v pořadí vzniku (stabilní pro jednoho příjemce). */
-    fun due(nowMs: Long, recipient: String? = null): List<OutboxItem> =
+    fun due(nowMs: Long, recipient: String? = null, localPeers: Set<String> = emptySet()): List<OutboxItem> = synchronized(this) {
         store.all().filter {
-            (it.state == DeliveryState.QUEUED || it.state == DeliveryState.HANDED_TO_TRANSPORT) &&
+            val isLocalFastTrack = it.state == DeliveryState.STORED_IN_PROPAGATION && it.recipient in localPeers
+            (it.state == DeliveryState.QUEUED || it.state == DeliveryState.HANDED_TO_TRANSPORT || isLocalFastTrack) &&
                 it.nextAttemptAtMs <= nowMs &&
                 (recipient == null || it.recipient == recipient)
         }.sortedWith(compareBy({ it.createdAtMs }, { it.objectVersion }))
+    }
 
-    fun onTransportResult(eventId: String, result: TransportResult, nowMs: Long) {
-        val it = store.find(eventId) ?: return
-        if (it.state == DeliveryState.ACKED) return
+    fun onTransportResult(eventId: String, result: TransportResult, nowMs: Long) = synchronized(this) {
+        val it = store.find(eventId) ?: return@synchronized
+        if (it.state == DeliveryState.ACKED) return@synchronized
         when (result) {
             TransportResult.Handed -> {
                 val attempts = it.attempts + 1
@@ -119,18 +127,18 @@ class OutboxManager(
      * Položka byla předána transportu a čeká se na výsledek: do [waitMs] se neodesílá znovu (bez duplicit v letu),
      * pak ji `due` vrátí k dalšímu pokusu. Stav zůstává „čeká na spojení“ – nic se netvrdí o doručení.
      */
-    fun markAttempt(eventId: String, nowMs: Long, waitMs: Long) {
-        val it = store.find(eventId) ?: return
-        if (it.state != DeliveryState.QUEUED && it.state != DeliveryState.HANDED_TO_TRANSPORT) return
-        store.update(it.copy(attempts = it.attempts + 1, nextAttemptAtMs = nowMs + waitMs))
+    fun markAttempt(eventId: String, nowMs: Long, waitMs: Long) = synchronized(this) {
+        val it = store.find(eventId) ?: return@synchronized
+        if (it.state != DeliveryState.QUEUED && it.state != DeliveryState.HANDED_TO_TRANSPORT && it.state != DeliveryState.STORED_IN_PROPAGATION) return@synchronized
+        store.update(it.copy(nextAttemptAtMs = nowMs + waitMs))
     }
 
     /** Přijetí ACK platí jen od příjemce dané události; cizí identita cizí událost nepotvrdí. */
-    fun onAck(from: String, ack: Ack): Boolean {
-        val it = store.find(ack.refEventId) ?: return false
-        if (it.recipient != from) return false
-        if (it.state == DeliveryState.ACKED) return true
-        return when (ack.status) {
+    fun onAck(from: String, ack: Ack): Boolean = synchronized(this) {
+        val it = store.find(ack.refEventId) ?: return@synchronized false
+        if (it.recipient != from) return@synchronized false
+        if (it.state == DeliveryState.ACKED) return@synchronized true
+        return@synchronized when (ack.status) {
             Ack.Status.ACCEPTED, Ack.Status.DUPLICATE, Ack.Status.STALE -> { store.update(it.copy(state = DeliveryState.ACKED)); true }
             // Odmítnutí a mezera nejsou doručení: položka se zastaví s chybou, aplikace vygeneruje snapshot.
             Ack.Status.REJECTED, Ack.Status.NEED_SNAPSHOT ->
@@ -141,7 +149,7 @@ class OutboxManager(
     /** Odvolání před odesláním: zruší se čekající položky grantu. Vrací počet těch, které už opustily telefon. */
     data class CancelResult(val cancelled: Int, val alreadyLeft: Int)
 
-    fun cancelForGrant(grantId: String): CancelResult {
+    fun cancelForGrant(grantId: String): CancelResult = synchronized(this) {
         var c = 0; var left = 0
         store.all().filter { it.grantId == grantId }.forEach {
             when (it.state) {
@@ -150,21 +158,21 @@ class OutboxManager(
                 else -> Unit
             }
         }
-        return CancelResult(c, left)
+        CancelResult(c, left)
     }
 
     /**
      * Nepotvrzený souhrn starší než TTL se nahradí aktuálním snapshotem. Revize plánů a odvolání zůstávají
      * čekat. Vrací klíče objektů, pro které má aplikace vygenerovat nový snapshot.
      */
-    fun expireStale(nowMs: Long): List<Pair<String, String>> {
+    fun expireStale(nowMs: Long): List<Pair<String, String>> = synchronized(this) {
         val out = mutableListOf<Pair<String, String>>()
         store.all().filter { it.state in open && it.kind in Kinds.supersedable && nowMs - it.createdAtMs > limits.unackedSummaryTtlMs }
             .forEach {
                 store.update(it.copy(state = DeliveryState.EXPIRED_NEEDS_SNAPSHOT))
                 out += it.recipient to it.objectKey
             }
-        return out.distinct()
+        out.distinct()
     }
 
     /** Exponenciální prodleva s náhodným rozptylem ±20 %. */

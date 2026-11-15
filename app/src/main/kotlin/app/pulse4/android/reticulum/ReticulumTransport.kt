@@ -43,6 +43,15 @@ class ReticulumTransport(
         builder = MessageBuilder(selfId),
     ).also { receiver = it }
 
+    private fun ensureContactsRegistered() {
+        if (!bridge.hasRegisteredContacts()) {
+            val knownContacts = runCatching { db.contacts().allNow() }.getOrDefault(emptyList())
+            for (c in knownContacts) {
+                runCatching { bridge.addContact(c.publicKeyB64) }
+            }
+        }
+    }
+
     /** Okamžité zpracování příchozí události (z lokální Wi-Fi nebo Reticulum TCP brány). */
     fun processEvent(ev: BridgeEvent): Outcome? {
         when (ev) {
@@ -56,6 +65,7 @@ class ReticulumTransport(
             }
 
             is BridgeEvent.Message -> {
+                ensureContactsRegistered()
                 val info = bridge.ensureStarted()
                 val rx = receiver(info.deliveryHash)
                 val usePropagation = settings.propagationNode.isNotBlank()
@@ -97,18 +107,18 @@ class ReticulumTransport(
             runCatching { bridge.addContact(c.publicKeyB64) }
         }
 
-        for (item in outbox.due(nowMs)) {
+        val localPeers = if (forceGateway) emptySet() else bridge.localPeerHashes()
+        for (item in outbox.due(nowMs, localPeers = localPeers)) {
             try {
-                bridge.send(item.recipient, item.wire.toString(Charsets.UTF_8), propagated = usePropagation, eventId = item.eventId, forceGateway = forceGateway)
+                // Označit pokus před odesláním, aby asynchronní Delivery event nepřepsal backoff
                 outbox.markAttempt(item.eventId, nowMs, inFlightWaitMs)
+                bridge.send(item.recipient, item.wire.toString(Charsets.UTF_8), propagated = usePropagation, eventId = item.eventId, forceGateway = forceGateway)
                 sent++
             } catch (e: Exception) {
                 outbox.onTransportResult(item.eventId, TransportResult.Failed(e.javaClass.simpleName), nowMs)
             }
         }
-        if (usePropagation) runCatching { bridge.syncInbox() }
 
-        val deadline = System.currentTimeMillis() + windowMs
         pumpActiveCallback = { outcome ->
             when (outcome) {
                 is Outcome.Rejected -> rejected++
@@ -117,6 +127,17 @@ class ReticulumTransport(
             }
         }
         try {
+            if (usePropagation) {
+                runCatching {
+                    bridge.syncInbox { msg ->
+                        val outcome = processEvent(msg)
+                        outcome is Outcome.Applied || outcome is Outcome.Duplicate || outcome is Outcome.Stale || outcome is Outcome.AckProcessed
+                    }
+                }
+            }
+
+            val idleCapMs = if (sent > 0) windowMs else minOf(windowMs, if (bridge.isGatewayOnline || usePropagation) 1_500L else 500L)
+            val deadline = System.currentTimeMillis() + idleCapMs
             while (true) {
                 for (ev in bridge.drainEvents()) {
                     processEvent(ev)
@@ -127,7 +148,7 @@ class ReticulumTransport(
         } finally {
             pumpActiveCallback = null
         }
-        val inFlight = outbox.due(Long.MAX_VALUE / 2).size
+        val inFlight = outbox.due(Long.MAX_VALUE / 2, localPeers = localPeers).size
         return PumpStats(sent, received, rejected, inFlight)
     }
 }

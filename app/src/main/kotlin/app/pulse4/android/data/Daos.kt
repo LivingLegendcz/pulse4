@@ -107,7 +107,7 @@ interface OutboxDao {
     @Query("SELECT * FROM outbox WHERE eventId = :id") fun find(id: String): OutboxRow?
     @Query("SELECT * FROM outbox") fun all(): List<OutboxRow>
     @Query("SELECT * FROM outbox ORDER BY createdAtMs DESC LIMIT 1000") fun recent(): Flow<List<OutboxRow>>
-    @Query("DELETE FROM outbox WHERE state IN ('ACKED','SUPERSEDED','CANCELLED') AND createdAtMs < :before") fun purge(before: Long)
+    @Query("DELETE FROM outbox WHERE state IN ('SUPERSEDED','CANCELLED') AND createdAtMs < :before") fun purge(before: Long)
     @Query("DELETE FROM outbox") fun deleteAll()
 }
 

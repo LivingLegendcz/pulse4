@@ -219,7 +219,7 @@ dependencies {
 
     implementation("net.zetetic:sqlcipher-android:4.20.0")
     implementation("androidx.sqlite:sqlite-ktx:2.5.2")
-    implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
+    implementation("org.bouncycastle:bcprov-jdk18on:1.87")
 
     // Background work, HTTP, Health Connect.
     implementation("androidx.work:work-runtime-ktx:2.10.3")

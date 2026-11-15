@@ -7129,12 +7129,20 @@ fun loadUnifiedActivity(sl: ServiceLocator, key: String): LoadedActivityDetail? 
             android.util.Log.e("Pulse4", "loadUnifiedActivity: failed to decode Activity json for key=$key", it)
             return null
         }
-        val t = sl.db.activities().track(key)?.let {
+        var t = sl.db.activities().track(key)?.let {
             runCatching { Wire.json.decodeFromString(ListSerializer(TrackPoint.serializer()), it.json) }.getOrElse { err ->
                 android.util.Log.e("Pulse4", "loadUnifiedActivity: failed to decode track json for key=$key", err)
                 null
             }
         }.orEmpty()
+        if (t.isEmpty() && key.startsWith("garmin-") && sl.secrets.getString(app.pulse4.android.security.SecretStore.GARMIN_EXT_TOKENS) != null) {
+            val fetched = runCatching { sl.importService.ensureActivityTrack(key) }.getOrDefault(false)
+            if (fetched) {
+                t = sl.db.activities().track(key)?.let {
+                    runCatching { Wire.json.decodeFromString(ListSerializer(TrackPoint.serializer()), it.json) }.getOrNull()
+                }.orEmpty()
+            }
+        }
         val enrichedLocal = app.pulse4.analytics.RunningDynamicsModel.enrichTrack(
             track = t,
             sport = a.sport,

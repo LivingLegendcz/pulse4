@@ -1118,7 +1118,7 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
 
             val allActivityElements = mutableListOf<kotlinx.serialization.json.JsonElement>()
             val pageSize = if (isInitialSync) 100 else 30
-            val maxActivitiesToFetch = if (isInitialSync) 500 else 60
+            val maxActivitiesToFetch = if (isInitialSync) 1000 else 60
             var pageStart = 0
             var stopIncremental = false
 
@@ -1173,8 +1173,8 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
                 sl.db.areaStates().put(
                     AreaStateRow(
                         SyncArea.ACTIVITIES.name,
-                        prev?.cursorMs,
-                        prev?.lastSuccessMs,
+                        prev?.cursorMs ?: nowMs,
+                        nowMs,
                         nowMs,
                         if (key.isNullOrBlank() && !hasExt) "Garmin není připojen" else null,
                         null
@@ -1183,17 +1183,57 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
                 return@runCatching 0
             }
 
+            // FÁZE 1: Rychlé uložení souhrnných metadat všech aktivit (až 1000 aktivit) do Room DB.
+            // Běží bleskově v jedné transakci bez stahování velkých FIT souborů.
             var imported = 0
+            var latestTimestampMs: Long? = null
+            val activitiesToSave = mutableListOf<app.pulse4.android.data.ActivityRow>()
+
             for (elem in allActivityElements) {
                 val obj = (elem as? kotlinx.serialization.json.JsonObject) ?: continue
                 val actId = obj["activityId"]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content } ?: continue
                 val actKey = "garmin-$actId"
                 val existingGarmin = sl.db.activities().get(actKey)
-                val existingTrack = sl.db.activities().track(actKey)
-                if (existingGarmin != null && existingTrack != null) {
+
+                if (existingGarmin == null) {
+                    val act = buildActivityFromGarminAndFit(
+                        id = actKey,
+                        provider = Provider.GARMIN_PERSONAL,
+                        extId = actId,
+                        obj = obj,
+                        parsed = null,
+                        nowMs = nowMs
+                    )
+                    activitiesToSave.add(act.toRow(json.encodeToString(Activity.serializer(), act)))
+                    if (latestTimestampMs == null || act.startUtcMs > latestTimestampMs!!) {
+                        latestTimestampMs = act.startUtcMs
+                    }
+                } else {
                     imported++
-                    continue
                 }
+            }
+
+            if (activitiesToSave.isNotEmpty()) {
+                sl.db.runInTransaction {
+                    for (row in activitiesToSave) {
+                        sl.db.activities().upsert(row)
+                    }
+                }
+                imported += activitiesToSave.size
+            }
+
+            // FÁZE 2: Progresivní stažení FIT souborů / GPS křivek pouze pro nejnovější N aktivit.
+            // Starší aktivity zůstávají v DB s kompletními souhrnnými daty a jejich GPS křivka se dotáhne
+            // na vyžádání (lazy) při rozkliknutí nebo na pozadí, čímž se zamezí zamrzání a limitům Garminu (HTTP 429).
+            val maxImmediateFitDownloads = if (isInitialSync) 15 else 30
+            var fitDownloadsCount = 0
+
+            for (elem in allActivityElements) {
+                if (fitDownloadsCount >= maxImmediateFitDownloads) break
+                val obj = (elem as? kotlinx.serialization.json.JsonObject) ?: continue
+                val actId = obj["activityId"]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content } ?: continue
+                val actKey = "garmin-$actId"
+                if (sl.db.activities().track(actKey) != null) continue
 
                 var fitImported = false
                 // 3a. Stažení FIT z gateway (pokud je dostupný authHeader)
@@ -1212,7 +1252,7 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
                     }
                 }
 
-                // 3b. Stažení původního FIT přes přihlášenou relaci Garmin Connect (garth / python)
+                // 3b. Stažení původního FIT přes přihlášenou relaci Garmin Connect
                 if (!fitImported && hasExt) {
                     val rawExtFit = runCatching { sl.garminExt.downloadActivityFit(actId) }.getOrNull()
                     if (rawExtFit != null && rawExtFit.isNotEmpty()) {
@@ -1223,41 +1263,34 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
                     }
                 }
 
-                // 3c. Fallback: Uložení aktivity ze souhrnu Garminu a pokus o získání GPS křivky z detailů
-                if (!fitImported) {
-                    val act = buildActivityFromGarminAndFit(
-                        id = actKey,
-                        provider = Provider.GARMIN_PERSONAL,
-                        extId = actId,
-                        obj = obj,
-                        parsed = null,
-                        nowMs = nowMs
-                    )
-                    sl.db.activities().upsert(act.toRow(json.encodeToString(Activity.serializer(), act)))
-
-                    if (hasExt && sl.db.activities().track(actKey) == null) {
-                        val detailsJson = runCatching { sl.garminExt.getActivityDetailsJson(actId) }.getOrDefault("")
-                        if (detailsJson.isNotBlank()) {
-                            val gpsPoints = parseGarminDetailsGpsPoints(detailsJson)
-                            if (gpsPoints.isNotEmpty()) {
-                                sl.db.activities().upsertTrack(
-                                    TrackRow(
-                                        actKey,
-                                        json.encodeToString(
-                                            kotlinx.serialization.builtins.ListSerializer(app.pulse4.domain.TrackPoint.serializer()),
-                                            gpsPoints
-                                        )
+                // 3c. Fallback: Pokus o získání GPS křivky z detailů Garminu
+                if (!fitImported && hasExt && sl.db.activities().track(actKey) == null) {
+                    val detailsJson = runCatching { sl.garminExt.getActivityDetailsJson(actId) }.getOrDefault("")
+                    if (detailsJson.isNotBlank()) {
+                        val gpsPoints = parseGarminDetailsGpsPoints(detailsJson)
+                        if (gpsPoints.isNotEmpty()) {
+                            sl.db.activities().upsertTrack(
+                                TrackRow(
+                                    actKey,
+                                    json.encodeToString(
+                                        kotlinx.serialization.builtins.ListSerializer(app.pulse4.domain.TrackPoint.serializer()),
+                                        gpsPoints
                                     )
                                 )
-                            }
+                            )
                         }
                     }
                 }
-                imported++
+
+                fitDownloadsCount++
+                try { Thread.sleep(80) } catch (_: InterruptedException) {}
             }
-            sl.db.areaStates().put(AreaStateRow(SyncArea.ACTIVITIES.name, nowMs, nowMs, nowMs, null, null))
+
+            val cursor = latestTimestampMs ?: prevState?.cursorMs ?: nowMs
+            sl.db.areaStates().put(AreaStateRow(SyncArea.ACTIVITIES.name, cursor, nowMs, nowMs, null, null))
             imported
         }.getOrElse { e ->
+            android.util.Log.e("ImportService", "syncGarminActivities failed", e)
             val prev = sl.db.areaStates().get(SyncArea.ACTIVITIES.name)
             sl.db.areaStates().put(
                 AreaStateRow(
@@ -1271,6 +1304,40 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
             )
             0
         }
+    }
+
+    /** Na vyžádání (lazy) dotáhne FIT nebo GPS křivku pro zadanou aktivitu, pokud ji ještě nemá v lokální DB. */
+    fun ensureActivityTrack(actKey: String): Boolean {
+        if (sl.db.activities().track(actKey) != null) return true
+        val actId = actKey.removePrefix("garmin-")
+        val hasExt = sl.secrets.getString(SecretStore.GARMIN_EXT_TOKENS) != null
+        if (!hasExt) return false
+        return runCatching {
+            val rawFit = sl.garminExt.downloadActivityFit(actId)
+            if (rawFit != null && rawFit.isNotEmpty()) {
+                val fit = extractFitFromZipOrRaw(rawFit)
+                if (fit != null && importFit(fit, System.currentTimeMillis(), garminObj = null) is FitImportResult.Imported) {
+                    return@runCatching true
+                }
+            }
+            val detailsJson = sl.garminExt.getActivityDetailsJson(actId)
+            if (detailsJson.isNotBlank()) {
+                val gpsPoints = parseGarminDetailsGpsPoints(detailsJson)
+                if (gpsPoints.isNotEmpty()) {
+                    sl.db.activities().upsertTrack(
+                        TrackRow(
+                            actKey,
+                            json.encodeToString(
+                                kotlinx.serialization.builtins.ListSerializer(app.pulse4.domain.TrackPoint.serializer()),
+                                gpsPoints
+                            )
+                        )
+                    )
+                    return@runCatching true
+                }
+            }
+            false
+        }.getOrDefault(false)
     }
 
     /** Zpracuje GPS body a telemetrii z Garmin Connect activity details JSON. */

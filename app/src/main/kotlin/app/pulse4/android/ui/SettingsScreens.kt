@@ -95,8 +95,15 @@ fun ConnectionsScreen(sl: ServiceLocator) {
         Row { listOf(30, 90, 180, 365).forEach { d -> FilterChip(keyDays == d, { keyDays = d }, { Text("$d dní") }, Modifier.padding(2.dp)) } }
         Button(enabled = apiKey.isNotBlank(), onClick = {
             scope.launch(Dispatchers.IO) {
-                sl.secrets.putString(SecretStore.GARMIN_API_KEY, apiKey.trim())
-                sl.secrets.putString(SecretStore.GARMIN_API_KEY_EXPIRES, (System.currentTimeMillis() + keyDays * 86_400_000L).toString())
+                val trimmed = apiKey.trim().removePrefix("ApiKey ").trim()
+                if (trimmed.startsWith("W3") || (trimmed.startsWith("[") && trimmed.contains("oauth_token"))) {
+                    sl.garminExt.parseTokens(trimmed)
+                    sl.secrets.delete(SecretStore.GARMIN_API_KEY)
+                    sl.secrets.delete(SecretStore.GARMIN_API_KEY_EXPIRES)
+                } else {
+                    sl.secrets.putString(SecretStore.GARMIN_API_KEY, trimmed)
+                    sl.secrets.putString(SecretStore.GARMIN_API_KEY_EXPIRES, (System.currentTimeMillis() + keyDays * 86_400_000L).toString())
+                }
                 apiKey = ""
             }
         }) { Text("Uložit klíč") }

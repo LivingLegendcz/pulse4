@@ -176,6 +176,33 @@ class ExtendedGarminApi(
         .build()
 
     private var pendingMfaCsrf: String? = null
+    private var pendingMfaEmail: String? = null
+
+    fun hasPendingMfa(): Boolean = !pendingMfaCsrf.isNullOrBlank()
+
+    private fun extractHiddenInputs(html: String): Map<String, String> {
+        val out = LinkedHashMap<String, String>()
+        val inputRegex = Regex("""<input\b[^>]*>""", RegexOption.IGNORE_CASE)
+        val typeHidden = Regex("""\btype\s*=\s*["']hidden["']""", RegexOption.IGNORE_CASE)
+        val nameAttr = Regex("""\bname\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+        val valAttr = Regex("""\bvalue\s*=\s*["']([^"']*)["']""", RegexOption.IGNORE_CASE)
+        for (match in inputRegex.findAll(html)) {
+            val tag = match.value
+            if (!typeHidden.containsMatchIn(tag)) continue
+            val name = nameAttr.find(tag)?.groupValues?.getOrNull(1)?.trim() ?: continue
+            if (name.isEmpty()) continue
+            out[name] = valAttr.find(tag)?.groupValues?.getOrNull(1) ?: ""
+        }
+        return out
+    }
+
+    private fun extractCsrfToken(html: String): String? {
+        extractHiddenInputs(html)["_csrf"]?.takeIf { it.isNotBlank() }?.let { return it }
+        val metaRegex = Regex("""<meta\b[^>]*name\s*=\s*["']_csrf["'][^>]*content\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+        metaRegex.find(html)?.groupValues?.getOrNull(1)?.takeIf { it.isNotBlank() }?.let { return it }
+        val inlineRegex = Regex("""["']_csrf["']\s*[:=]\s*["']([^"']+)["']""")
+        return inlineRegex.find(html)?.groupValues?.getOrNull(1)?.takeIf { it.isNotBlank() }
+    }
 
     private fun buildEmbedUrl(): HttpUrl =
         SSO_EMBED_URL.toHttpUrl().newBuilder()
@@ -196,7 +223,11 @@ class ExtendedGarminApi(
             .build()
 
     fun loginPassword(email: String, password: String): LoginResult = call(mutating = false) {
-        Log.d(TAG, "Starting Garmin SSO login for email: $email")
+        val cleanEmail = email.trim()
+        Log.d(TAG, "Starting Garmin SSO login for email: $cleanEmail")
+        pendingMfaCsrf = null
+        pendingMfaEmail = cleanEmail
+        synchronized(cookieStore) { cookieStore.clear() }
 
         // 1. GET embed page to initialize cookies
         val embedUrl = buildEmbedUrl()
@@ -204,73 +235,87 @@ class ExtendedGarminApi(
             .url(embedUrl)
             .header("User-Agent", SSO_USER_AGENT)
             .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+            .header("Accept-Language", "cs-CZ,cs;q=0.9,en-US;q=0.8,en;q=0.7")
             .build()
-        val embedRes = http.newCall(embedReq).execute()
-        Log.d(TAG, "SSO embed response code: ${embedRes.code}")
+        http.newCall(embedReq).execute().use { embedRes ->
+            Log.d(TAG, "SSO embed response code: ${embedRes.code}")
+            if (embedRes.code == 429 || embedRes.code == 403) {
+                throw ProviderError.RateLimited(null)
+            }
+        }
 
-        // 2. GET signin page to obtain CSRF token
+        // 2. GET signin page to obtain CSRF token and hidden form inputs
         val signinUrl = buildSigninUrl()
         val signinGetReq = Request.Builder()
             .url(signinUrl)
             .header("User-Agent", SSO_USER_AGENT)
             .header("Referer", embedUrl.toString())
             .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+            .header("Accept-Language", "cs-CZ,cs;q=0.9,en-US;q=0.8,en;q=0.7")
             .build()
-        val signinGetRes = http.newCall(signinGetReq).execute()
-        val signinGetHtml = signinGetRes.body?.string().orEmpty()
-        Log.d(TAG, "SSO signin GET response code: ${signinGetRes.code}, body length: ${signinGetHtml.length}")
+        val signinGetHtml = http.newCall(signinGetReq).execute().use { signinGetRes ->
+            val html = signinGetRes.body?.string().orEmpty()
+            Log.d(TAG, "SSO signin GET response code: ${signinGetRes.code}, body length: ${html.length}")
+            if (signinGetRes.code == 429 || signinGetRes.code == 403) {
+                throw ProviderError.RateLimited(null)
+            }
+            html
+        }
 
-        val csrfMatch = Regex("""name="_csrf"\s+value="([^"]+)"""").find(signinGetHtml)
-            ?: Regex("""value="([^"]+)"\s+name="_csrf"""").find(signinGetHtml)
-        val csrf = csrfMatch?.groupValues?.get(1).orEmpty()
+        val hiddenInputs = extractHiddenInputs(signinGetHtml)
+        val csrf = extractCsrfToken(signinGetHtml).orEmpty()
         if (csrf.isBlank()) {
             Log.w(TAG, "Failed to extract CSRF token from signin page")
-            throw ProviderError.Unauthorized()
+            throw ProviderError.Network("Garmin SSO nevrátil CSRF token (zkuste znovu)")
         }
 
         // Anti-WAF pause
         try { Thread.sleep(700) } catch (_: InterruptedException) {}
 
-        // 3. POST credentials
-        val formBody = FormBody.Builder()
-            .add("username", email.trim())
+        // 3. POST credentials (včetně případných dalších skrytých polí formuláře)
+        val formBuilder = FormBody.Builder()
+            .add("username", cleanEmail)
             .add("password", password)
             .add("embed", "true")
             .add("_csrf", csrf)
-            .build()
+        hiddenInputs.forEach { (k, v) ->
+            if (k !in setOf("username", "password", "embed", "_csrf") && k.isNotBlank()) {
+                formBuilder.add(k, v)
+            }
+        }
 
         val loginReq = Request.Builder()
             .url(signinUrl)
-            .post(formBody)
+            .post(formBuilder.build())
             .header("User-Agent", SSO_USER_AGENT)
             .header("Referer", signinUrl.toString())
             .header("Origin", "https://sso.garmin.com")
             .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+            .header("Accept-Language", "cs-CZ,cs;q=0.9,en-US;q=0.8,en;q=0.7")
             .build()
 
-        val loginRes = http.newCall(loginReq).execute()
-        val loginCode = loginRes.code
-        val loginBody = loginRes.body?.string().orEmpty()
-        val finalUrl = loginRes.request.url.toString()
+        val (loginCode, loginBody, finalUrl) = http.newCall(loginReq).execute().use { loginRes ->
+            Triple(loginRes.code, loginRes.body?.string().orEmpty(), loginRes.request.url.toString())
+        }
         Log.d(TAG, "SSO signin POST response code: $loginCode, finalUrl: $finalUrl")
 
+        if (loginCode == 429 || loginCode == 403) {
+            Log.w(TAG, "Garmin SSO rate limited or WAF blocked (HTTP $loginCode)")
+            throw ProviderError.RateLimited(null)
+        }
         if (loginCode == 401 || loginBody.contains("Invalid credentials", ignoreCase = true) ||
             loginBody.contains("incorrect", ignoreCase = true) || loginBody.contains("locked", ignoreCase = true)) {
             Log.w(TAG, "Garmin SSO credentials rejected (HTTP $loginCode)")
             throw ProviderError.Unauthorized()
         }
-        if (loginCode == 429) {
-            Log.w(TAG, "Garmin SSO rate limited (HTTP 429)")
-            throw ProviderError.RateLimited(null)
-        }
 
         // Check MFA
-        if (loginBody.contains("loginEnterMfaCode") || loginBody.contains("needs_mfa") ||
-            loginBody.contains("mfaMethod") || loginBody.contains("setupEnterMfaCode")) {
+        if (finalUrl.contains("verifyMFA", ignoreCase = true) ||
+            loginBody.contains("loginEnterMfaCode") || loginBody.contains("needs_mfa") ||
+            loginBody.contains("mfaMethod") || loginBody.contains("setupEnterMfaCode") ||
+            loginBody.contains("mfa-code")) {
             Log.d(TAG, "Garmin SSO requires MFA")
-            val mfaCsrfMatch = Regex("""name="_csrf"\s+value="([^"]+)"""").find(loginBody)
-                ?: Regex("""value="([^"]+)"\s+name="_csrf"""").find(loginBody)
-            pendingMfaCsrf = mfaCsrfMatch?.groupValues?.get(1) ?: csrf
+            pendingMfaCsrf = extractCsrfToken(loginBody) ?: csrf
             triggerMfaEmailIfNeeded(loginBody)
             return@call LoginResult.NeedsMfa
         }
@@ -282,7 +327,8 @@ class ExtendedGarminApi(
         }
 
         Log.d(TAG, "Garmin SSO login succeeded, acquired ticket: ${ticket.take(8)}...")
-        finishLoginWithTicket(ticket, email)
+        finishLoginWithTicket(ticket, cleanEmail)
+        pendingMfaEmail = null
         LoginResult.Ok
     }
 
@@ -302,12 +348,14 @@ class ExtendedGarminApi(
                 .header("User-Agent", SSO_USER_AGENT)
                 .post(payload)
                 .build()
-            runCatching { http.newCall(req).execute() }
+            runCatching { http.newCall(req).execute().close() }
         }
     }
 
     fun resumeMfa(code: String): LoginResult = call(mutating = false) {
         val csrf = pendingMfaCsrf ?: throw ProviderError.Unauthorized()
+        val cleanedCode = code.trim().replace(" ", "").replace("-", "")
+        if (cleanedCode.isBlank()) throw ProviderError.Unauthorized()
         val mfaUrl = SSO_BASE_URL.toHttpUrl().newBuilder()
             .addPathSegment("verifyMFA")
             .addPathSegment("loginEnterMfaCode")
@@ -321,7 +369,7 @@ class ExtendedGarminApi(
             .build()
 
         val mfaForm = FormBody.Builder()
-            .add("mfa-code", code.trim())
+            .add("mfa-code", cleanedCode)
             .add("embed", "true")
             .add("_csrf", csrf)
             .add("fromPage", "setupEnterMfaCode")
@@ -335,20 +383,26 @@ class ExtendedGarminApi(
             .header("Origin", "https://sso.garmin.com")
             .build()
 
-        val mfaRes = http.newCall(mfaReq).execute()
-        val mfaBody = mfaRes.body?.string().orEmpty()
-        val finalUrl = mfaRes.request.url.toString()
-        Log.d(TAG, "SSO verifyMFA response code: ${mfaRes.code}, finalUrl: $finalUrl")
+        val (mfaCode, mfaBody, finalUrl) = http.newCall(mfaReq).execute().use { mfaRes ->
+            Triple(mfaRes.code, mfaRes.body?.string().orEmpty(), mfaRes.request.url.toString())
+        }
+        Log.d(TAG, "SSO verifyMFA response code: $mfaCode, finalUrl: $finalUrl")
+        if (mfaCode == 429 || mfaCode == 403) {
+            throw ProviderError.RateLimited(null)
+        }
 
         val ticket = extractTicket(mfaBody, finalUrl)
             ?: run {
+                // Aktualizujeme CSRF z odpovědi, aby šlo případně kód opravit a odeslat znovu
+                extractCsrfToken(mfaBody)?.let { pendingMfaCsrf = it }
                 Log.w(TAG, "Service ticket not found after MFA verification")
                 throw ProviderError.Unauthorized()
             }
 
         Log.d(TAG, "Garmin MFA succeeded, acquired ticket: ${ticket.take(8)}...")
-        finishLoginWithTicket(ticket, null)
+        finishLoginWithTicket(ticket, pendingMfaEmail)
         pendingMfaCsrf = null
+        pendingMfaEmail = null
         LoginResult.Ok
     }
 
@@ -658,21 +712,23 @@ class ExtendedGarminApi(
             .header("User-Agent", CONNECT_MOBILE_USER_AGENT)
             .build()
 
-        val res = http.newCall(req).execute()
-        if (res.code == 401) {
-            // Token mohl vypršet na straně serveru: zkusíme obnovit a opakovat jednou
-            val renewed = ensureSession()
-            if (renewed) {
-                val newToken = getValidAccessToken()
-                val retryReq = req.newBuilder().header("Authorization", "Bearer $newToken").build()
-                val retryRes = http.newCall(retryReq).execute()
-                if (retryRes.isSuccessful) return@call retryRes.body?.string().orEmpty()
+        http.newCall(req).execute().use { res ->
+            if (res.code == 401) {
+                // Token mohl vypršet na straně serveru: zkusíme obnovit a opakovat jednou
+                val renewed = ensureSession()
+                if (renewed) {
+                    val newToken = getValidAccessToken()
+                    val retryReq = req.newBuilder().header("Authorization", "Bearer $newToken").build()
+                    http.newCall(retryReq).execute().use { retryRes ->
+                        if (retryRes.isSuccessful) return@call retryRes.body?.string().orEmpty()
+                    }
+                }
+                throw ProviderError.Unauthorized()
             }
-            throw ProviderError.Unauthorized()
+            if (res.code == 429) throw ProviderError.RateLimited(null)
+            if (!res.isSuccessful) throw ProviderError.Server(res.code)
+            res.body?.string().orEmpty()
         }
-        if (res.code == 429) throw ProviderError.RateLimited(null)
-        if (!res.isSuccessful) throw ProviderError.Server(res.code)
-        res.body?.string().orEmpty()
     }
 
     /** Stáhne původní FIT soubor aktivity přes přihlášenou relaci Garmin Connect. */
@@ -685,9 +741,10 @@ class ExtendedGarminApi(
             .header("User-Agent", CONNECT_MOBILE_USER_AGENT)
             .build()
 
-        val res = http.newCall(req).execute()
-        if (!res.isSuccessful) return@call null
-        res.body?.bytes()
+        http.newCall(req).execute().use { res ->
+            if (!res.isSuccessful) return@call null
+            res.body?.bytes()
+        }
     }
 
     /** Získá kompletní telemetrii a GPS trasu aktivity z Garmin Connect API. */

@@ -177,6 +177,20 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
                     return try {
                         val body = sl.garminExt.connectApiJson(pathAndQuery)
                         app.pulse4.provider.HttpResponse(200, emptyMap(), body)
+                    } catch (e: app.pulse4.provider.ProviderError.Unauthorized) {
+                        app.pulse4.provider.HttpResponse(401, emptyMap(), "")
+                    } catch (e: app.pulse4.provider.ProviderError.Forbidden) {
+                        app.pulse4.provider.HttpResponse(403, emptyMap(), "")
+                    } catch (e: app.pulse4.provider.ProviderError.RateLimited) {
+                        app.pulse4.provider.HttpResponse(429, emptyMap(), "")
+                    } catch (e: app.pulse4.provider.ProviderError.Network) {
+                        throw java.io.IOException(e.message ?: "Network error")
+                    } catch (e: app.pulse4.provider.ProviderError.Server) {
+                        if (e.code == 204 || e.code == 404) {
+                            app.pulse4.provider.HttpResponse(200, emptyMap(), "")
+                        } else {
+                            app.pulse4.provider.HttpResponse(e.code, emptyMap(), "")
+                        }
                     } catch (e: Exception) {
                         app.pulse4.provider.HttpResponse(500, emptyMap(), e.message.orEmpty())
                     }
@@ -188,6 +202,9 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
                     if (!fallbackBody.isNullOrBlank()) {
                         return app.pulse4.provider.HttpResponse(200, emptyMap(), fallbackBody)
                     }
+                }
+                if (res.code == 404 || res.code == 204) {
+                    return app.pulse4.provider.HttpResponse(200, emptyMap(), "")
                 }
                 return res
             }

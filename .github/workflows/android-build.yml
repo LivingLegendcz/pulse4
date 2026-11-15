@@ -83,14 +83,113 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          python3 - <<'PY'
-          import os
-          import pathlib
-          import re
-          import sys
+          set -euo pipefail
 
-          tag = os.environ['RELEASE_TAG']
-          match = re.fullmatch(r'v?(\d+)\.(\d+)\.(\d+)', tag)
-          if not match:
-              sys.exit(f'Unsupported release tag {tag!r}; expected vMAJOR.MINOR.PATCH')
-          major, minor, patch = (int(v) for v in match.groups())
+          # e.g. v0.1.3 -> versionName=0.1.3 and versionCode=1003
+          if [[ "$RELEASE_TAG" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            major=$((10#${BASH_REMATCH[1]}))
+            minor=$((10#${BASH_REMATCH[2]}))
+            patch=$((10#${BASH_REMATCH[3]}))
+          else
+            echo "ERROR: Expected release tag in format vMAJOR.MINOR.PATCH, got: $RELEASE_TAG" >&2
+            exit 1
+          fi
+
+          if (( major > 200 || minor > 999 || patch > 999 )); then
+            echo "ERROR: Version component outside supported range" >&2
+            exit 1
+          fi
+
+          version_name="${major}.${minor}.${patch}"
+          version_code=$(( major * 1000000 + minor * 1000 + patch ))
+          if (( version_code <= 2 )); then
+            echo "ERROR: versionCode must be higher than the existing Play code 2" >&2
+            exit 1
+          fi
+
+          file=app/build.gradle.kts
+          test -f "$file"
+          test "$(grep -Ec '^[[:space:]]*versionCode[[:space:]]*=' "$file")" -eq 1
+          test "$(grep -Ec '^[[:space:]]*versionName[[:space:]]*=' "$file")" -eq 1
+          sed -i -E "s|^([[:space:]]*)versionCode[[:space:]]*=.*$|\1versionCode = ${version_code}|" "$file"
+          sed -i -E "s|^([[:space:]]*)versionName[[:space:]]*=.*$|\1versionName = \"${version_name}\"|" "$file"
+          grep -Eq "^[[:space:]]*versionCode = ${version_code}$" "$file"
+          grep -Eq "^[[:space:]]*versionName = \"${version_name}\"$" "$file"
+          echo "Build: versionName=${version_name}, versionCode=${version_code}"
+          echo "### Pulse4 ${version_name} (versionCode ${version_code})" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Restore signing key
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.PULSE4_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          test -n "$KEYSTORE_BASE64"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/pulse4-upload.jks"
+          chmod 600 "$RUNNER_TEMP/pulse4-upload.jks"
+          test -s "$RUNNER_TEMP/pulse4-upload.jks"
+
+      - name: Test and build signed Android App Bundle
+        env:
+          PULSE4_STORE_FILE: ${{ runner.temp }}/pulse4-upload.jks
+          PULSE4_STORE_PASSWORD: ${{ secrets.PULSE4_STORE_PASSWORD }}
+          PULSE4_KEY_ALIAS: ${{ secrets.PULSE4_KEY_ALIAS }}
+          PULSE4_KEY_PASSWORD: ${{ secrets.PULSE4_KEY_PASSWORD }}
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:testDebugUnitTest :app:bundleRelease --stacktrace
+
+      - name: Verify AAB signature and mapping
+        shell: bash
+        run: |
+          set -euo pipefail
+          AAB=app/build/outputs/bundle/release/app-release.aab
+          test -s "$AAB"
+          jarsigner -verify "$AAB" 2>&1 | tee /tmp/pulse4-signature.txt
+          grep -q 'jar verified' /tmp/pulse4-signature.txt
+          test -s app/build/outputs/mapping/release/mapping.txt
+
+      - name: Prepare Czech Google Play release notes
+        shell: bash
+        env:
+          RELEASE_BODY: ${{ github.event.release.body }}
+        run: |
+          set -euo pipefail
+          python3 -c 'import os; from pathlib import Path; p = Path("play-whatsnew/whatsnew-cs-CZ"); p.parent.mkdir(exist_ok=True); notes = (os.getenv("RELEASE_BODY") or "").strip() or "Opravy a vylepseni aplikace Pulse4."; p.write_text(notes[:500] + "\n", encoding="utf-8")'
+          test -s play-whatsnew/whatsnew-cs-CZ
+
+      - name: Upload signed AAB artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: pulse4-${{ github.event.release.tag_name }}-signed
+          path: |
+            app/build/outputs/bundle/release/*.aab
+            app/build/outputs/mapping/release/mapping.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Authenticate to Google Cloud with GitHub OIDC
+        id: auth
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/138742660530/locations/global/workloadIdentityPools/github-pulse4/providers/github-actions
+          service_account: pulse4-github-publisher@pulse4-publishing.iam.gserviceaccount.com
+          create_credentials_file: true
+
+      - name: Publish to Google Play internal testing
+        uses: r0adkll/upload-google-play@v1
+        with:
+          serviceAccountJson: ${{ steps.auth.outputs.credentials_file_path }}
+          packageName: app.pulse4
+          releaseFiles: app/build/outputs/bundle/release/*.aab
+          tracks: internal
+          status: completed
+          releaseName: ${{ github.event.release.tag_name }}
+          mappingFile: app/build/outputs/mapping/release/mapping.txt
+          whatsNewDirectory: play-whatsnew
+
+      - name: Confirm Play upload completed
+        shell: bash
+        run: |
+          echo "### Google Play internal upload completed" >> "$GITHUB_STEP_SUMMARY"
+          echo "Release: ${{ github.event.release.tag_name }}" >> "$GITHUB_STEP_SUMMARY"

@@ -1682,7 +1682,8 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                                 )
                             }
                             Text(
-                                "Webová relace vypršela na serveru Withings. Pro pokračování stahování tělesných dat se znovu přihlaste heslem nebo účet odpojte.",
+                                failed.message.takeIf { it.isNotBlank() }
+                                    ?: "Webová relace vypršela na serveru Withings. Pro pokračování stahování tělesných dat se znovu přihlaste heslem nebo účet odpojte.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = Color(0xFFFCA5A5)
                             )

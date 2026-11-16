@@ -116,6 +116,7 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
         sl.secrets.delete(WEB_SESSION_KEY)
         sl.secrets.delete("withings.web.password")
         sl.secrets.delete("withings.web.cookiejar")
+        sessionCoordinator.clearAuthPauseAndBackoff()
         directAuth.clearPersistedCookies()
         val oauth = vault.load()
         if (oauth != null) {
@@ -126,15 +127,21 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
     }
 
     private val _state = MutableStateFlow<WithingsUiState>(
-        loadWebSession()?.let {
-            WithingsUiState.Connected(
-                userId = it.primaryUserId.toString(),
-                userName = it.primaryUserName,
-                isWeb = true,
-                childName = it.childUserName,
-                lastSyncMs = it.lastSyncMs
+        sl.secrets.getString(WithingsSessionCoordinator.KEY_PAUSED_REASON)?.takeIf { it.isNotBlank() }?.let {
+            WithingsUiState.Failed(
+                sl.secrets.getString(WithingsSessionCoordinator.KEY_PAUSED_MESSAGE)
+                    ?: "Relace Withings vyžaduje ruční přihlášení"
             )
         }
+            ?: loadWebSession()?.let {
+                WithingsUiState.Connected(
+                    userId = it.primaryUserId.toString(),
+                    userName = it.primaryUserName,
+                    isWeb = true,
+                    childName = it.childUserName,
+                    lastSyncMs = it.lastSyncMs
+                )
+            }
             ?: vault.load()?.let { WithingsUiState.Connected(it.userId) }
             ?: WithingsUiState.Idle
     )
@@ -171,6 +178,29 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
         )
     }
 
+    private val sessionCoordinator by lazy {
+        WithingsSessionCoordinator(
+            store = object : WithingsAuthStateStore {
+                override fun getString(key: String): String? = sl.secrets.getString(key)
+                override fun putString(key: String, value: String) = sl.secrets.putString(key, value)
+                override fun delete(key: String) = sl.secrets.delete(key)
+            },
+            isDirectEnabled = { sl.settings.withingsDirectEnabled },
+            loadSession = ::loadWebSession,
+            saveSession = ::saveWebSession,
+            extendSession = { cookies, token -> webClient.extendSessionDetailed(cookies, token) },
+            hasUsableCookies = { directAuth.hasUsableCookies() },
+            trySilentSsoRefresh = { directAuth.trySilentSsoRefresh() },
+            loginPassword = { email, pass -> directAuth.loginPassword(email, pass) },
+            onSilentRefreshOk = { res, emailFallback -> applySilentRefreshResult(res, emailFallback) },
+            onAuthPaused = { _, message -> _state.value = WithingsUiState.Failed(message) },
+            onLog = { msg -> android.util.Log.i("Withings", msg) },
+        )
+    }
+
+    fun isAutoReloginPaused(): Boolean = sessionCoordinator.isAutoReloginPaused()
+    fun authPausedMessage(): String? = sessionCoordinator.pausedMessage()
+
     fun pendingEmail(): String? = directAuth.pendingEmail
     fun isAwaitingCode(): Boolean = directAuth.isAwaitingCode
 
@@ -180,8 +210,10 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
     fun requestDirectEmailCode(email: String): WithingsLoginResult = synchronized(renewLock) {
         val em = email.trim()
         sl.secrets.putString("withings.web.email", em)
+        sl.secrets.delete("withings.web.password")
         val r = directAuth.requestEmailCode(em)
         if (r is WithingsLoginResult.Ok) {
+            sessionCoordinator.clearAuthPauseAndBackoff()
             val existing = loadWebSession()
             val primary = existing?.primaryUserId?.let { pid -> r.profiles.firstOrNull { it.id == pid } }
                 ?: r.profiles.firstOrNull { it.isPrimary }
@@ -208,6 +240,7 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
     fun loginDirectPassword(email: String, password: String): WithingsLoginResult = synchronized(renewLock) {
         val em = email.trim()
         val r = directAuth.loginPassword(em, password)
+        sessionCoordinator.recordManualAuthResult(r)
         if (r is WithingsLoginResult.Ok) {
             val existing = loadWebSession()
             val primary = existing?.primaryUserId?.let { pid -> r.profiles.firstOrNull { it.id == pid } }
@@ -232,6 +265,7 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
     fun resumeDirectMfa(code: String, emailFallback: String? = null): WithingsLoginResult = synchronized(renewLock) {
         val r = directAuth.resumeMfa(code, emailFallback)
         if (r is WithingsLoginResult.Ok) {
+            sessionCoordinator.clearAuthPauseAndBackoff()
             val existing = loadWebSession()
             val primary = existing?.primaryUserId?.let { pid -> r.profiles.firstOrNull { it.id == pid } }
                 ?: r.profiles.firstOrNull { it.isPrimary }
@@ -239,8 +273,12 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
             val child = existing?.childUserId?.let { cid -> r.profiles.firstOrNull { it.id == cid } }
             val em = emailFallback?.trim() ?: directAuth.pendingEmail ?: existing?.email
             if (em != null) sl.secrets.putString("withings.web.email", em)
-            val pass = directAuth.pendingPassword ?: sl.secrets.getString("withings.web.password")
-            if (!pass.isNullOrBlank()) sl.secrets.putString("withings.web.password", pass)
+            val pass = directAuth.pendingPassword
+            if (!pass.isNullOrBlank()) {
+                sl.secrets.putString("withings.web.password", pass)
+            } else {
+                sl.secrets.delete("withings.web.password")
+            }
             completeWebLogin(
                 cookies = r.session.cookies,
                 primary = primary,
@@ -249,6 +287,8 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
                 allProfiles = r.profiles,
                 email = em
             )
+        } else if (r is WithingsLoginResult.Error && r.kind == WithingsAuthFailureKind.RATE_LIMITED) {
+            sessionCoordinator.recordManualAuthResult(r)
         }
         r
     }
@@ -280,60 +320,16 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
     /**
      * Automatické tiché obnovení relace ze zapečetěného úložiště bez zásahu uživatele:
      * 1. Tiché SSO přes dlouhodobé cookies `account.withings.com` (funguje i bez hesla).
-     * 2. Tiché znovupřihlášení e-mailem a heslem se zachováním důvěryhodných cookies zařízení.
+     * 2. Tiché znovupřihlášení e-mailem a heslem (pouze pokud není aktivní circuit-breaker / backoff).
      */
     fun tryAutoReLogin(): Boolean = synchronized(renewLock) {
-        val email = sl.secrets.getString("withings.web.email")
-        val pass = sl.secrets.getString("withings.web.password")
-        // Zálohujeme uložené cookies: pokud tiché obnovení selže, nesmíme přijít o funkční relaci.
-        val prevCookieJar = sl.secrets.getString("withings.web.cookiejar")
-
-        val ssoRes = runCatching { directAuth.trySilentSsoRefresh() }.getOrNull()
-        android.util.Log.i("Withings", "tryAutoReLogin SSO result: ${ssoRes?.let { it::class.simpleName }}")
-        if (ssoRes is WithingsLoginResult.Ok) {
-            applySilentRefreshResult(ssoRes, email)
-            return@synchronized true
-        }
-
-        android.util.Log.i("Withings", "tryAutoReLogin password fallback: hasEmail=${!email.isNullOrBlank()}, hasPassword=${!pass.isNullOrBlank()}")
-        if (!email.isNullOrBlank() && !pass.isNullOrBlank()) {
-            val r = directAuth.loginPassword(email, pass)
-            android.util.Log.i("Withings", "tryAutoReLogin password result: ${r::class.simpleName}")
-            if (r is WithingsLoginResult.Ok) {
-                applySilentRefreshResult(r, email)
-                return@synchronized true
-            }
-        }
-
-        if (prevCookieJar != null) {
-            sl.secrets.putString("withings.web.cookiejar", prevCookieJar)
-        }
-        false
+        sessionCoordinator.tryAutoReLogin()
     }
 
     /** Prodlouží existující webovou relaci Withings nebo provede automatické tiché znovupřihlášení. */
-    fun renewSession(): Boolean = synchronized(renewLock) {
+    fun renewSession(forceExtend: Boolean = false): Boolean = synchronized(renewLock) {
         if (sl.settings.withingsDirectEnabled) {
-            val s = loadWebSession()
-            android.util.Log.i("Withings", "renewSession: hasSession=${s != null}, isConnected=${s?.isConnected() == true}")
-            if (s != null && s.isConnected()) {
-                val extended = runCatching { webClient.extendSession(s.cookies, s.sessionToken) }.getOrNull()
-                if (extended != null) {
-                    android.util.Log.i("Withings", "renewSession: extendSession SUCCESS")
-                    val updated = s.copy(
-                        sessionToken = extended.sessionToken ?: s.sessionToken,
-                        cookies = extended.cookies,
-                        lastExtendedMs = System.currentTimeMillis()
-                    )
-                    saveWebSession(updated)
-                    return@synchronized true
-                }
-                android.util.Log.i("Withings", "renewSession: extendSession failed, falling back to tryAutoReLogin")
-            }
-            if (s != null || !sl.secrets.getString("withings.web.cookiejar").isNullOrBlank()) {
-                return@synchronized tryAutoReLogin()
-            }
-            return@synchronized false
+            return@synchronized sessionCoordinator.renewSession(forceExtend)
         }
         if (session.isConnected()) {
             return@synchronized runCatching { session.accessToken(); true }.getOrDefault(false)
@@ -351,6 +347,7 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
         nowMs: Long = System.currentTimeMillis(),
         email: String? = null,
     ) = synchronized(renewLock) {
+        sessionCoordinator.clearAuthPauseAndBackoff()
         val existing = loadWebSession()
         val profiles = allProfiles.ifEmpty { existing?.allProfiles.orEmpty() }
         val effectiveEmail = email ?: existing?.email ?: sl.secrets.getString("withings.web.email")
@@ -446,6 +443,12 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
 
     /** Import dat přes webový konektor (váha, tuk, svaly, kosti, voda, beztuková hmota, viscerální tuk, cévní věk, PWV, BMR, tep, ECG). */
     fun runWebImport(nowMs: Long, allowRetry: Boolean = true): AreaResult? = synchronized(renewLock) {
+        if (sessionCoordinator.isAutoReloginPaused()) {
+            _state.value = WithingsUiState.Failed(
+                sessionCoordinator.pausedMessage() ?: "Relace Withings vyžaduje ruční přihlášení"
+            )
+            return@synchronized null
+        }
         val s = loadWebSession() ?: return@synchronized null
         if (!sl.settings.withingsDirectEnabled || !s.isConnected()) return@synchronized null
 
@@ -498,7 +501,7 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
                     .filter { !it.deleted && it.provider == Provider.WITHINGS_API.name }
                     .associate { (it.startUtcMs / 1000L) to it.value }
             },
-            onRefreshFallback = { if (renewSession()) loadWebSession() else null }
+            onRefreshFallback = { if (renewSession(forceExtend = true)) loadWebSession() else null }
         )
         val engine = SyncEngine(
             fetcher = fetcher,
@@ -555,17 +558,21 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
             }
             is AreaResult.Failed -> {
                 if (result.error is ProviderError.Unauthorized) {
-                    if (allowRetry && renewSession()) {
+                    if (allowRetry && !sessionCoordinator.isAutoReloginPaused() && renewSession(forceExtend = true)) {
                         return@synchronized runWebImport(nowMs, allowRetry = false)
                     }
-                    _state.value = WithingsUiState.Failed("Relace Withings vyžaduje obnovení")
+                    _state.value = WithingsUiState.Failed(
+                        sessionCoordinator.pausedMessage() ?: "Relace Withings vyžaduje obnovení"
+                    )
                 }
             }
             is AreaResult.NeedsUser -> {
-                if (allowRetry && renewSession()) {
+                if (allowRetry && !sessionCoordinator.isAutoReloginPaused() && renewSession(forceExtend = true)) {
                     return@synchronized runWebImport(nowMs, allowRetry = false)
                 }
-                _state.value = WithingsUiState.Failed("Relace Withings vyžaduje obnovení")
+                _state.value = WithingsUiState.Failed(
+                    sessionCoordinator.pausedMessage() ?: "Relace Withings vyžaduje obnovení"
+                )
             }
             else -> Unit
         }

@@ -85,6 +85,7 @@ fun WithingsNativeLoginForm(
     var code by rememberSaveable { mutableStateOf("") }
     var awaitingCode by rememberSaveable { mutableStateOf(sl.withings.isAwaitingCode()) }
     var busy by remember { mutableStateOf(false) }
+    val pausedMsg = remember { sl.withings.authPausedMessage() }
 
     val accountPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
@@ -96,6 +97,21 @@ fun WithingsNativeLoginForm(
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        if (!pausedMsg.isNullOrBlank()) {
+            Card(
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF450A0A)),
+                border = BorderStroke(1.dp, Color(0xFFEF4444).copy(alpha = 0.7f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = "Automatické obnovení bylo pozastaveno: $pausedMsg",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFFFCA5A5),
+                    modifier = Modifier.padding(12.dp)
+                )
+            }
+        }
         // E-mail účtu Withings
         OutlinedTextField(
             value = email,
@@ -331,8 +347,24 @@ fun WithingsReconnectForm(
     var codeSent by rememberSaveable { mutableStateOf(sl.withings.isAwaitingCode()) }
     var verifyingCode by remember { mutableStateOf(false) }
     var loggingInByPassword by remember { mutableStateOf(false) }
+    val pausedMsg = remember { sl.withings.authPausedMessage() }
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        if (!pausedMsg.isNullOrBlank()) {
+            Card(
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF450A0A)),
+                border = BorderStroke(1.dp, Color(0xFFEF4444).copy(alpha = 0.7f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = "Automatické obnovení bylo pozastaveno: $pausedMsg",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFFFCA5A5),
+                    modifier = Modifier.padding(12.dp)
+                )
+            }
+        }
         // Karta účtu
         Card(
             shape = RoundedCornerShape(14.dp),

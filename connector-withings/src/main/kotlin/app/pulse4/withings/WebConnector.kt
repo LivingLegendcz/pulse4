@@ -26,6 +26,12 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 
+sealed interface WithingsExtendResult {
+    data class Success(val session: WithingsExtendedSession) : WithingsExtendResult
+    data object Unauthorized : WithingsExtendResult
+    data class TransientError(val reason: String) : WithingsExtendResult
+}
+
 @Serializable
 data class WithingsWebConfig(
     val baseUrl: String = "https://scalews.withings.com/cgi-bin/",
@@ -245,15 +251,22 @@ class WithingsWebClient(
     }
 
     /**
-     * Prodloužení přihlášené webové relace (`/cgi-bin/session`, `action=extend`).
-     * Vrací novou strukturu [WithingsExtendedSession] se sloučenými cookies a obnoveným tokenem.
+     * Prodloužení přihlášené webové relace (`/cgi-bin/session`, `action=extend`) s rozlišením důvodu selhání.
      */
-    fun extendSession(cookies: String, sessionToken: String? = null): WithingsExtendedSession? {
+    fun extendSessionDetailed(cookies: String, sessionToken: String? = null): WithingsExtendResult {
         val form = baseForm("extend", cookies, sessionToken)
-        val res = runCatching { post("session", form, cookies, sessionToken) }.getOrNull() ?: return null
-        val env = runCatching { Wire.parse(res.body) }.getOrNull() ?: return null
-        if (env.status != 0) return null
-        val body = env.body ?: return null
+        val res = try {
+            post("session", form, cookies, sessionToken)
+        } catch (e: Exception) {
+            return WithingsExtendResult.TransientError(e.message ?: "Network error")
+        }
+        if (res.code == 429 || res.code >= 500) {
+            return WithingsExtendResult.TransientError("HTTP ${res.code}")
+        }
+        val env = runCatching { Wire.parse(res.body) }.getOrNull()
+            ?: return WithingsExtendResult.TransientError("Invalid JSON response")
+        if (env.status != 0) return WithingsExtendResult.Unauthorized
+        val body = env.body ?: return WithingsExtendResult.Unauthorized
         val setCookie = res.headers.entries.firstOrNull { it.key.equals("Set-Cookie", ignoreCase = true) }?.value
         val newToken = body["session_token"]?.jsonPrimitive?.contentOrNull
             ?: extractCookieValue(setCookie.orEmpty(), "session_token")
@@ -263,8 +276,15 @@ class WithingsWebClient(
         body["sessionid"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }?.let { sid ->
             updatedCookies = mergeCookies(updatedCookies, "session_key=$sid", null)
         }
-        return WithingsExtendedSession(newToken, updatedCookies)
+        return WithingsExtendResult.Success(WithingsExtendedSession(newToken, updatedCookies))
     }
+
+    /**
+     * Prodloužení přihlášené webové relace (`/cgi-bin/session`, `action=extend`).
+     * Vrací novou strukturu [WithingsExtendedSession] se sloučenými cookies a obnoveným tokenem.
+     */
+    fun extendSession(cookies: String, sessionToken: String? = null): WithingsExtendedSession? =
+        (extendSessionDetailed(cookies, sessionToken) as? WithingsExtendResult.Success)?.session
 
     /**
      * Načte skupiny měření z `/cgi-bin/measure` (`action=getmeas`).

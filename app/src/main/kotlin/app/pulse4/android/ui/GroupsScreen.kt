@@ -2250,7 +2250,10 @@ private fun GroupBranchMembersAndSharingSection(
                                                     members = currentGroup.members - memberId,
                                                     version = currentGroup.version + 1
                                                 )
-                                                sl.shareService.saveGroup(updated)
+                                                sl.shareService.saveAndBroadcastGroup(
+                                                    updated,
+                                                    extraRecipients = setOf(memberId)
+                                                )
                                                 "Člen '$name' odebrán z kruhu."
                                             }
                                         }
@@ -2321,27 +2324,11 @@ private fun GroupBranchMembersAndSharingSection(
                                     onClick = {
                                         scope.launch {
                                             notice = withContext(Dispatchers.IO) {
-                                                val self = sl.bridge.ensureStarted().deliveryHash
                                                 val updated = currentGroup.copy(
                                                     members = currentGroup.members + c.identity,
                                                     version = currentGroup.version + 1
                                                 )
-                                                sl.shareService.saveGroup(updated)
-                                                val b = MessageBuilder(self)
-                                                val now = System.currentTimeMillis()
-                                                val msg = b.build(
-                                                    c.identity,
-                                                    Kinds.MEMBERSHIP_UPDATE,
-                                                    "group",
-                                                    updated.id,
-                                                    updated.version,
-                                                    Wire.json.encodeToString(Group.serializer(), updated),
-                                                    now
-                                                )
-                                                val e = msg.envelope
-                                                sl.outbox.enqueue(
-                                                    OutboxItem(e.eventId, c.identity, e.kind, e.objectType, e.objectId, e.objectVersion, null, Wire.encode(msg), now)
-                                                )
+                                                sl.shareService.saveAndBroadcastGroup(updated)
                                                 "Kontakt '${c.displayName}' byl přidán do kruhu '${updated.name}'."
                                             }
                                         }
@@ -2685,14 +2672,7 @@ private fun CreateGroupModalDialog(
                             val newId = withContext(Dispatchers.IO) {
                                 val self = sl.bridge.ensureStarted().deliveryHash
                                 val g = Group(UUID.randomUUID().toString(), groupName, self, self, members + self, 1)
-                                sl.shareService.saveGroup(g)
-                                val b = MessageBuilder(self)
-                                val now = System.currentTimeMillis()
-                                (g.members - self).forEach { m ->
-                                    val msg = b.build(m, Kinds.MEMBERSHIP_UPDATE, "group", g.id, g.version, Wire.json.encodeToString(Group.serializer(), g), now)
-                                    val e = msg.envelope
-                                    sl.outbox.enqueue(OutboxItem(e.eventId, m, e.kind, e.objectType, e.objectId, e.objectVersion, null, Wire.encode(msg), now))
-                                }
+                                sl.shareService.saveAndBroadcastGroup(g)
                                 g.id
                             }
                             onCreated(newId)

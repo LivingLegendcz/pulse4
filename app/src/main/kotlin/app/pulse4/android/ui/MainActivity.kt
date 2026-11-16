@@ -98,6 +98,30 @@ class MainActivity : ComponentActivity() {
         }
         setContent { Pulse4Theme { Root(sl) } }
         handleCallback(intent)
+        requestBackgroundPermissionsIfNeeded(sl)
+        app.pulse4.android.work.PulseSyncService.syncState(this)
+    }
+
+    private fun requestBackgroundPermissionsIfNeeded(sl: app.pulse4.android.di.ServiceLocator) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val granted = androidx.core.content.ContextCompat.checkSelfPermission(
+                this,
+                android.Manifest.permission.POST_NOTIFICATIONS,
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            if (!granted) {
+                CoroutineScope(Dispatchers.IO).launch {
+                    if (sl.settings.backgroundServiceEnabled) {
+                        runOnUiThread {
+                            androidx.core.app.ActivityCompat.requestPermissions(
+                                this@MainActivity,
+                                arrayOf(android.Manifest.permission.POST_NOTIFICATIONS),
+                                4109,
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 
     override fun onNewIntent(intent: android.content.Intent) {

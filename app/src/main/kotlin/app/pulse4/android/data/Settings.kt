@@ -88,6 +88,8 @@ class Settings(private val db: AppDatabase) {
     var zoneId: String get() = get("zoneId", java.time.ZoneId.systemDefault().id); set(v) = put("zoneId", v)
 
     var networkMode: NetworkMode get() = NetworkMode.valueOf(get("networkMode", NetworkMode.AUTO.name)); set(v) = put("networkMode", v.name)
+    /** Trvalý běh služby na pozadí (po startu telefonu) pro okamžitý příjem zpráv a synchronizaci dat. */
+    var backgroundServiceEnabled: Boolean get() = get("backgroundServiceEnabled", "true").toBoolean(); set(v) = put("backgroundServiceEnabled", v.toString())
     var gatewayHost: String get() = get("gatewayHost", ""); set(v) = put("gatewayHost", v)
     var gatewayPort: Int get() = get("gatewayPort", "4242").toInt(); set(v) = put("gatewayPort", v.toString())
     /** Uložený seznam P2P uzlů (ve tvaru host:port), které lze v nastavení přepínat, přidávat i odebírat. */

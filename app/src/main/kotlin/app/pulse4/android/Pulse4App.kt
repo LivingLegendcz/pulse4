@@ -2,6 +2,7 @@ package app.pulse4.android
 
 import android.app.Application
 import app.pulse4.android.di.ServiceLocator
+import app.pulse4.android.work.PulseSyncService
 import app.pulse4.android.work.Scheduler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -28,12 +29,15 @@ class Pulse4App : Application() {
             runCatching { services.withings.renewSession() }
         }
 
-        // Inicializace P2P mostu a transportu (připojení k lokální síti i Reticulum bráně)
+        // Inicializace P2P mostu a transportu (nejprve transport zaregistruje kontakty pro dešifrování příchozích zpráv)
         CoroutineScope(Dispatchers.IO).launch {
             runCatching {
-                services.bridge.ensureStarted()
                 services.transport
+                services.bridge.ensureStarted()
             }
         }
+
+        // Trvalá služba na pozadí (pokud je zapnutá v Nastavení)
+        PulseSyncService.syncState(this)
     }
 }

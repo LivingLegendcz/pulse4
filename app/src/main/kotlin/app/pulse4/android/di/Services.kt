@@ -52,7 +52,7 @@ import java.time.ZoneId
 import kotlinx.serialization.json.doubleOrNull
 
 /** Ruční, bezzávislostní DI: pro čtyři lidi a jednu aktivitu stačí. Všechno běží v telefonu, žádný vlastní server. */
-class ServiceLocator(private val context: Context) {
+class ServiceLocator(internal val context: Context) {
     val vault = KeyVault(context)
     val secrets = SecretStore(context, vault)
     val db: AppDatabase by lazy { AppDatabase.open(context, vault) }
@@ -175,6 +175,7 @@ class ServiceLocator(private val context: Context) {
                 },
             )
         }.also { t ->
+            t.ensureContactsRegistered()
             bridge.onEventReceived = { ev -> t.processEvent(ev) }
             bridge.onLocalPeerDiscovered = { peerHash ->
                 if (settings.networkMode != app.pulse4.android.data.NetworkMode.MANUAL && outbox.hasPendingFor(peerHash)) {
@@ -1818,6 +1819,15 @@ class ShareService(private val sl: ServiceLocator) {
         return Result.success(updated)
     }
 
+    /** Uloží kruh a ihned rozešle aktualizaci členství všem členům (a případným odebraným) + spustí synchronizaci. */
+    fun saveAndBroadcastGroup(
+        group: Group,
+        extraRecipients: Set<String> = emptySet(),
+    ) {
+        saveGroup(group)
+        broadcastMembershipUpdate(group, System.currentTimeMillis(), extraRecipients = extraRecipients)
+    }
+
     private fun broadcastMembershipUpdate(
         group: Group,
         nowMs: Long,
@@ -1838,6 +1848,9 @@ class ShareService(private val sl: ServiceLocator) {
             )
             val e = msg.envelope
             sl.outbox.enqueue(OutboxItem(e.eventId, e.recipient, e.kind, e.objectType, e.objectId, e.objectVersion, null, Wire.encode(msg), nowMs))
+        }
+        if (sl.settings.networkMode != app.pulse4.android.data.NetworkMode.MANUAL) {
+            app.pulse4.android.work.Scheduler.shareNow(sl.context)
         }
     }
 

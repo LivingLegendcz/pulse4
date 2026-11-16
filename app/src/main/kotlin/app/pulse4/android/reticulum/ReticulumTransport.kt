@@ -43,7 +43,7 @@ class ReticulumTransport(
         builder = MessageBuilder(selfId),
     ).also { receiver = it }
 
-    private fun ensureContactsRegistered() {
+    internal fun ensureContactsRegistered() {
         if (!bridge.hasRegisteredContacts()) {
             val knownContacts = runCatching { db.contacts().allNow() }.getOrDefault(emptyList())
             for (c in knownContacts) {

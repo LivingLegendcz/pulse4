@@ -2741,7 +2741,8 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
             sl.settings.propagationNode,
             sl.settings.savedGatewayNodes.joinToString(","),
             sl.settings.rnsOnboardingCompleted.toString(),
-            sl.settings.rnsAdvancedMode.toString()
+            sl.settings.rnsAdvancedMode.toString(),
+            sl.settings.backgroundServiceEnabled.toString()
         )
     }
     val myInfo by io(tick) {
@@ -2934,6 +2935,69 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
             ) {
                 Text(it, Modifier.padding(10.dp), style = MaterialTheme.typography.bodyMedium)
+            }
+        }
+
+        val bgEnabled = netData?.getOrNull(7)?.toBooleanStrictOrNull() ?: true
+        val pm = ctx.getSystemService(android.content.Context.POWER_SERVICE) as? android.os.PowerManager
+        val ignoringBattery = pm?.isIgnoringBatteryOptimizations(ctx.packageName) ?: true
+        Card(
+            shape = RoundedCornerShape(16.dp),
+            border = BorderStroke(1.dp, Color(0xFF1E293B)),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF111827)),
+            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)
+        ) {
+            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                        Text(
+                            "Trvalý běh na pozadí",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                        Text(
+                            "Naběhne po startu telefonu (jako Threema / Meshtastic), udržuje Reticulum a průběžně synchronizuje data i zprávy.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFF94A3B8)
+                        )
+                    }
+                    Switch(
+                        checked = bgEnabled,
+                        onCheckedChange = { checked ->
+                            scope.launch(Dispatchers.IO) {
+                                sl.settings.backgroundServiceEnabled = checked
+                                app.pulse4.android.work.PulseSyncService.syncState(ctx)
+                                feedback = if (checked) {
+                                    "Trvalý běh na pozadí zapnut."
+                                } else {
+                                    "Trvalý běh na pozadí vypnut (synchronizace jen přes WorkManager)."
+                                }
+                                tick++
+                            }
+                        }
+                    )
+                }
+                if (bgEnabled && !ignoringBattery) {
+                    OutlinedButton(
+                        onClick = {
+                            runCatching {
+                                val intent = android.content.Intent(
+                                    android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                    android.net.Uri.parse("package:${ctx.packageName}")
+                                ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                                ctx.startActivity(intent)
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Vypnout omezení baterie pro spolehlivý běh")
+                    }
+                }
             }
         }
 

@@ -12,6 +12,12 @@
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <!-- Android 17+ (target SDK 37+): runtime oprávnění pro přístup do místní sítě, i pro nativní/Python sockety. -->
     <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
+    <!-- Trvalý běh na pozadí po startu telefonu (styl Threema / Meshtastic). -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- Health Connect: jen čtení váhy a tělesného tuku (bez čtení na pozadí a historie). -->
     <uses-permission android:name="android.permission.health.READ_WEIGHT" />
     <uses-permission android:name="android.permission.health.READ_BODY_FAT" />
@@ -60,5 +66,21 @@
                 <category android:name="android.intent.category.HEALTH_PERMISSIONS" />
             </intent-filter>
         </activity-alias>
+
+        <service
+            android:name=".work.PulseSyncService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="remoteMessaging" />
+
+        <receiver
+            android:name=".work.BootReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

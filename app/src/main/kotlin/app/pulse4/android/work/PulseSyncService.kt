@@ -8,6 +8,8 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
@@ -23,18 +25,21 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
- * Trvalá služba na pozadí (styl Threema / Meshtastic), která po startu telefonu
- * udržuje živé Reticulum spojení, přijímá zprávy přes RNS Link a periodicky
- * stahuje data z Garminu, Withings a Health Connect.
+ * Úsporná trvalá služba na pozadí (styl Threema / Meshtastic):
+ * - Po startu telefonu udržuje Reticulum TCP/Wi-Fi spojení (push-driven přes onEventReceived, bez zbytečného pollingu).
+ * - Každých 15 minut (jen při dostupné síti) tiše dotáhne data z Garminu, Withings a Health Connect.
+ * - Používá tichou notifikaci s nejnižší prioritou (IMPORTANCE_MIN), aby uživatele nerušila.
  */
 class PulseSyncService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val wakeSignal = Channel<Unit>(Channel.CONFLATED)
     private var loopJob: Job? = null
     private var lastImportAtMs: Long = 0L
     private var lastNotifText: String = ""
@@ -48,7 +53,11 @@ class PulseSyncService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val sl = (applicationContext as Pulse4App).services
-        promoteToForeground("Spouštím Reticulum a synchronizaci…")
+        promoteToForeground("Reticulum připraveno na pozadí")
+
+        if (intent?.action == ACTION_SYNC_NOW) {
+            wakeSignal.trySend(Unit)
+        }
 
         if (loopJob?.isActive == true) {
             return START_STICKY
@@ -62,8 +71,8 @@ class PulseSyncService : Service() {
             }
 
             runCatching {
-                sl.bridge.ensureStarted()
                 sl.transport
+                sl.bridge.ensureStarted()
             }.onFailure {
                 Log.w(TAG, "Bridge start failed in PulseSyncService", it)
             }
@@ -76,9 +85,10 @@ class PulseSyncService : Service() {
                 }
 
                 val now = System.currentTimeMillis()
+                val online = hasActiveNetwork()
 
-                // 1. Periodické stahování zdravotních dat (každých 15 minut).
-                if (now - lastImportAtMs >= IMPORT_INTERVAL_MS) {
+                // 1. Periodické stahování zdravotních dat ze zdrojů (každých 15 min, jen když je síť).
+                if (online && now - lastImportAtMs >= IMPORT_INTERVAL_MS) {
                     lastImportAtMs = now
                     runCatching {
                         sl.garminExt.ensureSession()
@@ -93,20 +103,28 @@ class PulseSyncService : Service() {
                     }
                 }
 
-                // 2. RNS / LXMF výměna zpráv a příchozích aktualizací.
+                // 2. RNS / LXMF výměna: naplánovat případné nové projekce a odeslat čekající položky.
                 if (sl.settings.networkMode != NetworkMode.MANUAL) {
                     runCatching {
                         sl.bridge.ensureStarted()
-                        sl.shareService.planAndEnqueue(now)
-                        sl.transport.pump(now, windowMs = 15_000L)
-                        sl.shareService.flushPlanNotifications(System.currentTimeMillis())
+                        val enqueued = sl.shareService.planAndEnqueue(now)
+                        val hasDue = enqueued > 0 || sl.outbox.due(now, localPeers = sl.bridge.localPeerHashes()).isNotEmpty()
+                        val hasPropagation = sl.settings.propagationNode.isNotBlank()
+                        if (hasDue || hasPropagation) {
+                            sl.transport.pump(now, windowMs = if (hasDue) 10_000L else 3_000L)
+                            sl.shareService.flushPlanNotifications(System.currentTimeMillis())
+                        }
                     }.onFailure {
                         Log.w(TAG, "Background sync tick failed", it)
                     }
                 }
 
                 updateNotification(statusText(sl))
-                delay(SYNC_TICK_DELAY_MS)
+
+                // Úsporné čekání: probudí se buď okamžitě na požadavek (ACTION_SYNC_NOW), nebo za 3 minuty.
+                withTimeoutOrNull(IDLE_TICK_DELAY_MS) {
+                    wakeSignal.receive()
+                }
             }
         }
 
@@ -114,21 +132,30 @@ class PulseSyncService : Service() {
     }
 
     override fun onDestroy() {
+        wakeSignal.close()
         loopJob?.cancel()
         scope.cancel()
         super.onDestroy()
     }
 
+    private fun hasActiveNetwork(): Boolean {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return true
+        val net = cm.activeNetwork ?: return false
+        val caps = cm.getNetworkCapabilities(net) ?: return false
+        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) ||
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+    }
+
     private fun statusText(sl: app.pulse4.android.di.ServiceLocator): String {
         if (sl.settings.networkMode == NetworkMode.MANUAL) {
-            return "Ruční režim sítě • čeká na vyžádání"
+            return "Ruční režim sítě"
         }
         val gw = sl.bridge.gatewayHealth.value
         return when {
-            sl.settings.networkMode == NetworkMode.LOCAL_ONLY -> "Lokální Wi-Fi P2P • připraveno"
+            sl.settings.networkMode == NetworkMode.LOCAL_ONLY -> "Lokální Wi-Fi P2P připraveno"
             gw.state == GatewayHealthState.ONLINE -> "Připojeno (${gw.host}) • zprávy aktivní"
-            gw.state == GatewayHealthState.UNREACHABLE -> "Uzel nedostupný • zkouším znovu"
-            else -> "Reticulum aktivní • synchronizace na pozadí"
+            gw.state == GatewayHealthState.UNREACHABLE -> "Uzel nedostupný • čeká na síť"
+            else -> "Reticulum aktivní na pozadí"
         }
     }
 
@@ -165,11 +192,12 @@ class PulseSyncService : Service() {
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle("Pulse4 běží na pozadí")
+            .setContentTitle("Pulse4")
             .setContentText(text)
             .setOngoing(true)
             .setSilent(true)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setShowWhen(false)
+            .setPriority(NotificationCompat.PRIORITY_MIN)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setContentIntent(pi)
             .build()
@@ -181,32 +209,36 @@ class PulseSyncService : Service() {
         val channel = NotificationChannel(
             CHANNEL_ID,
             "Synchronizace na pozadí",
-            NotificationManager.IMPORTANCE_LOW,
+            NotificationManager.IMPORTANCE_MIN,
         ).apply {
-            description = "Udržuje připojení k Reticulum a synchronizaci zpráv i po startu telefonu."
+            description = "Tichá služba pro příjem zpráv přes Reticulum a průběžnou synchronizaci dat."
             setShowBadge(false)
+            lockscreenVisibility = Notification.VISIBILITY_SECRET
         }
         nm.createNotificationChannel(channel)
     }
 
     companion object {
         private const val TAG = "PulseSyncService"
-        private const val CHANNEL_ID = "pulse4_background_sync"
+        private const val CHANNEL_ID = "pulse4_background_sync_min"
         private const val NOTIFICATION_ID = 4109
         private const val IMPORT_INTERVAL_MS = 15L * 60_000L
-        private const val SYNC_TICK_DELAY_MS = 30_000L
+        private const val IDLE_TICK_DELAY_MS = 3L * 60_000L
+        const val ACTION_SYNC_NOW = "app.pulse4.android.action.SYNC_NOW"
 
         /**
          * Bezpečně spustí nebo zastaví službu podle nastavení uživatele (`backgroundServiceEnabled`).
          * Čtení nastavení probíhá na IO vlákně, aby neblokovalo UI.
          */
-        fun syncState(context: Context) {
+        fun syncState(context: Context, triggerSyncNow: Boolean = false) {
             val appCtx = context.applicationContext
             CoroutineScope(Dispatchers.IO).launch {
                 val enabled = runCatching {
                     (appCtx as Pulse4App).services.settings.backgroundServiceEnabled
                 }.getOrDefault(true)
-                val intent = Intent(appCtx, PulseSyncService::class.java)
+                val intent = Intent(appCtx, PulseSyncService::class.java).apply {
+                    if (triggerSyncNow) action = ACTION_SYNC_NOW
+                }
                 if (enabled) {
                     runCatching {
                         ContextCompat.startForegroundService(appCtx, intent)

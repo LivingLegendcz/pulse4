@@ -91,8 +91,11 @@ object Scheduler {
             .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()).build(),
     )
 
-    fun shareNow(ctx: Context, manual: Boolean = false) = WorkManager.getInstance(ctx).enqueueUniqueWork(
-        "$SHARE-now", ExistingWorkPolicy.APPEND_OR_REPLACE,
-        OneTimeWorkRequestBuilder<ShareWorker>().setInputData(androidx.work.workDataOf(ShareWorker.KEY_MANUAL to manual)).build(),
-    )
+    fun shareNow(ctx: Context, manual: Boolean = false): androidx.work.Operation {
+        PulseSyncService.syncState(ctx, triggerSyncNow = true)
+        return WorkManager.getInstance(ctx).enqueueUniqueWork(
+            "$SHARE-now", ExistingWorkPolicy.APPEND_OR_REPLACE,
+            OneTimeWorkRequestBuilder<ShareWorker>().setInputData(androidx.work.workDataOf(ShareWorker.KEY_MANUAL to manual)).build(),
+        )
+    }
 }

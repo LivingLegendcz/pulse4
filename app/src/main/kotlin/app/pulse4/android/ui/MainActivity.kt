@@ -7,7 +7,15 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import com.google.android.play.core.appupdate.AppUpdateManager
+import com.google.android.play.core.appupdate.AppUpdateManagerFactory
+import com.google.android.play.core.appupdate.AppUpdateOptions
+import com.google.android.play.core.install.InstallStateUpdatedListener
+import com.google.android.play.core.install.model.AppUpdateType
+import com.google.android.play.core.install.model.InstallStatus
+import com.google.android.play.core.install.model.UpdateAvailability
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -85,8 +93,21 @@ import kotlinx.coroutines.launch
 
 private val navRequestFlow = MutableStateFlow<String?>(null)
 private val activeFmtFlow = MutableStateFlow(activeFmt)
+private val playUpdateDownloadedFlow = MutableStateFlow(false)
 
 class MainActivity : ComponentActivity() {
+    private val appUpdateManager: AppUpdateManager by lazy {
+        AppUpdateManagerFactory.create(applicationContext)
+    }
+    private val updateLauncher = registerForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult(),
+    ) { /* Uživatel potvrdil nebo odložil aktualizaci v Google Play dialogu. */ }
+    private val installStateListener = InstallStateUpdatedListener { state ->
+        if (state.installStatus() == InstallStatus.DOWNLOADED) {
+            playUpdateDownloadedFlow.value = true
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -100,9 +121,59 @@ class MainActivity : ComponentActivity() {
             activeFmt = updatedFmt
             activeFmtFlow.value = updatedFmt
         }
-        setContent { Pulse4Theme { Root(sl) } }
+        setContent {
+            Pulse4Theme {
+                Root(
+                    sl = sl,
+                    onCompletePlayUpdate = {
+                        runCatching { appUpdateManager.completeUpdate() }
+                    },
+                )
+            }
+        }
         handleCallback(intent)
         app.pulse4.android.work.PulseSyncService.syncState(this)
+        checkPlayInAppUpdate()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        runCatching {
+            appUpdateManager.appUpdateInfo.addOnSuccessListener { info ->
+                if (info.installStatus() == InstallStatus.DOWNLOADED) {
+                    playUpdateDownloadedFlow.value = true
+                }
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        runCatching { appUpdateManager.unregisterListener(installStateListener) }
+        super.onDestroy()
+    }
+
+    private fun checkPlayInAppUpdate() {
+        runCatching {
+            appUpdateManager.registerListener(installStateListener)
+            appUpdateManager.appUpdateInfo.addOnSuccessListener { info ->
+                if (info.installStatus() == InstallStatus.DOWNLOADED) {
+                    playUpdateDownloadedFlow.value = true
+                    return@addOnSuccessListener
+                }
+                if (
+                    info.updateAvailability() == UpdateAvailability.UPDATE_AVAILABLE &&
+                    info.isUpdateTypeAllowed(AppUpdateType.FLEXIBLE)
+                ) {
+                    runCatching {
+                        appUpdateManager.startUpdateFlowForResult(
+                            info,
+                            updateLauncher,
+                            AppUpdateOptions.newBuilder(AppUpdateType.FLEXIBLE).build(),
+                        )
+                    }
+                }
+            }
+        }
     }
 
     override fun onNewIntent(intent: android.content.Intent) {
@@ -520,7 +591,7 @@ private data class Dest(val route: String, val label: String, val icon: androidx
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun Root(sl: app.pulse4.android.di.ServiceLocator) {
+private fun Root(sl: app.pulse4.android.di.ServiceLocator, onCompletePlayUpdate: () -> Unit = {}) {
     val nav = rememberNavController()
     val main = listOf(
         Dest("today", "Dnes", Icons.Outlined.CalendarToday),
@@ -630,7 +701,35 @@ private fun Root(sl: app.pulse4.android.di.ServiceLocator) {
         @Suppress("UNUSED_VARIABLE")
         val observedFmt = currentFmt
 
+        val playUpdateDownloaded by playUpdateDownloadedFlow.collectAsState()
+
         Column(Modifier.padding(pad).fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+            if (playUpdateDownloaded) {
+                Surface(
+                    color = Color(0xFF0F2942),
+                    contentColor = Color(0xFFE0F2FE),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            "Nová verze Pulse4 je stažená a připravená.",
+                            modifier = Modifier.weight(1f),
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color(0xFFE0F2FE)
+                        )
+                        TextButton(onClick = onCompletePlayUpdate) {
+                            Text("Restartovat", color = Color(0xFF38BDF8), fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
             if (showUnreachableBar) {
                 Surface(
                     color = Color(0xFF3B1A1E),

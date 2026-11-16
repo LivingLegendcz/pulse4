@@ -237,6 +237,7 @@ dependencies {
     implementation(
         "com.google.android.gms:play-services-code-scanner:16.1.0"
     )
+    implementation("com.google.android.play:app-update-ktx:2.1.0")
 
     // Testy.
     testImplementation(kotlin("test-junit"))

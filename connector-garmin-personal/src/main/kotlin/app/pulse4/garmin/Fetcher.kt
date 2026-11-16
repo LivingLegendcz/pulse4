@@ -41,12 +41,13 @@ class GarminPersonalFetcher(
         val now = nowMs()
         val from = sinceMs ?: (now - initialDays * DAY)
         val all = ArrayList<MetricObservation>()
+        val responseCache = HashMap<String, HttpResponse>()
         for (spec in specs) {
             if (!spec.verified) throw ProviderError.NotConfigured("endpoint ${spec.area}/${spec.metric} není ověřen proti oficiální specifikaci")
             var cursor = from
             while (cursor <= now) {
                 val rangeEnd = minOf(cursor + spec.maxRangeDays * DAY - 1, now)
-                val res = call(spec, cursor, rangeEnd)
+                val res = call(spec, cursor, rangeEnd, responseCache)
                 onRawResponse(spec, res.body)
                 val mapped = ResponseMapper.map(spec, res.body, accountId, zoneId)
                 skippedItems += mapped.skipped
@@ -83,14 +84,15 @@ class GarminPersonalFetcher(
         }
     }
 
-    private fun call(spec: EndpointSpec, fromMs: Long, toMs: Long): HttpResponse {
-        if (accessToken == null) refreshSession()
+    private fun call(spec: EndpointSpec, fromMs: Long, toMs: Long, cache: MutableMap<String, HttpResponse>): HttpResponse {
         val fmt = DateTimeFormatter.ofPattern(spec.dateFormat).withZone(ZoneOffset.UTC)
         val url = config.baseUrl.trimEnd('/') + spec.path
             .replace("{from}", fmt.format(Instant.ofEpochMilli(fromMs)))
             .replace("{to}", fmt.format(Instant.ofEpochMilli(toMs)))
+        cache[url]?.let { return it }
+        if (accessToken == null) refreshSession()
         val headers = mapOf(config.authHeader to config.authValue.replace("{accessToken}", accessToken!!))
-        return send { http.get(url, headers) }.also { check(it) }
+        return send { http.get(url, headers) }.also { check(it); cache[url] = it }
     }
 
     private fun send(block: () -> HttpResponse): HttpResponse = try {

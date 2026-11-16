@@ -340,9 +340,17 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
             initialDays = 28,
             onRawResponse = { spec, body -> saveRaw(spec.metric.name, body, nowMs) },
         )
-        val engine = SyncEngine(fetcher, { _, batch ->
+        val engine = SyncEngine(fetcher, { area, batch ->
             // Celá dávka v jedné transakci; kurzor se posune až po commitu (SyncEngine).
-            sl.db.runInTransaction { sl.db.observations().upsert(batch.items.map { it.toRow() }) }
+            sl.db.runInTransaction {
+                if (area == SyncArea.SLEEP) {
+                    val dates = batch.items.mapNotNull { it.localDate }.distinct()
+                    if (dates.isNotEmpty()) {
+                        sl.db.observations().deleteLegacyGarminSleepForDates(dates)
+                    }
+                }
+                sl.db.observations().upsert(batch.items.map { it.toRow() })
+            }
         }, garminStates)
         val res = engine.singleFlight(settings.accountId) {
             SyncArea.entries.filter { a -> cfg.endpoints.any { it.area == a } }.associateWith { area -> engine.runArea(area, nowMs) }

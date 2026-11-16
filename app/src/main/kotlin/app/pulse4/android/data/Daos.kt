@@ -23,6 +23,7 @@ interface ObservationDao {
     @Query("UPDATE observation SET quality = 'OK' WHERE id = :id") fun confirm(id: String)
     @Query("SELECT DISTINCT localDate FROM observation WHERE deleted = 0 AND localDate IS NOT NULL AND localDate BETWEEN :from AND :to") fun datesWithData(from: String, to: String): List<String>
     @Query("DELETE FROM observation WHERE id LIKE 'garmin-hist-%'") fun deleteSyntheticHistory()
+    @Query("DELETE FROM observation WHERE provider = 'GARMIN_PERSONAL' AND type = 'SLEEP_DURATION' AND id NOT LIKE '%SLEEP_DURATION%' AND localDate IN (:dates)") fun deleteLegacyGarminSleepForDates(dates: List<String>)
 }
 
 @Dao

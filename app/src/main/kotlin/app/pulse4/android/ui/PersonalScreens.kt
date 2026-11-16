@@ -218,11 +218,30 @@ fun getMetricUiConfig(type: MetricType): MetricUiConfig = when (type) {
         color = Color(0xFFFB7185),
         explanation = "Klidová srdeční frekvence měřená ve spánku. Trvalé snížení značí růst aerobní kondice; vzestup o více než 5 bpm může signalizovat začínající nemoc, únavu či alkohol."
     )
-    MetricType.SLEEP_DURATION, MetricType.SLEEP_SCORE -> MetricUiConfig(
+    MetricType.SLEEP_DURATION, MetricType.SLEEP_SCORE,
+    MetricType.SLEEP_DEEP, MetricType.SLEEP_LIGHT, MetricType.SLEEP_REM,
+    MetricType.SLEEP_AWAKE, MetricType.SLEEP_AWAKE_COUNT, MetricType.SLEEP_NAP -> MetricUiConfig(
         icon = PulseIcons.Sleep,
-        title = if (type == MetricType.SLEEP_SCORE) "Skóre spánku" else "Doba spánku",
-        shortLabel = if (type == MetricType.SLEEP_SCORE) "Skóre spánku" else "Spánek",
-        unit = if (type == MetricType.SLEEP_SCORE) "/ 100" else "hod",
+        title = when (type) {
+            MetricType.SLEEP_SCORE -> "Skóre spánku"
+            MetricType.SLEEP_DEEP -> "Hluboký spánek"
+            MetricType.SLEEP_LIGHT -> "Lehký spánek"
+            MetricType.SLEEP_REM -> "REM spánek"
+            MetricType.SLEEP_AWAKE -> "Doba bdění v noci"
+            MetricType.SLEEP_AWAKE_COUNT -> "Probuzení v noci"
+            MetricType.SLEEP_NAP -> "Zdřímnutí"
+            else -> "Doba spánku"
+        },
+        shortLabel = when (type) {
+            MetricType.SLEEP_SCORE -> "Skóre spánku"
+            MetricType.SLEEP_AWAKE_COUNT -> "Probuzení"
+            else -> "Spánek"
+        },
+        unit = when (type) {
+            MetricType.SLEEP_SCORE -> "/ 100"
+            MetricType.SLEEP_AWAKE_COUNT -> "×"
+            else -> "hod"
+        },
         color = Color(0xFF818CF8),
         explanation = "Celková doba nočního spánku. Dlouhodobý spánek 7–9 hodin je klíčový pro buněčnou a svalovou obnovu, syntézu růstového hormonu a konsolidaci paměti."
     )
@@ -2178,6 +2197,29 @@ fun DedicatedMetricDetailScreen(
             sleepScoreRows.filter { !it.deleted }
                 .associate { (it.localDate ?: "") to it.value }
         } else emptyMap()
+        val sleepDetailsByDate = if (type == MetricType.SLEEP_DURATION) {
+            val detailTypes = listOf(
+                MetricType.SLEEP_DEEP.name,
+                MetricType.SLEEP_LIGHT.name,
+                MetricType.SLEEP_REM.name,
+                MetricType.SLEEP_AWAKE.name,
+                MetricType.SLEEP_AWAKE_COUNT.name,
+                MetricType.SLEEP_NAP.name,
+            )
+            val detailRows = sl.db.observations().ofTypesIncludingDeleted(detailTypes, fromDate, toDate)
+                .filter { !it.deleted }
+            detailRows.groupBy { it.localDate ?: "" }.mapValues { (_, rows) ->
+                fun latestVal(t: MetricType) = rows.filter { it.type == t.name }.maxByOrNull { it.startUtcMs }?.value
+                SleepDetails(
+                    deepS = latestVal(MetricType.SLEEP_DEEP),
+                    lightS = latestVal(MetricType.SLEEP_LIGHT),
+                    remS = latestVal(MetricType.SLEEP_REM),
+                    awakeS = latestVal(MetricType.SLEEP_AWAKE),
+                    awakeCount = latestVal(MetricType.SLEEP_AWAKE_COUNT)?.toInt(),
+                    napS = latestVal(MetricType.SLEEP_NAP),
+                )
+            }
+        } else emptyMap()
         val suspectWeights = if (type == MetricType.WEIGHT) {
             runCatching { sl.withings.suspectMeasurements(daysCount) }.getOrDefault(emptyList())
         } else emptyList()
@@ -2204,6 +2246,7 @@ fun DedicatedMetricDetailScreen(
             sleepScoreSeries = sleepScoreSeries,
             bodyFatSeries = bodyFatSeries,
             sleepScoresByDate = sleepScoresByDate,
+            sleepDetailsByDate = sleepDetailsByDate,
             suspectWeights = suspectWeights,
             refWeightKg = refWeightKg,
             latestMuscleKg = latestMuscleKg,
@@ -2597,6 +2640,60 @@ fun DedicatedMetricDetailScreen(
 
                 Spacer(Modifier.height(12.dp))
 
+                // Fáze spánku a počet probuzení (Garmin)
+                val latestSleepDetails = b.sleepDetailsByDate[latestObs.localDate ?: ""]
+                if (latestSleepDetails != null) {
+                    val deepS = latestSleepDetails.deepS ?: 0.0
+                    val lightS = latestSleepDetails.lightS ?: 0.0
+                    val remS = latestSleepDetails.remS ?: 0.0
+                    val awakeS = latestSleepDetails.awakeS ?: 0.0
+                    val totalStageS = (deepS + lightS + remS + awakeS).takeIf { it > 0.0 }
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(16.dp),
+                        border = BorderStroke(1.dp, Color(0xFF232A3B)),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF131722))
+                    ) {
+                        Column(Modifier.padding(14.dp)) {
+                            Text("FÁZE SPÁNKU A PROBUZENÍ (GARMIN)", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = Color(0xFF94A3B8))
+                            if (totalStageS != null) {
+                                Spacer(Modifier.height(10.dp))
+                                Row(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .height(10.dp)
+                                        .clip(RoundedCornerShape(5.dp))
+                                ) {
+                                    if (deepS > 0.0) Box(Modifier.weight((deepS / totalStageS).toFloat()).height(10.dp).background(Color(0xFF6366F1)))
+                                    if (remS > 0.0) Box(Modifier.weight((remS / totalStageS).toFloat()).height(10.dp).background(Color(0xFFA855F7)))
+                                    if (lightS > 0.0) Box(Modifier.weight((lightS / totalStageS).toFloat()).height(10.dp).background(Color(0xFF38BDF8)))
+                                    if (awakeS > 0.0) Box(Modifier.weight((awakeS / totalStageS).toFloat()).height(10.dp).background(Color(0xFFF59E0B)))
+                                }
+                            }
+                            Spacer(Modifier.height(10.dp))
+                            Row(Modifier.fillMaxWidth()) {
+                                StatBox("Probuzení v noci", latestSleepDetails.awakeCount?.let { "${it}×" } ?: "—", Modifier.weight(1f))
+                                StatBox("Hluboký spánek", latestSleepDetails.deepS?.let { fmt.sleep(it) } ?: "—", Modifier.weight(1f))
+                            }
+                            Spacer(Modifier.height(10.dp))
+                            Row(Modifier.fillMaxWidth()) {
+                                StatBox("REM spánek", latestSleepDetails.remS?.let { fmt.sleep(it) } ?: "—", Modifier.weight(1f))
+                                StatBox("Lehký spánek", latestSleepDetails.lightS?.let { fmt.sleep(it) } ?: "—", Modifier.weight(1f))
+                            }
+                            Spacer(Modifier.height(10.dp))
+                            Row(Modifier.fillMaxWidth()) {
+                                StatBox("Doba bdění v noci", latestSleepDetails.awakeS?.let { fmt.sleep(it) } ?: "—", Modifier.weight(1f))
+                                StatBox(
+                                    "Zdřímnutí (den)",
+                                    latestSleepDetails.napS?.takeIf { it > 0.0 }?.let { fmt.sleep(it) } ?: "0 min",
+                                    Modifier.weight(1f)
+                                )
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(12.dp))
+                }
+
                 // Statistiky spánku (2x2)
                 val finiteSleep = series.values.filterNotNull()
                 val avgSleepS = if (finiteSleep.isNotEmpty()) finiteSleep.average() else 0.0
@@ -2652,6 +2749,7 @@ fun DedicatedMetricDetailScreen(
                     zone = b.zone,
                     usual = series.usual,
                     sleepScoresByDate = b.sleepScoresByDate,
+                    sleepDetailsByDate = b.sleepDetailsByDate,
                     refreshTick = refreshTick
                 )
             }
@@ -3122,6 +3220,7 @@ fun LazyMetricHistoryListCard(
     refWeightKg: Double = 93.10,
     bodyUnitMode: BodyUnitMode = BodyUnitMode.KG,
     sleepScoresByDate: Map<String, Double> = emptyMap(),
+    sleepDetailsByDate: Map<String, SleepDetails> = emptyMap(),
     refreshTick: Int = 0,
     onStatusMessage: ((String) -> Unit)? = null,
     onRefreshRequested: (() -> Unit)? = null,
@@ -3380,6 +3479,8 @@ fun LazyMetricHistoryListCard(
                                         java.time.Instant.ofEpochMilli(it).atZone(zone).toLocalTime().toString().take(5)
                                     } ?: "—"
                                     val sc = sleepScoresByDate[obs.localDate ?: ""]
+                                    val det = sleepDetailsByDate[obs.localDate ?: ""]
+                                    val awakeText = det?.awakeCount?.let { " · Probuzení: ${it}×" }.orEmpty()
                                     Row(
                                         Modifier
                                             .fillMaxWidth()
@@ -3395,7 +3496,7 @@ fun LazyMetricHistoryListCard(
                                                 color = Color.White
                                             )
                                             Text(
-                                                "$st → $en · ${obs.provider.name}",
+                                                "$st → $en · ${obs.provider.name}$awakeText",
                                                 style = MaterialTheme.typography.labelSmall,
                                                 color = Color(0xFF94A3B8)
                                             )
@@ -3601,6 +3702,15 @@ fun LazyMetricHistoryListCard(
     }
 }
 
+data class SleepDetails(
+    val deepS: Double? = null,
+    val lightS: Double? = null,
+    val remS: Double? = null,
+    val awakeS: Double? = null,
+    val awakeCount: Int? = null,
+    val napS: Double? = null,
+)
+
 private data class DedicatedBundle(
     val today: LocalDate,
     val zone: ZoneId,
@@ -3609,6 +3719,7 @@ private data class DedicatedBundle(
     val sleepScoreSeries: MetricSeries?,
     val bodyFatSeries: MetricSeries?,
     val sleepScoresByDate: Map<String, Double>,
+    val sleepDetailsByDate: Map<String, SleepDetails> = emptyMap(),
     val suspectWeights: List<app.pulse4.domain.MetricObservation> = emptyList(),
     val refWeightKg: Double = 93.10,
     val latestMuscleKg: Double? = null,
@@ -3642,7 +3753,9 @@ private data class MetricsScreenBundle(
 fun getMetricArtworkRes(type: MetricType): Int = when (type) {
     MetricType.HRV -> R.drawable.img_motif_hrv_autonomic
     MetricType.RESTING_HEART_RATE, MetricType.HEART_RATE -> R.drawable.img_motif_heart_real
-    MetricType.SLEEP_DURATION, MetricType.SLEEP_SCORE -> R.drawable.img_motif_sleep_night
+    MetricType.SLEEP_DURATION, MetricType.SLEEP_SCORE,
+    MetricType.SLEEP_DEEP, MetricType.SLEEP_LIGHT, MetricType.SLEEP_REM,
+    MetricType.SLEEP_AWAKE, MetricType.SLEEP_AWAKE_COUNT, MetricType.SLEEP_NAP -> R.drawable.img_motif_sleep_night
     MetricType.BODY_BATTERY -> R.drawable.img_motif_body_battery
     MetricType.STRESS -> R.drawable.img_motif_brain_stress
     MetricType.STEPS -> R.drawable.img_motif_steps_trail
@@ -3657,7 +3770,9 @@ fun getMetricArtworkRes(type: MetricType): Int = when (type) {
 fun getMetricMotifKind(type: MetricType): MetricMotifKind = when (type) {
     MetricType.HRV -> MetricMotifKind.HRV_AUTONOMIC
     MetricType.RESTING_HEART_RATE, MetricType.HEART_RATE -> MetricMotifKind.HEART_PULSE
-    MetricType.SLEEP_DURATION, MetricType.SLEEP_SCORE -> MetricMotifKind.SLEEP_NOCTURNAL
+    MetricType.SLEEP_DURATION, MetricType.SLEEP_SCORE,
+    MetricType.SLEEP_DEEP, MetricType.SLEEP_LIGHT, MetricType.SLEEP_REM,
+    MetricType.SLEEP_AWAKE, MetricType.SLEEP_AWAKE_COUNT, MetricType.SLEEP_NAP -> MetricMotifKind.SLEEP_NOCTURNAL
     MetricType.BODY_BATTERY -> MetricMotifKind.RECOVERY_SUNRISE
     MetricType.STRESS -> MetricMotifKind.AUTONOMIC_STRESS
     MetricType.STEPS -> MetricMotifKind.STEPS_TRAIL

@@ -155,6 +155,56 @@ class GarminTest {
         assertEquals(AreaResult.NeedsUser(RetryAction.ShowForbidden), SyncEngine(fetcher(http), { _, _ -> }, States()).runArea(SyncArea.SLEEP, 1))
         assertEquals(1, http.gets.size)
     }
+
+    @Test fun `blank body returns empty MapResult without throwing`() {
+        val r = ResponseMapper.map(cfg.endpoints[0], "", "acc", "UTC")
+        assertEquals(0, r.items.size)
+        assertEquals(0, r.skipped)
+    }
+
+    @Test fun `multiple sleep metrics from same dailySleep endpoint share one HTTP call and produce distinct ids`() {
+        val multiSpec = """
+        {
+          "baseUrl": "https://api.example.invalid/personal/",
+          "token": {"url": "https://api.example.invalid/token", "form": {"key": "{apiKey}"}, "verified": true},
+          "endpoints": [
+            {"area": "SLEEP", "metric": "SLEEP_DURATION", "path": "/sleep-service/sleep/dailySleep?date={from}", "maxRangeDays": 1,
+             "itemsPath": "$", "timePath": "sleepStartTimestampGMT", "endTimePath": "sleepEndTimestampGMT", "valuePath": "sleepTimeSeconds",
+             "timeFormat": "EPOCH_MS", "localDatePath": "calendarDate", "externalIdPath": "id", "verified": true},
+            {"area": "SLEEP", "metric": "SLEEP_SCORE", "path": "/sleep-service/sleep/dailySleep?date={from}", "maxRangeDays": 1,
+             "itemsPath": "$", "timePath": "sleepEndTimestampGMT", "valuePath": "sleepScores.overall.value",
+             "timeFormat": "EPOCH_MS", "localDatePath": "calendarDate", "externalIdPath": "id", "verified": true},
+            {"area": "SLEEP", "metric": "SLEEP_DEEP", "path": "/sleep-service/sleep/dailySleep?date={from}", "maxRangeDays": 1,
+             "itemsPath": "$", "timePath": "sleepStartTimestampGMT", "endTimePath": "sleepEndTimestampGMT", "valuePath": "deepSleepSeconds",
+             "timeFormat": "EPOCH_MS", "localDatePath": "calendarDate", "externalIdPath": "id", "verified": true},
+            {"area": "SLEEP", "metric": "SLEEP_AWAKE_COUNT", "path": "/sleep-service/sleep/dailySleep?date={from}", "maxRangeDays": 1,
+             "itemsPath": "$", "timePath": "sleepEndTimestampGMT", "valuePath": "awakeCount",
+             "timeFormat": "EPOCH_MS", "localDatePath": "calendarDate", "externalIdPath": "id", "verified": true}
+          ]
+        }
+        """
+        val dailyBody = """{
+            "id": 1792971564000,
+            "calendarDate": "1970-01-10",
+            "sleepTimeSeconds": 25961,
+            "deepSleepSeconds": 5400,
+            "awakeCount": 3,
+            "sleepStartTimestampGMT": 800000000,
+            "sleepEndTimestampGMT": 826000000,
+            "sleepScores": {"overall": {"value": 78}}
+        }"""
+        val http = FakeHttp(MutableList(2) { ok(dailyBody) })
+        val f = GarminPersonalFetcher(GarminEndpointsConfig.parse(multiSpec), http, { "KEY" }, "acc", "UTC", { 10 * DAY }, initialDays = 0)
+        val batch = f.fetch(SyncArea.SLEEP, 10 * DAY)
+        assertEquals(1, http.gets.size, "Stejná URL se má stáhnout jen jednou")
+        assertEquals(4, batch.items.size, "Žádná metrika nesmí být zahozena kolizí ID")
+        val byType = batch.items.associateBy { it.type }
+        assertEquals(25961.0, byType[MetricType.SLEEP_DURATION]?.value)
+        assertEquals(78.0, byType[MetricType.SLEEP_SCORE]?.value)
+        assertEquals(5400.0, byType[MetricType.SLEEP_DEEP]?.value)
+        assertEquals(3.0, byType[MetricType.SLEEP_AWAKE_COUNT]?.value)
+        assertEquals(4, batch.items.map { it.id }.toSet().size)
+    }
 }
 
 class ShippedConfigTest {

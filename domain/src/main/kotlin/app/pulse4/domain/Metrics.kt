@@ -10,6 +10,12 @@ enum class Provider { GARMIN_PERSONAL, GARMIN_EXTENDED, HEALTH_CONNECT, WITHINGS
 enum class MetricType(val unit: String) {
     SLEEP_DURATION("s"),
     SLEEP_SCORE("score"),
+    SLEEP_DEEP("s"),
+    SLEEP_LIGHT("s"),
+    SLEEP_REM("s"),
+    SLEEP_AWAKE("s"),
+    SLEEP_AWAKE_COUNT("count"),
+    SLEEP_NAP("s"),
     BODY_BATTERY("score"),
     HEART_RATE("bpm"),
     RESTING_HEART_RATE("bpm"),

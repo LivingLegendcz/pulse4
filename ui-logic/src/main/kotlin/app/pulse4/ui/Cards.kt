@@ -27,6 +27,12 @@ object Aggregation {
         MetricType.BMR,
         MetricType.METABOLIC_AGE,
         MetricType.SLEEP_SCORE,
+        MetricType.SLEEP_DEEP,
+        MetricType.SLEEP_LIGHT,
+        MetricType.SLEEP_REM,
+        MetricType.SLEEP_AWAKE,
+        MetricType.SLEEP_AWAKE_COUNT,
+        MetricType.SLEEP_NAP,
         MetricType.ECG -> Agg.LAST
         else -> Agg.AVG
     }

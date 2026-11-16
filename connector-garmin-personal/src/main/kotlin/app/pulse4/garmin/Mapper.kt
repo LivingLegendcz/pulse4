@@ -46,6 +46,7 @@ object ResponseMapper {
      * a započítá se do `skipped`, aby chyba mapování nebyla tichá.
      */
     fun map(spec: EndpointSpec, body: String, accountId: String, defaultZone: String): MapResult {
+        if (body.isBlank()) return MapResult(emptyList(), 0)
         val root = json.parseToJsonElement(body)
         val itemsNode = if (spec.itemsPath == "$") null else JsonPath.get(root, spec.itemsPath)
         val items: List<JsonElement> = when {
@@ -64,7 +65,8 @@ object ResponseMapper {
             val zone = JsonPath.string(item, spec.zonePath) ?: defaultZone
             val ext = JsonPath.string(item, spec.externalIdPath)
             val local = JsonPath.string(item, spec.localDatePath) ?: TimeRules.localDate(end ?: start, zone).toString()
-            val key = ImportKey.of(Provider.GARMIN_PERSONAL, accountId, ext, listOf(spec.metric.name, start.toString(), end?.toString() ?: ""))
+            val scopedExt = ext?.let { "${spec.metric.name}:$it" }
+            val key = ImportKey.of(Provider.GARMIN_PERSONAL, accountId, scopedExt, listOf(spec.metric.name, start.toString(), end?.toString() ?: ""))
             out += MetricObservation(
                 id = key, provider = Provider.GARMIN_PERSONAL, accountId = accountId, externalId = ext,
                 type = spec.metric, startUtcMs = start, endUtcMs = end, value = value * spec.scale,

@@ -29,11 +29,15 @@ import javax.crypto.spec.SecretKeySpec
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -127,6 +131,8 @@ class ReticulumBridge(
         private set
     @Volatile
     private var propagationLink: RnsLinkSession? = null
+    @Volatile
+    private var propagationLinkConnecting = false
     private val propagationLinkLock = Any()
 
     private var multicastLock: WifiManager.MulticastLock? = null
@@ -135,7 +141,9 @@ class ReticulumBridge(
     private var nsdManager: NsdManager? = null
     private var registrationListener: NsdManager.RegistrationListener? = null
     private var discoveryListener: NsdManager.DiscoveryListener? = null
-    private val scope = CoroutineScope(Dispatchers.IO)
+    private var nsdBurstJob: Job? = null
+    private var scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val networkWakeSignal = Channel<Unit>(Channel.CONFLATED)
 
     @Volatile
     private var tcpSocket: Socket? = null
@@ -155,6 +163,7 @@ class ReticulumBridge(
     private val nsdResolveQueue = ArrayDeque<NsdServiceInfo>()
     private var nsdResolving = false
     private var wifiNetworkCallback: ConnectivityManager.NetworkCallback? = null
+    private var defaultNetworkCallback: ConnectivityManager.NetworkCallback? = null
 
     var onEventReceived: ((BridgeEvent) -> Unit)? = null
     var onLocalPeerDiscovered: ((String) -> Unit)? = null
@@ -188,6 +197,8 @@ class ReticulumBridge(
         const val HDLC_FLAG = 0x7E.toByte()
         const val HDLC_ESC = 0x7D.toByte()
         const val HDLC_ESC_MASK = 0x20
+        const val MAX_EVENT_BYTES = 2 * 1024 * 1024
+        private val GATEWAY_BACKOFF_MS = longArrayOf(5_000L, 15_000L, 45_000L, 120_000L, 300_000L)
 
         fun hdlcEscape(data: ByteArray): ByteArray {
             val out = ByteArrayOutputStream(data.size + 16)
@@ -241,7 +252,12 @@ class ReticulumBridge(
     @Synchronized
     fun ensureStarted(): BridgeInfo {
         info?.let { return it }
-        acquireMulticast()
+        if (!scope.isActive) {
+            scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        }
+        if (settings.networkMode != NetworkMode.MANUAL) {
+            acquireMulticast()
+        }
 
         var privateKeyB64 = secrets.getString(SecretStore.RETICULUM_IDENTITY)
         if (privateKeyB64 == null) {
@@ -284,14 +300,60 @@ class ReticulumBridge(
         )
         info = bi
 
-        startNsd(bi.deliveryHash)
+        if (settings.networkMode != NetworkMode.MANUAL) {
+            startNsd(bi.deliveryHash)
+        }
         registerWifiCallback(bi.deliveryHash)
+        registerDefaultNetworkCallback()
 
-        if (settings.networkMode != NetworkMode.LOCAL_ONLY) {
+        if (settings.networkMode != NetworkMode.LOCAL_ONLY && settings.networkMode != NetworkMode.MANUAL) {
             startGatewayClient()
         }
 
         return bi
+    }
+
+    fun shutdown() = stop()
+
+    @Synchronized
+    fun stop() {
+        releaseMulticast()
+        stopNsdDiscovery()
+        registrationListener?.let { old -> runCatching { nsdManager?.unregisterService(old) } }
+        registrationListener = null
+        synchronized(nsdResolveLock) {
+            nsdResolveQueue.clear()
+            nsdResolving = false
+        }
+
+        val cm = context.applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        wifiNetworkCallback?.let { cb -> runCatching { cm?.unregisterNetworkCallback(cb) } }
+        wifiNetworkCallback = null
+        defaultNetworkCallback?.let { cb -> runCatching { cm?.unregisterNetworkCallback(cb) } }
+        defaultNetworkCallback = null
+
+        tcpJob?.cancel()
+        tcpJob = null
+        runCatching { tcpSocket?.close() }
+        tcpSocket = null
+        tcpWriter = null
+        isGatewayOnline = false
+        _gatewayHealth.value = GatewayHealth(state = GatewayHealthState.UNCONFIGURED)
+
+        synchronized(propagationLinkLock) {
+            propagationLink?.close()
+            propagationLink = null
+            propagationLinkConnecting = false
+        }
+
+        localServerJob?.cancel()
+        localServerJob = null
+        runCatching { localServerSocket?.close() }
+        localServerSocket = null
+
+        localPeerMap.clear()
+        info = null
+        scope.cancel()
     }
 
     private fun registerWifiCallback(selfHash: String) {
@@ -302,21 +364,47 @@ class ReticulumBridge(
             .build()
         val cb = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
-                acquireMulticast()
-                startNsd(selfHash)
+                if (settings.networkMode != NetworkMode.MANUAL) {
+                    acquireMulticast()
+                    startNsd(selfHash)
+                }
+                networkWakeSignal.trySend(Unit)
             }
             override fun onLost(network: Network) {
                 localPeerMap.clear()
+                releaseMulticast()
             }
         }
         wifiNetworkCallback = cb
         runCatching { cm.registerNetworkCallback(req, cb) }
     }
 
+    private fun registerDefaultNetworkCallback() {
+        if (defaultNetworkCallback != null) return
+        val cm = context.applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                networkWakeSignal.trySend(Unit)
+            }
+        }
+        defaultNetworkCallback = cb
+        runCatching { cm.registerDefaultNetworkCallback(cb) }
+    }
+
     private fun acquireMulticast() {
         if (multicastLock?.isHeld == true) return
         val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager ?: return
         multicastLock = wifi.createMulticastLock("pulse4-sync").apply { setReferenceCounted(false); acquire() }
+    }
+
+    private fun releaseMulticast() {
+        runCatching {
+            multicastLock?.let { lock ->
+                lock.setReferenceCounted(false)
+                if (lock.isHeld) lock.release()
+            }
+        }
+        multicastLock = null
     }
 
     /** Spustí lokální mikro-server pro přímý přenos po místní Wi-Fi síti. */
@@ -365,19 +453,39 @@ class ReticulumBridge(
                 }
                 line = readHttpLine(input) ?: break
             }
-            if (contentLength > 0) {
-                val buf = ByteArray(contentLength)
-                var read = 0
-                while (read < contentLength) {
-                    val r = input.read(buf, read, contentLength - read)
-                    if (r == -1) break
-                    read += r
-                }
-                val body = String(buf, 0, read, Charsets.UTF_8)
-                processIncomingEncryptedEnvelope(body, selfHash)
-            }
             val out: OutputStream = socket.getOutputStream()
-            val resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            if (contentLength <= 0) {
+                val resp = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                out.write(resp.toByteArray(Charsets.UTF_8))
+                out.flush()
+                return
+            }
+            if (contentLength > MAX_EVENT_BYTES) {
+                val resp = "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                out.write(resp.toByteArray(Charsets.UTF_8))
+                out.flush()
+                return
+            }
+            val buf = ByteArray(contentLength)
+            var read = 0
+            while (read < contentLength) {
+                val r = input.read(buf, read, contentLength - read)
+                if (r == -1) break
+                read += r
+            }
+            if (read != contentLength) {
+                val resp = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                out.write(resp.toByteArray(Charsets.UTF_8))
+                out.flush()
+                return
+            }
+            val body = String(buf, 0, read, Charsets.UTF_8)
+            val accepted = processIncomingEncryptedEnvelope(body, selfHash)
+            val resp = if (accepted) {
+                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            } else {
+                "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            }
             out.write(resp.toByteArray(Charsets.UTF_8))
             out.flush()
         } catch (e: Exception) {
@@ -438,6 +546,20 @@ class ReticulumBridge(
             }
         }
         runCatching { nsd.discoverServices("_pulse4._tcp", NsdManager.PROTOCOL_DNS_SD, discoveryListener) }
+        nsdBurstJob?.cancel()
+        nsdBurstJob = scope.launch {
+            delay(15_000L)
+            stopNsdDiscovery()
+        }
+    }
+
+    @Synchronized
+    private fun stopNsdDiscovery() {
+        nsdBurstJob?.cancel()
+        nsdBurstJob = null
+        val nsd = nsdManager ?: return
+        discoveryListener?.let { old -> runCatching { nsd.stopServiceDiscovery(old) } }
+        discoveryListener = null
     }
 
     private fun drainNsdResolveQueue(nsd: NsdManager, selfHash: String) {
@@ -520,6 +642,17 @@ class ReticulumBridge(
         tcpJob = scope.launch {
             var failures = 0
             while (isActive) {
+                if (!hasActiveNetwork(host)) {
+                    _gatewayHealth.value = GatewayHealth(
+                        host = host,
+                        port = port,
+                        state = GatewayHealthState.UNREACHABLE,
+                        consecutiveFailures = failures,
+                        lastError = "Čeká na síť",
+                    )
+                    networkWakeSignal.receive()
+                    continue
+                }
                 var currentSocket: Socket? = null
                 var wasConnectedThisAttempt = false
                 try {
@@ -528,6 +661,7 @@ class ReticulumBridge(
                     currentSocket = s
                     s.tcpNoDelay = true
                     s.keepAlive = true
+                    s.soTimeout = 120_000
                     s.connect(InetSocketAddress(host, port), 6000)
                     wasConnectedThisAttempt = true
                     failures = 0
@@ -600,9 +734,26 @@ class ReticulumBridge(
                     }
                     runCatching { currentSocket?.close() }
                 }
-                delay(5000)
+                val backoffMs = if (failures > 0) {
+                    GATEWAY_BACKOFF_MS[(failures - 1).coerceAtMost(GATEWAY_BACKOFF_MS.lastIndex)]
+                } else {
+                    GATEWAY_BACKOFF_MS[0]
+                }
+                withTimeoutOrNull(backoffMs) {
+                    networkWakeSignal.receive()
+                }
             }
         }
+    }
+
+    private fun hasActiveNetwork(host: String): Boolean {
+        if (host == "127.0.0.1" || host.equals("localhost", ignoreCase = true)) return true
+        val cm = context.applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return true
+        val net = cm.activeNetwork ?: return false
+        val caps = cm.getNetworkCapabilities(net) ?: return false
+        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) ||
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
     }
 
     private fun handleIncomingRnsPacket(packet: ByteArray) {
@@ -741,23 +892,61 @@ class ReticulumBridge(
     private fun ensurePropagationLink(timeoutMs: Long = 2500L): RnsLinkSession? {
         val propHash = settings.propagationNode.trim()
         if (propHash.length != 32 || !isGatewayOnline) return null
+        val session: RnsLinkSession
+        var isInitiator = false
         synchronized(propagationLinkLock) {
             val existing = propagationLink
-            if (existing != null && existing.destinationHash.equals(propHash, ignoreCase = true) && existing.state == RnsLinkSession.State.ACTIVE) {
-                return existing
+            if (existing != null && existing.destinationHash.equals(propHash, ignoreCase = true)) {
+                if (existing.state == RnsLinkSession.State.ACTIVE) {
+                    return existing
+                }
+                if (existing.state == RnsLinkSession.State.PENDING && propagationLinkConnecting) {
+                    session = existing
+                } else {
+                    session = RnsLinkSession(propHash, discoveredDestinations[propHash])
+                    propagationLink = session
+                    propagationLinkConnecting = true
+                    isInitiator = true
+                }
+            } else {
+                session = RnsLinkSession(propHash, discoveredDestinations[propHash])
+                propagationLink = session
+                propagationLinkConnecting = true
+                isInitiator = true
             }
-            val session = RnsLinkSession(propHash, discoveredDestinations[propHash])
-            propagationLink = session
-            val reqPkt = session.buildLinkRequestPacket(gatewayTransportId)
-            if (!sendRawRnsPacket(reqPkt)) return null
+            if (isInitiator) {
+                val reqPkt = session.buildLinkRequestPacket(gatewayTransportId)
+                if (!sendRawRnsPacket(reqPkt)) {
+                    propagationLinkConnecting = false
+                    propagationLink = null
+                    return null
+                }
+            }
         }
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
-            val cur = propagationLink
-            if (cur?.state == RnsLinkSession.State.ACTIVE) return cur
+            if (session.state == RnsLinkSession.State.ACTIVE) {
+                if (isInitiator) {
+                    synchronized(propagationLinkLock) {
+                        if (propagationLink === session) propagationLinkConnecting = false
+                    }
+                }
+                return session
+            }
             Thread.sleep(50)
         }
-        return propagationLink?.takeIf { it.state == RnsLinkSession.State.ACTIVE }
+        if (isInitiator) {
+            synchronized(propagationLinkLock) {
+                if (propagationLink === session) {
+                    propagationLinkConnecting = false
+                    if (session.state != RnsLinkSession.State.ACTIVE) {
+                        session.close()
+                        propagationLink = null
+                    }
+                }
+            }
+        }
+        return session.takeIf { it.state == RnsLinkSession.State.ACTIVE }
     }
 
     private fun sendOverGateway(destHashHex: String, payloadBytes: ByteArray): Boolean {
@@ -858,6 +1047,17 @@ class ReticulumBridge(
     }
 
     fun applyPropagationNode() {
+        if (settings.networkMode == NetworkMode.MANUAL) {
+            releaseMulticast()
+            stopNsdDiscovery()
+            tcpJob?.cancel()
+            runCatching { tcpSocket?.close() }
+            tcpSocket = null
+            tcpWriter = null
+            isGatewayOnline = false
+            _gatewayHealth.value = GatewayHealth(state = GatewayHealthState.UNCONFIGURED)
+            return
+        }
         if (settings.networkMode != NetworkMode.LOCAL_ONLY) {
             startGatewayClient()
         } else {
@@ -1035,8 +1235,10 @@ class ReticulumBridge(
         }
     }
 
-    private fun processIncomingEncryptedEnvelope(rawJson: String, selfHash: String) {
-        decodeIncomingEncryptedEnvelope(rawJson, selfHash)?.let { emitEvent(it) }
+    private fun processIncomingEncryptedEnvelope(rawJson: String, selfHash: String): Boolean {
+        val msg = decodeIncomingEncryptedEnvelope(rawJson, selfHash) ?: return false
+        emitEvent(msg)
+        return true
     }
 
     private fun decodeContactPubKey64(pubKeyB64: String): Pair<X25519PublicKeyParameters, Ed25519PublicKeyParameters>? = runCatching {
@@ -1062,58 +1264,36 @@ class ReticulumBridge(
         val recipientPub = registeredContacts[recipient]?.let { decodeContactPubKey64(it) }
         val xPriv = x25519PrivKey
         val edPriv = ed25519PrivKey
-        if (recipientPub != null && xPriv != null && edPriv != null) {
-            val agreement = X25519Agreement()
-            agreement.init(xPriv)
-            val sharedSecret = ByteArray(agreement.agreementSize)
-            agreement.calculateAgreement(recipientPub.first, sharedSecret, 0)
-            val aesBytes = deriveE2eeAesKey(sharedSecret, sender, recipient)
-            val key = SecretKeySpec(aesBytes, "AES")
-
-            val iv = ByteArray(12).also { SecureRandom().nextBytes(it) }
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(128, iv))
-            val ciphertext = cipher.doFinal(content.toByteArray(Charsets.UTF_8))
-            val ivB64 = Base64.getEncoder().encodeToString(iv)
-            val ctB64 = Base64.getEncoder().encodeToString(ciphertext)
-
-            val sigInput = canonicalSignatureInput(sender, recipient, ivB64, ctB64, eventId)
-            val signer = Ed25519Signer()
-            signer.init(true, edPriv)
-            signer.update(sigInput, 0, sigInput.size)
-            val sigBytes = signer.generateSignature()
-
-            return EncryptedEnvelope(
-                v = 2,
-                sender = sender,
-                recipient = recipient,
-                iv = ivB64,
-                ciphertext = ctB64,
-                mac = bytesToHex(sigBytes),
-                eventId = eventId
-            )
+        if (recipientPub == null || xPriv == null || edPriv == null) {
+            throw IllegalStateException("Unknown recipient public key for E2EE v2")
         }
-
-        val secretBytes = MessageDigest.getInstance("SHA-256")
-            .digest(("pulse-shared-key:$sender:$recipient").toByteArray(Charsets.UTF_8))
-        val key = SecretKeySpec(secretBytes, "AES")
+        val agreement = X25519Agreement()
+        agreement.init(xPriv)
+        val sharedSecret = ByteArray(agreement.agreementSize)
+        agreement.calculateAgreement(recipientPub.first, sharedSecret, 0)
+        val aesBytes = deriveE2eeAesKey(sharedSecret, sender, recipient)
+        val key = SecretKeySpec(aesBytes, "AES")
 
         val iv = ByteArray(12).also { SecureRandom().nextBytes(it) }
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(128, iv))
         val ciphertext = cipher.doFinal(content.toByteArray(Charsets.UTF_8))
+        val ivB64 = Base64.getEncoder().encodeToString(iv)
+        val ctB64 = Base64.getEncoder().encodeToString(ciphertext)
 
-        val macEngine = Mac.getInstance("HmacSHA256")
-        macEngine.init(SecretKeySpec(secretBytes, "HmacSHA256"))
-        val macBytes = macEngine.doFinal(ciphertext)
+        val sigInput = canonicalSignatureInput(sender, recipient, ivB64, ctB64, eventId)
+        val signer = Ed25519Signer()
+        signer.init(true, edPriv)
+        signer.update(sigInput, 0, sigInput.size)
+        val sigBytes = signer.generateSignature()
 
         return EncryptedEnvelope(
-            v = 1,
+            v = 2,
             sender = sender,
             recipient = recipient,
-            iv = Base64.getEncoder().encodeToString(iv),
-            ciphertext = Base64.getEncoder().encodeToString(ciphertext),
-            mac = bytesToHex(macBytes),
+            iv = ivB64,
+            ciphertext = ctB64,
+            mac = bytesToHex(sigBytes),
             eventId = eventId
         )
     }

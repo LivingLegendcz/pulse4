@@ -255,7 +255,7 @@ class RnsLinkSession(
         val sig64 = proofPayload.copyOfRange(0, 64)
         val peerXPub32 = proofPayload.copyOfRange(64, 96)
         val peerSigBytes = if (proofPayload.size >= 99) proofPayload.copyOfRange(96, 99) else null
-        negotiatedMtu = peerSigBytes?.let { RnsCrypto.decodeSignalling(it).first } ?: 500
+        negotiatedMtu = peerSigBytes?.let { RnsCrypto.decodeSignalling(it).first.coerceAtLeast(500) } ?: 500
 
         // Pokud známe Ed25519 klíč cíle, ověříme podpis nad linkId + peerXPub + peerEdPub + signalling
         destinationPubKey64?.let { pub64 ->
@@ -283,7 +283,11 @@ class RnsLinkSession(
         val f = fernet ?: return null
         val ct = f.encrypt(plaintext)
         // HEADER_1, DATA, DEST_TYPE_LINK (0x03 shl 2 = 0x0C)
-        return byteArrayOf(0x0C, 0x00) + linkIdBytes + byteArrayOf(context) + ct
+        val pkt = byteArrayOf(0x0C, 0x00) + linkIdBytes + byteArrayOf(context) + ct
+        if (pkt.size > negotiatedMtu) {
+            return null
+        }
+        return pkt
     }
 
     fun decryptLinkPayload(ciphertext: ByteArray): ByteArray? = fernet?.decrypt(ciphertext)

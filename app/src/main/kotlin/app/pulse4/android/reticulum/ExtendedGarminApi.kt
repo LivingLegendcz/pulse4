@@ -653,13 +653,13 @@ class ExtendedGarminApi(
      * provede tichou obnovu přes DI-OAuth2 refresh token nebo dlouhodobý OAuth 1.0 token.
      */
     @Synchronized
-    fun ensureSession(): Boolean {
+    fun ensureSession(force: Boolean = false): Boolean {
         val raw = secrets.getString(SecretStore.GARMIN_EXT_TOKENS) ?: return false
         val tokens = parseTokens(raw) ?: return false
         val now = System.currentTimeMillis()
 
-        // Pokud tokenu zbývá více než 10 minut platnosti, je relace v pořádku
-        if (tokens.expiresAtMs - now > 10 * 60 * 1000L) {
+        // Pokud tokenu zbývá více než 10 minut platnosti, je relace v pořádku (pokud není vynuceno obnovení po 401)
+        if (!force && tokens.expiresAtMs - now > 10 * 60 * 1000L) {
             return true
         }
 
@@ -715,12 +715,14 @@ class ExtendedGarminApi(
         http.newCall(req).execute().use { res ->
             if (res.code == 401) {
                 // Token mohl vypršet na straně serveru: zkusíme obnovit a opakovat jednou
-                val renewed = ensureSession()
+                val renewed = ensureSession(force = true)
                 if (renewed) {
                     val newToken = getValidAccessToken()
                     val retryReq = req.newBuilder().header("Authorization", "Bearer $newToken").build()
                     http.newCall(retryReq).execute().use { retryRes ->
                         if (retryRes.isSuccessful) return@call retryRes.body?.string().orEmpty()
+                        if (retryRes.code == 429) throw ProviderError.RateLimited(null)
+                        if (retryRes.code != 401) throw ProviderError.Server(retryRes.code)
                     }
                 }
                 throw ProviderError.Unauthorized()
@@ -742,6 +744,17 @@ class ExtendedGarminApi(
             .build()
 
         http.newCall(req).execute().use { res ->
+            if (res.code == 401) {
+                val renewed = ensureSession(force = true)
+                if (renewed) {
+                    val newToken = getValidAccessToken()
+                    val retryReq = req.newBuilder().header("Authorization", "Bearer $newToken").build()
+                    http.newCall(retryReq).execute().use { retryRes ->
+                        if (retryRes.isSuccessful) return@call retryRes.body?.bytes()
+                    }
+                }
+                return@call null
+            }
             if (!res.isSuccessful) return@call null
             res.body?.bytes()
         }
@@ -793,9 +806,25 @@ class ExtendedGarminApi(
             .header("User-Agent", CONNECT_MOBILE_USER_AGENT)
             .build()
 
-        val res = http.newCall(req).execute()
-        if (!res.isSuccessful) throw ProviderError.Server(res.code)
-        val respText = res.body?.string().orEmpty()
+        val respText = http.newCall(req).execute().use { res ->
+            if (res.code == 401) {
+                val renewed = ensureSession(force = true)
+                if (renewed) {
+                    val newToken = getValidAccessToken()
+                    val retryReq = req.newBuilder().header("Authorization", "Bearer $newToken").build()
+                    return@use http.newCall(retryReq).execute().use { retryRes ->
+                        if (retryRes.code == 401) throw ProviderError.Unauthorized()
+                        if (retryRes.code == 429) throw ProviderError.RateLimited(null)
+                        if (!retryRes.isSuccessful) throw ProviderError.Server(retryRes.code)
+                        retryRes.body?.string().orEmpty()
+                    }
+                }
+                throw ProviderError.Unauthorized()
+            }
+            if (res.code == 429) throw ProviderError.RateLimited(null)
+            if (!res.isSuccessful) throw ProviderError.Server(res.code)
+            res.body?.string().orEmpty()
+        }
         val respJson = json.parseToJsonElement(respText).jsonObject
         respJson["workoutId"]?.jsonPrimitive?.contentOrNull ?: existingId ?: "ext_wkt_${System.currentTimeMillis()}"
     }
@@ -822,8 +851,24 @@ class ExtendedGarminApi(
             .header("User-Agent", CONNECT_MOBILE_USER_AGENT)
             .build()
 
-        val res = http.newCall(req).execute()
-        if (!res.isSuccessful) throw ProviderError.Server(res.code)
+        http.newCall(req).execute().use { res ->
+            if (res.code == 401) {
+                val renewed = ensureSession(force = true)
+                if (renewed) {
+                    val newToken = getValidAccessToken()
+                    val retryReq = req.newBuilder().header("Authorization", "Bearer $newToken").build()
+                    http.newCall(retryReq).execute().use { retryRes ->
+                        if (retryRes.code == 401) throw ProviderError.Unauthorized()
+                        if (retryRes.code == 429) throw ProviderError.RateLimited(null)
+                        if (!retryRes.isSuccessful) throw ProviderError.Server(retryRes.code)
+                        return@use
+                    }
+                }
+                throw ProviderError.Unauthorized()
+            }
+            if (res.code == 429) throw ProviderError.RateLimited(null)
+            if (!res.isSuccessful) throw ProviderError.Server(res.code)
+        }
         "ext_sched_${System.currentTimeMillis()}"
     }
 

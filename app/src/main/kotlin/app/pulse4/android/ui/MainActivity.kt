@@ -84,6 +84,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 
 private val navRequestFlow = MutableStateFlow<String?>(null)
+private val activeFmtFlow = MutableStateFlow(activeFmt)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -91,10 +92,13 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         val sl = (application as Pulse4App).services
         CoroutineScope(Dispatchers.IO).launch {
+            sl.settings.warmUp()
             val u = sl.settings.unitSystem
             val _mp = sl.settings.mapProvider
             val z = runCatching { ZoneId.of(sl.settings.zoneId) }.getOrDefault(ZoneId.systemDefault())
-            activeFmt = Fmt(z, units = u)
+            val updatedFmt = Fmt(z, units = u)
+            activeFmt = updatedFmt
+            activeFmtFlow.value = updatedFmt
         }
         setContent { Pulse4Theme { Root(sl) } }
         handleCallback(intent)
@@ -224,16 +228,21 @@ class MainActivity : ComponentActivity() {
                         try {
                             sl.bridge.ensureStarted()
                             val derived = sl.bridge.addContact(r.payload.pub)
-                            sl.db.contacts().upsert(
-                                app.pulse4.android.data.ContactRow(
-                                    identity = derived,
-                                    displayName = r.payload.name,
-                                    publicKeyB64 = r.payload.pub,
-                                    fingerprint = r.fingerprint,
-                                    verifiedAtMs = System.currentTimeMillis()
+                            if (!app.pulse4.sync.Pairing.addressMatches(r.payload.addr, derived)) {
+                                sl.bridge.removeContact(derived)
+                                android.util.Log.e("Pulse4Contact", "REJECTED: Pairing address mismatch for ${r.payload.name} (expected=${r.payload.addr}, derived=$derived)")
+                            } else {
+                                sl.db.contacts().upsert(
+                                    app.pulse4.android.data.ContactRow(
+                                        identity = derived,
+                                        displayName = r.payload.name,
+                                        publicKeyB64 = r.payload.pub,
+                                        fingerprint = r.fingerprint,
+                                        verifiedAtMs = System.currentTimeMillis()
+                                    )
                                 )
-                            )
-                            android.util.Log.i("Pulse4Contact", "SUCCESS: Added contact ${r.payload.name} (addr=$derived, fp=${r.fingerprint})")
+                                android.util.Log.i("Pulse4Contact", "SUCCESS: Added contact ${r.payload.name} (addr=$derived, fp=${r.fingerprint})")
+                            }
                         } catch (e: Exception) {
                             android.util.Log.e("Pulse4Contact", "Failed to add contact", e)
                         }
@@ -251,16 +260,21 @@ class MainActivity : ComponentActivity() {
                         try {
                             sl.bridge.ensureStarted()
                             val derived = sl.bridge.addContact(r.payload.pub)
-                            sl.db.contacts().upsert(
-                                app.pulse4.android.data.ContactRow(
-                                    identity = derived,
-                                    displayName = r.payload.name,
-                                    publicKeyB64 = r.payload.pub,
-                                    fingerprint = r.fingerprint,
-                                    verifiedAtMs = System.currentTimeMillis()
+                            if (!app.pulse4.sync.Pairing.addressMatches(r.payload.addr, derived)) {
+                                sl.bridge.removeContact(derived)
+                                android.util.Log.e("Pulse4Contact", "REJECTED: Pairing address mismatch for ${r.payload.name} (expected=${r.payload.addr}, derived=$derived)")
+                            } else {
+                                sl.db.contacts().upsert(
+                                    app.pulse4.android.data.ContactRow(
+                                        identity = derived,
+                                        displayName = r.payload.name,
+                                        publicKeyB64 = r.payload.pub,
+                                        fingerprint = r.fingerprint,
+                                        verifiedAtMs = System.currentTimeMillis()
+                                    )
                                 )
-                            )
-                            android.util.Log.i("Pulse4Contact", "SUCCESS: Added contact ${r.payload.name} (addr=$derived, fp=${r.fingerprint})")
+                                android.util.Log.i("Pulse4Contact", "SUCCESS: Added contact ${r.payload.name} (addr=$derived, fp=${r.fingerprint})")
+                            }
                         } catch (e: Exception) {
                             android.util.Log.e("Pulse4Contact", "Failed to add contact", e)
                         }
@@ -519,6 +533,8 @@ private fun Root(sl: app.pulse4.android.di.ServiceLocator) {
     val entry by nav.currentBackStackEntryAsState()
     val units by sl.settings.unitSystemFlow.collectAsState()
     val mapProv by sl.settings.mapProviderFlow.collectAsState()
+    val networkMode by sl.settings.networkModeFlow.collectAsState()
+    val currentFmt by activeFmtFlow.collectAsState()
     val navReq by navRequestFlow.collectAsState()
 
     LaunchedEffect(navReq) {
@@ -608,8 +624,11 @@ private fun Root(sl: app.pulse4.android.di.ServiceLocator) {
         val showUnreachableBar =
             gwHealth.state == app.pulse4.android.reticulum.GatewayHealthState.UNREACHABLE &&
                 gwHealth.host.isNotBlank() &&
-                sl.settings.networkMode != app.pulse4.android.data.NetworkMode.LOCAL_ONLY &&
+                networkMode != app.pulse4.android.data.NetworkMode.LOCAL_ONLY &&
                 dismissedUnreachableKey != healthKey
+        // Ensure Root observes currentFmt so timezone/units updates recompose active screens.
+        @Suppress("UNUSED_VARIABLE")
+        val observedFmt = currentFmt
 
         Column(Modifier.padding(pad).fillMaxSize().background(MaterialTheme.colorScheme.background)) {
             if (showUnreachableBar) {

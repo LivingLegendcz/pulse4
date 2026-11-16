@@ -29,12 +29,14 @@ class ReticulumTransport(
     private val extraHandlers: () -> Map<String, KindHandler>,
 ) {
     private var receiver: Receiver? = null
+    private val pumpLock = Any()
     private val inFlightWaitMs = 15_000L
     @Volatile
     private var pumpActiveCallback: ((Outcome) -> Unit)? = null
     @Volatile
     var forceGateway: Boolean = false
 
+    @Synchronized
     private fun receiver(selfId: String): Receiver = receiver ?: Receiver(
         selfId = selfId,
         store = RoomReceiverStore(db),
@@ -44,11 +46,9 @@ class ReticulumTransport(
     ).also { receiver = it }
 
     internal fun ensureContactsRegistered() {
-        if (!bridge.hasRegisteredContacts()) {
-            val knownContacts = runCatching { db.contacts().allNow() }.getOrDefault(emptyList())
-            for (c in knownContacts) {
-                runCatching { bridge.addContact(c.publicKeyB64) }
-            }
+        val knownContacts = runCatching { db.contacts().allNow() }.getOrDefault(emptyList())
+        for (c in knownContacts) {
+            runCatching { bridge.addContact(c.publicKeyB64) }
         }
     }
 
@@ -92,7 +92,7 @@ class ReticulumTransport(
      * Jedno okno synchronizace: odeslat splatné, vyzvednout schránku, zpracovat události až do [windowMs].
      * Nikdy nemaže vlastní archiv; nepotvrzené položky zůstávají v outboxu.
      */
-    fun pump(nowMs: Long, windowMs: Long, onApplied: () -> Unit = {}): PumpStats {
+    fun pump(nowMs: Long, windowMs: Long, onApplied: () -> Unit = {}): PumpStats = synchronized(pumpLock) {
         val info = bridge.ensureStarted()
         val rx = receiver(info.deliveryHash)
         val usePropagation = settings.propagationNode.isNotBlank()
@@ -102,10 +102,7 @@ class ReticulumTransport(
         runCatching { db.outbox().purge(nowMs - 24L * 3600L * 1000L) }
 
         // Ujisti se, že všechny známé kontakty z databáze jsou zaregistrovány v RNS/LXMF směrovací tabulce
-        val knownContacts = runCatching { db.contacts().allNow() }.getOrDefault(emptyList())
-        for (c in knownContacts) {
-            runCatching { bridge.addContact(c.publicKeyB64) }
-        }
+        ensureContactsRegistered()
 
         val localPeers = if (forceGateway) emptySet() else bridge.localPeerHashes()
         for (item in outbox.due(nowMs, localPeers = localPeers)) {
@@ -149,6 +146,6 @@ class ReticulumTransport(
             pumpActiveCallback = null
         }
         val inFlight = outbox.due(Long.MAX_VALUE / 2, localPeers = localPeers).size
-        return PumpStats(sent, received, rejected, inFlight)
+        PumpStats(sent, received, rejected, inFlight)
     }
 }

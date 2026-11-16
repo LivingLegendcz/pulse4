@@ -3,9 +3,13 @@ package app.pulse4.android.data
 import app.pulse4.sharing.PrivacyZone
 import app.pulse4.sync.Wire
 import app.pulse4.ui.UnitSystem
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.builtins.ListSerializer
+import java.util.concurrent.ConcurrentHashMap
 
 enum class NetworkMode { AUTO, LOCAL_ONLY, MANUAL }
 
@@ -60,14 +64,72 @@ enum class MapProvider(val title: String, val shortLabel: String, val subtitle: 
  * ani discovery hash gateway se jako adresa schránky nikdy nepoužijí.
  */
 class Settings(private val db: AppDatabase) {
-    private fun get(k: String, d: String) = db.settings().get(k) ?: d
-    private fun put(k: String, v: String) = db.settings().put(SettingRow(k, v))
+    private val cache = ConcurrentHashMap<String, String>()
+    private val missingKeys = ConcurrentHashMap.newKeySet<String>()
+    @Volatile private var warmedUp = false
+
+    private fun getRaw(k: String): String? {
+        cache[k]?.let { return it }
+        if (warmedUp || missingKeys.contains(k)) return null
+        val v = db.settings().get(k)
+        if (v != null) {
+            cache[k] = v
+        } else {
+            missingKeys.add(k)
+        }
+        return v
+    }
+
+    private fun get(k: String, d: String) = getRaw(k) ?: d
+    private fun put(k: String, v: String) {
+        cache[k] = v
+        missingKeys.remove(k)
+        db.settings().put(SettingRow(k, v))
+    }
+
+    suspend fun warmUp() {
+        withContext(Dispatchers.IO) {
+            val rows = db.settings().all().first()
+            rows.forEach { row ->
+                cache[row.key] = row.value
+                missingKeys.remove(row.key)
+            }
+            warmedUp = true
+            refreshFlowsFromCache()
+        }
+    }
+
+    private fun refreshFlowsFromCache() {
+        _unitSystemFlow.value = runCatching { UnitSystem.valueOf(get("unitSystem", UnitSystem.METRIC.name)) }.getOrDefault(UnitSystem.METRIC)
+        _mapProviderFlow.value = runCatching { MapProvider.valueOf(get("mapProvider", MapProvider.CARTO_DARK.name)) }.getOrDefault(MapProvider.CARTO_DARK)
+        _networkModeFlow.value = runCatching { NetworkMode.valueOf(get("networkMode", NetworkMode.AUTO.name)) }.getOrDefault(NetworkMode.AUTO)
+        _backgroundServiceEnabledFlow.value = get("backgroundServiceEnabled", "true").toBoolean()
+        val ageProfile = get("ownAgeProfile", "ADULT").let { if (it == "MINOR") "MINOR" else "ADULT" }
+        _ownAgeProfileFlow.value = ageProfile
+        _isMinorFlow.value = (ageProfile == "MINOR")
+        _zoneIdFlow.value = get("zoneId", java.time.ZoneId.systemDefault().id)
+    }
 
     private val _unitSystemFlow = MutableStateFlow(UnitSystem.METRIC)
     val unitSystemFlow: StateFlow<UnitSystem> get() = _unitSystemFlow
 
     private val _mapProviderFlow = MutableStateFlow(MapProvider.CARTO_DARK)
     val mapProviderFlow: StateFlow<MapProvider> get() = _mapProviderFlow
+
+    private val _networkModeFlow = MutableStateFlow(NetworkMode.AUTO)
+    val networkModeFlow: StateFlow<NetworkMode> get() = _networkModeFlow
+
+    private val _backgroundServiceEnabledFlow = MutableStateFlow(true)
+    val backgroundServiceEnabledFlow: StateFlow<Boolean> get() = _backgroundServiceEnabledFlow
+
+    private val _ownAgeProfileFlow = MutableStateFlow("ADULT")
+    val ownAgeProfileFlow: StateFlow<String> get() = _ownAgeProfileFlow
+
+    private val _isMinorFlow = MutableStateFlow(false)
+    val isMinorFlow: StateFlow<Boolean> get() = _isMinorFlow
+
+    private val _zoneIdFlow = MutableStateFlow(java.time.ZoneId.systemDefault().id)
+    val zoneIdFlow: StateFlow<String> get() = _zoneIdFlow
 
     var unitSystem: UnitSystem
         get() = runCatching { UnitSystem.valueOf(get("unitSystem", UnitSystem.METRIC.name)) }.getOrDefault(UnitSystem.METRIC).also { _unitSystemFlow.value = it }
@@ -85,11 +147,26 @@ class Settings(private val db: AppDatabase) {
 
     var displayName: String get() = get("displayName", "Já"); set(v) = put("displayName", v)
     var accountId: String get() = get("accountId", "garmin-main"); set(v) = put("accountId", v)
-    var zoneId: String get() = get("zoneId", java.time.ZoneId.systemDefault().id); set(v) = put("zoneId", v)
+    var zoneId: String
+        get() = get("zoneId", java.time.ZoneId.systemDefault().id).also { _zoneIdFlow.value = it }
+        set(v) {
+            put("zoneId", v)
+            _zoneIdFlow.value = v
+        }
 
-    var networkMode: NetworkMode get() = NetworkMode.valueOf(get("networkMode", NetworkMode.AUTO.name)); set(v) = put("networkMode", v.name)
+    var networkMode: NetworkMode
+        get() = runCatching { NetworkMode.valueOf(get("networkMode", NetworkMode.AUTO.name)) }.getOrDefault(NetworkMode.AUTO).also { _networkModeFlow.value = it }
+        set(v) {
+            put("networkMode", v.name)
+            _networkModeFlow.value = v
+        }
     /** Trvalý běh služby na pozadí (po startu telefonu) pro okamžitý příjem zpráv a synchronizaci dat. */
-    var backgroundServiceEnabled: Boolean get() = get("backgroundServiceEnabled", "true").toBoolean(); set(v) = put("backgroundServiceEnabled", v.toString())
+    var backgroundServiceEnabled: Boolean
+        get() = get("backgroundServiceEnabled", "true").toBoolean().also { _backgroundServiceEnabledFlow.value = it }
+        set(v) {
+            put("backgroundServiceEnabled", v.toString())
+            _backgroundServiceEnabledFlow.value = v
+        }
     var gatewayHost: String get() = get("gatewayHost", ""); set(v) = put("gatewayHost", v)
     var gatewayPort: Int get() = get("gatewayPort", "4242").toInt(); set(v) = put("gatewayPort", v.toString())
     /** Uložený seznam P2P uzlů (ve tvaru host:port), které lze v nastavení přepínat, přidávat i odebírat. */
@@ -102,16 +179,24 @@ class Settings(private val db: AppDatabase) {
         set(v) = put("savedGatewayNodes", v.map { it.trim() }.filter { it.isNotBlank() }.distinct().joinToString(","))
     var rnsOnboardingCompleted: Boolean
         get() {
-            val saved = db.settings().get("rnsOnboardingCompleted")
+            val saved = getRaw("rnsOnboardingCompleted")
             if (saved != null) return saved.toBoolean()
-            val existingHost = db.settings().get("gatewayHost")
+            val existingHost = getRaw("gatewayHost")
             return !existingHost.isNullOrBlank()
         }
         set(v) = put("rnsOnboardingCompleted", v.toString())
     var rnsAdvancedMode: Boolean get() = get("rnsAdvancedMode", "false").toBoolean(); set(v) = put("rnsAdvancedMode", v.toString())
     var ownAgeProfile: String
-        get() = get("ownAgeProfile", "ADULT").let { if (it == "MINOR") "MINOR" else "ADULT" }
-        set(v) = put("ownAgeProfile", if (v == "MINOR") "MINOR" else "ADULT")
+        get() = get("ownAgeProfile", "ADULT").let { if (it == "MINOR") "MINOR" else "ADULT" }.also {
+            _ownAgeProfileFlow.value = it
+            _isMinorFlow.value = (it == "MINOR")
+        }
+        set(v) {
+            val normalized = if (v == "MINOR") "MINOR" else "ADULT"
+            put("ownAgeProfile", normalized)
+            _ownAgeProfileFlow.value = normalized
+            _isMinorFlow.value = (normalized == "MINOR")
+        }
     /** Hash LXMF propagation destination; prázdné = bez schránky (jen přímá výměna). */
     var propagationNode: String get() = get("propagationNode", ""); set(v) = put("propagationNode", v.trim().lowercase())
 
@@ -145,7 +230,7 @@ class Settings(private val db: AppDatabase) {
     var healthConnectEnabled: Boolean get() = get("healthConnect", "false").toBoolean(); set(v) = put("healthConnect", v.toString())
     /** Balíčky aplikací, jejichž záznamy z Health Connect přijímáme (výchozí: aplikace Withings). Prázdné = všechny. */
     var healthConnectOrigins: Set<String> get() = get("hcOrigins", "com.withings.wiscale2").split(',').filter { it.isNotBlank() }.toSet(); set(v) = put("hcOrigins", v.joinToString(","))
-    var healthConnectToken: String? get() = db.settings().get("hcToken"); set(v) = put("hcToken", v ?: "")
+    var healthConnectToken: String? get() = getRaw("hcToken"); set(v) = put("hcToken", v ?: "")
     /** Pořadí zdrojů pro trend váhy (první vyhrává u duplicit). */
     var weightPreference: List<String> get() = get("weightPref", "WITHINGS_API,MANUAL,GARMIN_PERSONAL").split(','); set(v) = put("weightPref", v.joinToString(","))
 

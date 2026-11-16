@@ -78,6 +78,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -1517,68 +1518,84 @@ private fun GroupSharedActivitiesSection(
     var filterMode by remember { mutableStateOf(0) } // 0 = Vše v kruhu, 1 = Od členů kruhu, 2 = Moje
     var selectedActsForCompare by remember { mutableStateOf(setOf<String>()) }
 
-    val allActivities = remember(myActs, receivedActs, contacts, participantIds) {
-        val shared = receivedActs.filter { it.author in participantIds }.mapNotNull { r ->
-            val p = runCatching { Wire.json.decodeFromString(ActivityProjection.serializer(), r.payload) }.getOrNull() ?: return@mapNotNull null
-            val sp = runCatching { Sport.valueOf(p.sport) }.getOrDefault(Sport.OTHER)
-            val cName = contacts.firstOrNull { it.identity == r.author }?.displayName ?: r.author.take(8)
-            UnifiedActivityItem(
-                key = "shared:${r.author}:${r.objectId}",
-                sport = sp,
-                title = "${sp.czechName()} · $cName",
-                ownerName = cName,
-                isShared = true,
-                startUtcMs = p.startUtcMs,
-                localDate = p.localDate,
-                distanceM = p.distanceM,
-                movingTimeS = p.movingTimeS ?: p.totalTimeS,
-                ascentM = p.ascentM,
-                avgHeartRate = p.avgHeartRate,
-                maxHeartRate = null
-            )
-        }
-        val mine = myActs.take(15).mapNotNull { row ->
-            if (row.title != null) {
-                val sp = runCatching { Sport.valueOf(row.sport) }.getOrDefault(Sport.OTHER)
+    val contactsMap = remember(contacts) { contacts.associate { it.identity to it.displayName } }
+    val participantSet = remember(participantIds) { participantIds.toSet() }
+    val allActivities by produceState<List<UnifiedActivityItem>>(
+        initialValue = emptyList(),
+        myActs,
+        receivedActs,
+        contactsMap,
+        participantSet
+    ) {
+        value = withContext(Dispatchers.Default) {
+            val zoneCache = HashMap<String, ZoneId>()
+            val defaultZone = ZoneId.systemDefault()
+            val shared = receivedActs.filter { it.author in participantSet }.mapNotNull { r ->
+                val p = runCatching { Wire.json.decodeFromString(ActivityProjection.serializer(), r.payload) }.getOrNull() ?: return@mapNotNull null
+                val sp = runCatching { Sport.valueOf(p.sport) }.getOrDefault(Sport.OTHER)
+                val cName = contactsMap[r.author] ?: r.author.take(8)
                 UnifiedActivityItem(
-                    key = row.id,
+                    key = "shared:${r.author}:${r.objectId}",
                     sport = sp,
-                    title = "${row.title} · Já",
-                    ownerName = "Já",
-                    isShared = false,
-                    startUtcMs = row.startUtcMs,
-                    localDate = Instant.ofEpochMilli(row.startUtcMs).atZone(ZoneId.of(row.zoneId ?: ZoneId.systemDefault().id)).toLocalDate().toString(),
-                    distanceM = row.distanceM,
-                    movingTimeS = row.movingTimeS,
-                    ascentM = row.ascentM,
-                    avgHeartRate = row.avgHeartRate,
-                    maxHeartRate = row.maxHeartRate,
-                    caloriesKcal = row.caloriesKcal,
-                    aerobicTe = row.aerobicTe,
-                    trainingLoad = row.trainingLoad
-                )
-            } else {
-                val a = row.json?.let { js -> runCatching { Wire.json.decodeFromString(Activity.serializer(), js) }.getOrNull() } ?: return@mapNotNull null
-                UnifiedActivityItem(
-                    key = a.id,
-                    sport = a.sport,
-                    title = "${a.title ?: a.sport.czechName()} · Já",
-                    ownerName = "Já",
-                    isShared = false,
-                    startUtcMs = a.startUtcMs,
-                    localDate = Instant.ofEpochMilli(a.startUtcMs).atZone(ZoneId.of(a.zoneId)).toLocalDate().toString(),
-                    distanceM = a.distanceM,
-                    movingTimeS = a.movingTimeS ?: a.totalTimeS,
-                    ascentM = a.ascentM,
-                    avgHeartRate = a.avgHeartRate,
-                    maxHeartRate = a.maxHeartRate,
-                    caloriesKcal = a.caloriesKcal,
-                    aerobicTe = a.aerobicTrainingEffect,
-                    trainingLoad = a.trainingLoad
+                    title = "${sp.czechName()} · $cName",
+                    ownerName = cName,
+                    isShared = true,
+                    startUtcMs = p.startUtcMs,
+                    localDate = p.localDate,
+                    distanceM = p.distanceM,
+                    movingTimeS = p.movingTimeS ?: p.totalTimeS,
+                    ascentM = p.ascentM,
+                    avgHeartRate = p.avgHeartRate,
+                    maxHeartRate = null
                 )
             }
+            val mine = myActs.take(15).mapNotNull { row ->
+                if (row.title != null) {
+                    val sp = runCatching { Sport.valueOf(row.sport) }.getOrDefault(Sport.OTHER)
+                    val zone = row.zoneId?.let { zid ->
+                        zoneCache.getOrPut(zid) { runCatching { ZoneId.of(zid) }.getOrDefault(defaultZone) }
+                    } ?: defaultZone
+                    UnifiedActivityItem(
+                        key = row.id,
+                        sport = sp,
+                        title = "${row.title} · Já",
+                        ownerName = "Já",
+                        isShared = false,
+                        startUtcMs = row.startUtcMs,
+                        localDate = Instant.ofEpochMilli(row.startUtcMs).atZone(zone).toLocalDate().toString(),
+                        distanceM = row.distanceM,
+                        movingTimeS = row.movingTimeS,
+                        ascentM = row.ascentM,
+                        avgHeartRate = row.avgHeartRate,
+                        maxHeartRate = row.maxHeartRate,
+                        caloriesKcal = row.caloriesKcal,
+                        aerobicTe = row.aerobicTe,
+                        trainingLoad = row.trainingLoad
+                    )
+                } else {
+                    val a = row.json?.let { js -> runCatching { Wire.json.decodeFromString(Activity.serializer(), js) }.getOrNull() } ?: return@mapNotNull null
+                    val zone = zoneCache.getOrPut(a.zoneId) { runCatching { ZoneId.of(a.zoneId) }.getOrDefault(defaultZone) }
+                    UnifiedActivityItem(
+                        key = a.id,
+                        sport = a.sport,
+                        title = "${a.title ?: a.sport.czechName()} · Já",
+                        ownerName = "Já",
+                        isShared = false,
+                        startUtcMs = a.startUtcMs,
+                        localDate = Instant.ofEpochMilli(a.startUtcMs).atZone(zone).toLocalDate().toString(),
+                        distanceM = a.distanceM,
+                        movingTimeS = a.movingTimeS ?: a.totalTimeS,
+                        ascentM = a.ascentM,
+                        avgHeartRate = a.avgHeartRate,
+                        maxHeartRate = a.maxHeartRate,
+                        caloriesKcal = a.caloriesKcal,
+                        aerobicTe = a.aerobicTrainingEffect,
+                        trainingLoad = a.trainingLoad
+                    )
+                }
+            }
+            (shared + mine).sortedByDescending { it.startUtcMs ?: 0L }
         }
-        (shared + mine).sortedByDescending { it.startUtcMs ?: 0L }
     }
 
     val filtered = remember(allActivities, filterMode) {
@@ -1718,7 +1735,7 @@ private fun GroupBranchMembersAndSharingSection(
     var showHandoverDialog by remember { mutableStateOf(false) }
     var showDissolveConfirmDialog by remember { mutableStateOf(false) }
 
-    val isMinorAccount = sl.settings.ownAgeProfile == "MINOR"
+    val isMinorAccount by sl.settings.isMinorFlow.collectAsState()
     val isSelfAdmin = currentGroup != null && meId in currentGroup.effectiveAdmins
 
     // Dialog pro potvrzení zákonného zástupce u nezletilého účtu (MINOR)
@@ -2246,14 +2263,7 @@ private fun GroupBranchMembersAndSharingSection(
                                     onClick = {
                                         scope.launch {
                                             notice = withContext(Dispatchers.IO) {
-                                                val updated = currentGroup.copy(
-                                                    members = currentGroup.members - memberId,
-                                                    version = currentGroup.version + 1
-                                                )
-                                                sl.shareService.saveAndBroadcastGroup(
-                                                    updated,
-                                                    extraRecipients = setOf(memberId)
-                                                )
+                                                sl.shareService.removeMemberFromGroup(currentGroup, memberId)
                                                 "Člen '$name' odebrán z kruhu."
                                             }
                                         }

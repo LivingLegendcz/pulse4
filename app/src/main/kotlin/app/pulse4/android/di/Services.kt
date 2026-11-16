@@ -197,6 +197,7 @@ class ServiceLocator(internal val context: Context) {
 /** Import z oficiálního Garmin Personal API (a záložně z přihlášené relace Garmin Connect) a ruční import FIT. */
 class ImportService(private val context: Context, private val sl: ServiceLocator) {
     private val json = Wire.json
+    private val syncLock = Any()
 
     private fun config(): GarminEndpointsConfig =
         GarminEndpointsConfig.parse(context.assets.open("garmin_endpoints.json").bufferedReader().use { it.readText() })
@@ -245,7 +246,7 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
     }
 
     /** Spustí import všech oblastí; ruční spuštění se spojí s běžícím (singleFlight). Vrací výsledek po oblastech. */
-    fun runAll(nowMs: Long): Map<SyncArea, AreaResult>? {
+    fun runAll(nowMs: Long): Map<SyncArea, AreaResult>? = synchronized(syncLock) {
         val cfg = config()
         val settings = sl.settings
         // Pokud je v GARMIN_API_KEY_EXPIRES uložena krátkodobá expirace access tokenu (<= 48 h), vyčistíme ji:
@@ -357,7 +358,7 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
         }.getOrElse { AreaResult.Failed(app.pulse4.provider.ProviderError.Server(500)) }
         runCatching { sl.withings.runImport(nowMs) }
         runCatching { sl.withings.syncAndForwardChildWeights(nowMs) }
-        return res?.plus(SyncArea.ACTIVITIES to actRes)
+        res?.plus(SyncArea.ACTIVITIES to actRes)
     }
 
     /** Kompletní vymazání všech testovacích dat a reset aktivit k čistému opětovnému stažení. */
@@ -1205,13 +1206,13 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
     }
 
     /** Automaticky stáhne aktivity z oficiálního Garmin Personal API (nebo přihlášené relace Garmin Connect), stáhne FIT a uloží do DB. */
-    fun syncGarminActivities(nowMs: Long): Int {
+    fun syncGarminActivities(nowMs: Long): Int = synchronized(syncLock) {
         val key = sl.secrets.getString(SecretStore.GARMIN_API_KEY)?.trim()?.removePrefix("ApiKey ")?.trim()
         val hasExt = sl.secrets.getString(SecretStore.GARMIN_EXT_TOKENS) != null
         if (key.isNullOrBlank() && !hasExt) {
-            return 0
+            return@synchronized 0
         }
-        return runCatching {
+        runCatching {
             val cfg = config()
             val client = okhttp3.OkHttpClient.Builder()
                 .callTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
@@ -1226,11 +1227,16 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
                     .header("Authorization", "ApiKey $key")
                     .post(okhttp3.FormBody.Builder().build())
                     .build()
-                val tokenBody = runCatching {
-                    client.newCall(tokenReq).execute().use { if (it.isSuccessful) it.body?.string().orEmpty().trim() else "" }
-                }.getOrDefault("")
+                val tokenRes = runCatching {
+                    client.newCall(tokenReq).execute().use { resp ->
+                        if (resp.isSuccessful) resp.body?.string().orEmpty().trim() else ""
+                    }
+                }
+                val tokenBody = tokenRes.getOrDefault("")
                 if (tokenBody.isNotBlank()) {
                     authHeader = cfg.authValue.replace("{accessToken}", tokenBody)
+                } else if (!hasExt) {
+                    throw (tokenRes.exceptionOrNull() ?: app.pulse4.provider.ProviderError.Unauthorized())
                 }
             }
 
@@ -1254,10 +1260,27 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
                         .header(cfg.authHeader, authHeader)
                         .get()
                         .build()
-                    val r = runCatching { client.newCall(listReq).execute().use { if (it.isSuccessful) it.body?.string().orEmpty() else "" } }.getOrDefault("")
-                    if (r.isNotBlank()) r else if (hasExt) runCatching { sl.garminExt.connectApiJson(pagePath) }.getOrDefault("") else ""
+                    val r = runCatching {
+                        client.newCall(listReq).execute().use { resp ->
+                            if (resp.isSuccessful) {
+                                resp.body?.string().orEmpty()
+                            } else {
+                                when (resp.code) {
+                                    401, 403 -> throw app.pulse4.provider.ProviderError.Unauthorized()
+                                    429 -> throw app.pulse4.provider.ProviderError.RateLimited(null)
+                                    else -> throw app.pulse4.provider.ProviderError.Server(resp.code)
+                                }
+                            }
+                        }
+                    }
+                    when {
+                        r.isSuccess && r.getOrThrow().isNotBlank() -> r.getOrThrow()
+                        hasExt -> sl.garminExt.connectApiJson(pagePath)
+                        r.isFailure -> throw r.exceptionOrNull()!!
+                        else -> ""
+                    }
                 } else if (hasExt) {
-                    runCatching { sl.garminExt.connectApiJson(pagePath) }.getOrDefault("")
+                    sl.garminExt.connectApiJson(pagePath)
                 } else ""
 
                 if (rawJson.isBlank()) break
@@ -1588,26 +1611,28 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
         while (true) {
             val batch = sl.db.activities().unbackfilled(100)
             if (batch.isEmpty()) break
-            for (item in batch) {
-                val a = runCatching { Wire.json.decodeFromString(Activity.serializer(), item.json) }.getOrNull()
-                if (a != null) {
-                    sl.db.activities().updateSummary(
-                        id = a.id,
-                        title = a.title?.takeIf { it.isNotBlank() } ?: a.sport.czechName(),
-                        distanceM = a.distanceM,
-                        movingTimeS = a.movingTimeS ?: a.totalTimeS,
-                        ascentM = a.ascentM,
-                        avgHeartRate = a.avgHeartRate,
-                        maxHeartRate = a.maxHeartRate,
-                        caloriesKcal = a.caloriesKcal,
-                        aerobicTe = a.aerobicTrainingEffect,
-                        anaerobicTe = a.anaerobicTrainingEffect,
-                        trainingLoad = a.trainingLoad,
-                        avgPowerW = a.avgPowerW,
-                        avgCadence = a.avgCadence,
-                        zoneId = a.zoneId
-                    )
-                    updated++
+            sl.db.runInTransaction {
+                for (item in batch) {
+                    val a = runCatching { Wire.json.decodeFromString(Activity.serializer(), item.json) }.getOrNull()
+                    if (a != null) {
+                        sl.db.activities().updateSummary(
+                            id = a.id,
+                            title = a.title?.takeIf { it.isNotBlank() } ?: a.sport.czechName(),
+                            distanceM = a.distanceM,
+                            movingTimeS = a.movingTimeS ?: a.totalTimeS,
+                            ascentM = a.ascentM,
+                            avgHeartRate = a.avgHeartRate,
+                            maxHeartRate = a.maxHeartRate,
+                            caloriesKcal = a.caloriesKcal,
+                            aerobicTe = a.aerobicTrainingEffect,
+                            anaerobicTe = a.anaerobicTrainingEffect,
+                            trainingLoad = a.trainingLoad,
+                            avgPowerW = a.avgPowerW,
+                            avgCadence = a.avgCadence,
+                            zoneId = a.zoneId
+                        )
+                        updated++
+                    }
                 }
             }
         }
@@ -1626,6 +1651,7 @@ sealed interface FitImportResult {
 /** Tvorba projekcí, zařazení do outboxu a odvolání sdílení. Filtrace probíhá před šifrováním a odesláním. */
 class ShareService(private val sl: ServiceLocator) {
     private val json = Wire.json
+    private val planLock = Any()
 
     fun grants(): List<ShareGrant> = sl.db.grants().allNow().map { json.decodeFromString(ShareGrant.serializer(), it.json) }
     fun groups(): Map<String, Group> = sl.db.grants().groupsNow().associate { it.id to json.decodeFromString(Group.serializer(), it.json) }
@@ -1819,6 +1845,37 @@ class ShareService(private val sl: ServiceLocator) {
         return Result.success(updated)
     }
 
+    /** Odebere člena ze skupiny, zruší jeho čekající položky v outboxu, vyřadí ho z vlastních grantů a rozešle aktualizaci členství. */
+    fun removeMemberFromGroup(group: Group, memberId: String): Group {
+        val self = sl.bridge.ensureStarted().deliveryHash
+        val updated = group.copy(
+            members = group.members - memberId,
+            admins = if (memberId in group.admins) group.admins - memberId else group.admins,
+            version = group.version + 1,
+        )
+        val groupGrants = grants().filter { it.groupId == group.id }
+        val groupGrantIds = groupGrants.mapTo(HashSet()) { it.id }
+        synchronized(sl.outbox) {
+            sl.db.outbox().all()
+                .filter {
+                    it.recipient == memberId &&
+                        it.state == app.pulse4.sync.DeliveryState.QUEUED.name &&
+                        it.grantId in groupGrantIds
+                }
+                .forEach { row ->
+                    sl.db.outbox().update(row.copy(state = app.pulse4.sync.DeliveryState.CANCELLED.name))
+                }
+        }
+        for (g in groupGrants) {
+            if (g.ownerId == self && memberId in g.recipients) {
+                saveGrant(g.copy(recipients = g.recipients - memberId))
+            }
+        }
+        saveGroup(updated)
+        broadcastMembershipUpdate(updated, System.currentTimeMillis(), extraRecipients = setOf(memberId))
+        return updated
+    }
+
     /** Uloží kruh a ihned rozešle aktualizaci členství všem členům (a případným odebraným) + spustí synchronizaci. */
     fun saveAndBroadcastGroup(
         group: Group,
@@ -1855,7 +1912,7 @@ class ShareService(private val sl: ServiceLocator) {
     }
 
     /** Vytvoří projekce změněných dat pro každého skutečného příjemce a zařadí je do outboxu. Vrací počet zařazených. */
-    fun planAndEnqueue(nowMs: Long): Int {
+    fun planAndEnqueue(nowMs: Long): Int = synchronized(planLock) {
         val self = sl.bridge.ensureStarted().deliveryHash
         val zone = ZoneId.of(sl.settings.zoneId)
         val today = LocalDate.now(zone)
@@ -1874,10 +1931,10 @@ class ShareService(private val sl: ServiceLocator) {
             val item = OutboxItem(e.eventId, e.recipient, e.kind, e.objectType, e.objectId, e.objectVersion, p.grantId, Wire.encode(p.message), nowMs)
             when (sl.outbox.enqueue(item)) {
                 is EnqueueResult.Queued -> { sl.sentLedger.record(e.recipient, p.objectKey, e.objectVersion, p.contentHash); queued++ }
-                EnqueueResult.OverQuota -> return queued // fronta plná: vlastní archiv zůstává, uživatel uvidí stav
+                EnqueueResult.OverQuota -> return@synchronized queued // fronta plná: vlastní archiv zůstává, uživatel uvidí stav
             }
         }
-        return queued + enqueueActivities(self, nowMs, from)
+        queued + enqueueActivities(self, nowMs, from)
     }
 
     private fun enqueueActivities(self: String, nowMs: Long, from: LocalDate): Int {
@@ -1944,7 +2001,11 @@ class ShareService(private val sl: ServiceLocator) {
             put(b.build(note.toIdentity, Kinds.PLAN_DECISION, "decision", note.decision.proposalId, rank,
                 json.encodeToString(app.pulse4.training.ProposalDecision.serializer(), note.decision), nowMs))
             note.revision?.let { rev ->
-                val viewers = grants().filter { it.active && it.planRight(rev.planId) != null }.flatMap { it.recipients }.toSet() + note.toIdentity
+                val allGroups = groups()
+                val viewers = grants()
+                    .filter { it.active && it.planRight(rev.planId) != null }
+                    .flatMap { app.pulse4.sharing.MembershipPolicy.effectiveRecipients(it, it.groupId?.let(allGroups::get)) }
+                    .toSet() + note.toIdentity
                 for (v in viewers) put(b.build(v, Kinds.PLAN_REVISION, "plan", rev.planId, rev.revision,
                     json.encodeToString(app.pulse4.training.PlanRevision.serializer(), rev), nowMs))
             }

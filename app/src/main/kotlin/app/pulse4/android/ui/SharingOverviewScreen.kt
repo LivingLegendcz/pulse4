@@ -50,7 +50,9 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -441,8 +443,12 @@ private fun IncomingSharingTab(
     receivedDaily: List<ReceivedRow>,
     receivedActs: List<ReceivedRow>,
 ) {
-    val authors = remember(receivedDaily, receivedActs) {
-        (receivedDaily.map { it.author } + receivedActs.map { it.author }).distinct()
+    val contactsById = remember(contacts) { contacts.associateBy { it.identity } }
+    val (dailyByAuthor, actsByAuthor, authors) = remember(receivedDaily, receivedActs) {
+        val dailyMap = receivedDaily.groupBy { it.author }
+        val actsMap = receivedActs.groupBy { it.author }
+        val allAuthors = (dailyMap.keys + actsMap.keys).toList()
+        Triple(dailyMap, actsMap, allAuthors)
     }
 
     if (authors.isEmpty()) {
@@ -454,83 +460,91 @@ private fun IncomingSharingTab(
     }
 
     authors.forEach { authorId ->
-        val contact = contacts.firstOrNull { it.identity == authorId }
-        val authorName = contact?.displayName ?: authorId.take(12)
-        val authorDaily = receivedDaily.filter { it.author == authorId }
-        val authorActs = receivedActs.filter { it.author == authorId }
-        val decodedCategories = remember(authorDaily, authorActs) {
-            val dailyCats = authorDaily.flatMap { row ->
-                runCatching {
-                    Wire.json.decodeFromString(SharedProjection.serializer(), row.payload).fields.keys.map { it.category }
-                }.getOrDefault(emptyList())
+        key(authorId) {
+            val contact = contactsById[authorId]
+            val authorName = contact?.displayName ?: authorId.take(12)
+            val authorDaily = dailyByAuthor[authorId].orEmpty()
+            val authorActs = actsByAuthor[authorId].orEmpty()
+            val decodedCategories by produceState<List<Category>>(
+                initialValue = emptyList(),
+                authorDaily,
+                authorActs
+            ) {
+                value = withContext(Dispatchers.Default) {
+                    val dailyCats = authorDaily.flatMap { row ->
+                        runCatching {
+                            Wire.json.decodeFromString(SharedProjection.serializer(), row.payload).fields.keys.map { it.category }
+                        }.getOrDefault(emptyList())
+                    }
+                    val actCats = if (authorActs.isNotEmpty()) listOf(Category.ACTIVITY) else emptyList()
+                    (dailyCats + actCats).distinct()
+                }
             }
-            val actCats = if (authorActs.isNotEmpty()) listOf(Category.ACTIVITY) else emptyList()
-            (dailyCats + actCats).distinct()
-        }
 
-        Card(
-            shape = RoundedCornerShape(18.dp),
-            border = BorderStroke(1.dp, Color(0xFF232A3B)),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF0A101B)),
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 5.dp)
-        ) {
-            Column(Modifier.padding(14.dp)) {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                        Icon(Icons.Outlined.Person, contentDescription = null, tint = Color(0xFF2DD4BF), modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Column {
+            Card(
+                shape = RoundedCornerShape(18.dp),
+                border = BorderStroke(1.dp, Color(0xFF232A3B)),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF0A101B)),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 5.dp)
+            ) {
+                Column(Modifier.padding(14.dp)) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                            Icon(Icons.Outlined.Person, contentDescription = null, tint = Color(0xFF2DD4BF), modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Column {
+                                Text(
+                                    authorName,
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = Color.White
+                                )
+                                Text(
+                                    "${authorDaily.size} denních záznamů · ${authorActs.size} aktivit",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFF94A3B8)
+                                )
+                            }
+                        }
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color(0xFF38BDF8).copy(alpha = 0.16f))
+                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                        ) {
                             Text(
-                                authorName,
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.ExtraBold,
-                                color = Color.White
-                            )
-                            Text(
-                                "${authorDaily.size} denních záznamů · ${authorActs.size} aktivit",
+                                "Aktivní příjem",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = Color(0xFF94A3B8)
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF38BDF8)
                             )
                         }
                     }
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(Color(0xFF38BDF8).copy(alpha = 0.16f))
-                            .padding(horizontal = 8.dp, vertical = 4.dp)
-                    ) {
-                        Text(
-                            "Aktivní příjem",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFF38BDF8)
-                        )
-                    }
-                }
 
-                if (decodedCategories.isNotEmpty()) {
-                    Spacer(Modifier.height(8.dp))
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        decodedCategories.forEach { cat ->
-                            val catColor = cat.unifiedColor()
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(catColor.copy(alpha = 0.15f))
-                                    .padding(horizontal = 8.dp, vertical = 4.dp)
-                            ) {
-                                Text(
-                                    categoryLabel(cat),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = catColor
-                                )
+                    if (decodedCategories.isNotEmpty()) {
+                        Spacer(Modifier.height(8.dp))
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            decodedCategories.forEach { cat ->
+                                val catColor = cat.unifiedColor()
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(catColor.copy(alpha = 0.15f))
+                                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                                ) {
+                                    Text(
+                                        categoryLabel(cat),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = catColor
+                                    )
+                                }
                             }
                         }
                     }
@@ -550,6 +564,8 @@ private fun PendingRequestsTab(
     onNotice: (String) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
+    val isMinor by sl.settings.isMinorFlow.collectAsState()
+    var pendingMinorAwaitingGrant by remember { mutableStateOf<Triple<ShareGrant, Group, Set<String>>?>(null) }
 
     if (pendingFamilyRequests.isEmpty() && pendingHandoverGroups.isEmpty() && awaitingConsentGrants.isEmpty()) {
         EmptyStateCard(
@@ -737,20 +753,23 @@ private fun PendingRequestsTab(
                 Spacer(Modifier.height(10.dp))
                 Button(
                     onClick = {
-                        scope.launch {
-                            val res = withContext(Dispatchers.IO) {
-                                val updated = grant.copy(recipients = grant.recipients + awaitingIds)
-                                val consentTs = if (sl.settings.ownAgeProfile == "MINOR") System.currentTimeMillis() else null
-                                sl.shareService.saveGrantWithPolicy(updated, consentTs).also {
-                                    if (it.isSuccess) sl.shareService.planAndEnqueue(System.currentTimeMillis())
+                        if (isMinor) {
+                            pendingMinorAwaitingGrant = Triple(grant, grp, awaitingIds)
+                        } else {
+                            scope.launch {
+                                val res = withContext(Dispatchers.IO) {
+                                    val updated = grant.copy(recipients = grant.recipients + awaitingIds)
+                                    sl.shareService.saveGrantWithPolicy(updated, null).also {
+                                        if (it.isSuccess) sl.shareService.planAndEnqueue(System.currentTimeMillis())
+                                    }
                                 }
-                            }
-                            onNotice(
-                                res.fold(
-                                    onSuccess = { "Sdílení v kruhu '${grp.name}' rozšířeno pro nové členy." },
-                                    onFailure = { it.message ?: "Nepodařilo se potvrdit rozšíření sdílení." }
+                                onNotice(
+                                    res.fold(
+                                        onSuccess = { "Sdílení v kruhu '${grp.name}' rozšířeno pro nové členy." },
+                                        onFailure = { it.message ?: "Nepodařilo se potvrdit rozšíření sdílení." }
+                                    )
                                 )
-                            )
+                            }
                         }
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0284C7)),
@@ -760,6 +779,71 @@ private fun PendingRequestsTab(
                 }
             }
         }
+    }
+
+    pendingMinorAwaitingGrant?.let { (grant, grp, awaitingIds) ->
+        var guardianChecked by remember { mutableStateOf(false) }
+        AlertDialog(
+            onDismissRequest = { pendingMinorAwaitingGrant = null },
+            containerColor = Color(0xFF0A101B),
+            titleContentColor = Color.White,
+            textContentColor = Color(0xFFCBD5E1),
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Outlined.Security, contentDescription = null, tint = Color(0xFFF59E0B), modifier = Modifier.size(22.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Souhlas zákonného zástupce", fontWeight = FontWeight.ExtraBold)
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "Tento účet má profil nezletilého (MINOR). Rozšíření sdílení v kruhu '${grp.name}' pro nové členy vyžaduje výslovný souhlas zákonného zástupce.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(checked = guardianChecked, onCheckedChange = { guardianChecked = it })
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            "Potvrzuji souhlas zákonného zástupce s rozšířením tohoto sdílení.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFFFDE68A)
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    enabled = guardianChecked,
+                    onClick = {
+                        if (!guardianChecked) return@Button
+                        pendingMinorAwaitingGrant = null
+                        scope.launch {
+                            val res = withContext(Dispatchers.IO) {
+                                val updated = grant.copy(recipients = grant.recipients + awaitingIds)
+                                val now = System.currentTimeMillis()
+                                sl.shareService.saveGrantWithPolicy(updated, now).also {
+                                    if (it.isSuccess) sl.shareService.planAndEnqueue(now)
+                                }
+                            }
+                            onNotice(
+                                res.fold(
+                                    onSuccess = { "Sdílení v kruhu '${grp.name}' rozšířeno pro nové členy (se souhlasem zákonného zástupce)." },
+                                    onFailure = { it.message ?: "Nepodařilo se potvrdit rozšíření sdílení." }
+                                )
+                            )
+                        }
+                    }
+                ) {
+                    Text("Potvrdit a povolit", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingMinorAwaitingGrant = null }) {
+                    Text("Zrušit", color = Color(0xFF94A3B8))
+                }
+            }
+        )
     }
 }
 
@@ -836,8 +920,8 @@ private fun EditGrantDialog(
     onDismiss: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
-    val isMinor = sl.settings.ownAgeProfile == "MINOR"
-    var guardianConfirmed by remember { mutableStateOf(!isMinor) }
+    val isMinor by sl.settings.isMinorFlow.collectAsState()
+    var guardianConfirmed by remember(isMinor) { mutableStateOf(!isMinor) }
     var selectedSourceMode by remember {
         mutableStateOf(
             when {
@@ -917,6 +1001,7 @@ private fun EditGrantDialog(
             Button(
                 enabled = selectedCategories.isNotEmpty() && guardianConfirmed,
                 onClick = {
+                    if (isMinor && !guardianConfirmed) return@Button
                     val newSources: Set<Provider>? = when (selectedSourceMode) {
                         1 -> setOf(Provider.WITHINGS_API)
                         2 -> setOf(Provider.GARMIN_PERSONAL, Provider.GARMIN_EXTENDED)
@@ -926,7 +1011,7 @@ private fun EditGrantDialog(
                     val updated = grant.copy(fields = newFields, sources = newSources)
                     scope.launch {
                         val res = withContext(Dispatchers.IO) {
-                            val consentTs = if (isMinor) System.currentTimeMillis() else null
+                            val consentTs = if (isMinor && guardianConfirmed) System.currentTimeMillis() else null
                             sl.shareService.saveGrantWithPolicy(updated, consentTs).also {
                                 if (it.isSuccess) sl.shareService.planAndEnqueue(System.currentTimeMillis())
                             }

@@ -96,7 +96,6 @@ class PulseSyncService : Service() {
                     }
                     runCatching {
                         sl.withings.renewSession()
-                        sl.withings.runImport(now)
                     }
                     if (sl.settings.healthConnectEnabled) {
                         runCatching { sl.healthConnect.sync(now, background = true) }
@@ -121,7 +120,7 @@ class PulseSyncService : Service() {
 
                 updateNotification(statusText(sl))
 
-                // Úsporné čekání: probudí se buď okamžitě na požadavek (ACTION_SYNC_NOW), nebo za 3 minuty.
+                // Úsporné čekání: probudí se buď okamžitě na požadavek (ACTION_SYNC_NOW), nebo za 10 minut.
                 withTimeoutOrNull(IDLE_TICK_DELAY_MS) {
                     wakeSignal.receive()
                 }
@@ -223,7 +222,7 @@ class PulseSyncService : Service() {
         private const val CHANNEL_ID = "pulse4_background_sync_min"
         private const val NOTIFICATION_ID = 4109
         private const val IMPORT_INTERVAL_MS = 15L * 60_000L
-        private const val IDLE_TICK_DELAY_MS = 3L * 60_000L
+        private const val IDLE_TICK_DELAY_MS = 10L * 60_000L
         const val ACTION_SYNC_NOW = "app.pulse4.android.action.SYNC_NOW"
 
         /**

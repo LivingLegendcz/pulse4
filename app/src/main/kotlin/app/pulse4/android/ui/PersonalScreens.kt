@@ -5670,20 +5670,14 @@ fun ActivitiesScreen(
     var msg by remember { mutableStateOf<String?>(null) }
     var syncing by remember { mutableStateOf(false) }
 
-    val initialActs = remember {
-        ScreenMemoryCache.activitySummaries ?: runCatching { sl.db.activities().allSummariesNow() }.getOrDefault(emptyList()).also {
-            ScreenMemoryCache.activitySummaries = it
-        }
-    }
+    val initialActs = remember { ScreenMemoryCache.activitySummaries ?: emptyList() }
     val acts by sl.db.activities().allSummaries().collectAsState(initial = initialActs)
     LaunchedEffect(acts) {
         ScreenMemoryCache.activitySummaries = acts
     }
 
-    val initialShared = remember { runCatching { sl.db.inbox().objectsNow("activity") }.getOrDefault(emptyList()) }
-    val sharedRows by sl.db.inbox().objects("activity").collectAsState(initial = initialShared)
-    val initialContacts = remember { runCatching { sl.db.contacts().allNow() }.getOrDefault(emptyList()) }
-    val contacts by sl.db.contacts().all().collectAsState(initial = initialContacts)
+    val sharedRows by sl.db.inbox().objects("activity").collectAsState(initial = emptyList())
+    val contacts by sl.db.contacts().all().collectAsState(initial = emptyList())
 
     var sportsFilter by remember { mutableStateOf(setOf<Sport>()) }
     var sourcesFilter by remember { mutableStateOf(setOf<String>()) } // empty / 2 items = ALL, "MINE", "SHARED"
@@ -5724,55 +5718,68 @@ fun ActivitiesScreen(
         }
     }
 
-    val unifiedList = remember(acts, sharedRows, contacts) {
-        val mine = acts.map { row ->
-            val sportEnum = runCatching { Sport.valueOf(row.sport) }.getOrDefault(Sport.OTHER)
-            val title = row.title?.takeIf { it.isNotBlank() } ?: sportEnum.czechName()
-            val zone = row.zoneId?.let { runCatching { ZoneId.of(it) }.getOrNull() } ?: ZoneId.systemDefault()
-            val localDateStr = java.time.Instant.ofEpochMilli(row.startUtcMs).atZone(zone).toLocalDate().toString()
-            UnifiedActivityItem(
-                key = row.id,
-                sport = sportEnum,
-                title = title,
-                locationName = null,
-                ownerName = "Já",
-                isShared = false,
-                startUtcMs = row.startUtcMs,
-                localDate = localDateStr,
-                distanceM = row.distanceM,
-                movingTimeS = row.movingTimeS,
-                ascentM = row.ascentM,
-                avgHeartRate = row.avgHeartRate,
-                maxHeartRate = row.maxHeartRate,
-                caloriesKcal = row.caloriesKcal,
-                aerobicTe = row.aerobicTe,
-                anaerobicTe = row.anaerobicTe,
-                trainingLoad = row.trainingLoad,
-                avgPowerW = row.avgPowerW,
-                avgCadence = row.avgCadence
-            )
+    val contactsMap = remember(contacts) { contacts.associate { it.identity to it.displayName } }
+    val unifiedList by produceState<List<UnifiedActivityItem>>(
+        initialValue = emptyList(),
+        acts,
+        sharedRows,
+        contactsMap
+    ) {
+        value = withContext(Dispatchers.Default) {
+            val zoneCache = HashMap<String, ZoneId>()
+            val defaultZone = ZoneId.systemDefault()
+            val mine = acts.map { row ->
+                val sportEnum = runCatching { Sport.valueOf(row.sport) }.getOrDefault(Sport.OTHER)
+                val title = row.title?.takeIf { it.isNotBlank() } ?: sportEnum.czechName()
+                val zone = row.zoneId?.let { zid ->
+                    zoneCache.getOrPut(zid) {
+                        runCatching { ZoneId.of(zid) }.getOrDefault(defaultZone)
+                    }
+                } ?: defaultZone
+                val localDateStr = java.time.Instant.ofEpochMilli(row.startUtcMs).atZone(zone).toLocalDate().toString()
+                UnifiedActivityItem(
+                    key = row.id,
+                    sport = sportEnum,
+                    title = title,
+                    locationName = null,
+                    ownerName = "Já",
+                    isShared = false,
+                    startUtcMs = row.startUtcMs,
+                    localDate = localDateStr,
+                    distanceM = row.distanceM,
+                    movingTimeS = row.movingTimeS,
+                    ascentM = row.ascentM,
+                    avgHeartRate = row.avgHeartRate,
+                    maxHeartRate = row.maxHeartRate,
+                    caloriesKcal = row.caloriesKcal,
+                    aerobicTe = row.aerobicTe,
+                    anaerobicTe = row.anaerobicTe,
+                    trainingLoad = row.trainingLoad,
+                    avgPowerW = row.avgPowerW,
+                    avgCadence = row.avgCadence
+                )
+            }
+            val shared = sharedRows.mapNotNull { r ->
+                val p = runCatching { Wire.json.decodeFromString(ActivityProjection.serializer(), r.payload) }.getOrNull() ?: return@mapNotNull null
+                val sp = runCatching { Sport.valueOf(p.sport) }.getOrDefault(Sport.OTHER)
+                val cName = contactsMap[r.author] ?: r.author.take(8)
+                UnifiedActivityItem(
+                    key = "shared:${r.author}:${r.objectId}",
+                    sport = sp,
+                    title = "${sp.czechName()} ($cName)",
+                    ownerName = cName,
+                    isShared = true,
+                    startUtcMs = p.startUtcMs,
+                    localDate = p.localDate,
+                    distanceM = p.distanceM,
+                    movingTimeS = p.movingTimeS ?: p.totalTimeS,
+                    ascentM = p.ascentM,
+                    avgHeartRate = p.avgHeartRate,
+                    maxHeartRate = null
+                )
+            }
+            (mine + shared).sortedByDescending { it.startUtcMs ?: 0L }
         }
-        val contactsMap = contacts.associate { it.identity to it.displayName }
-        val shared = sharedRows.mapNotNull { r ->
-            val p = runCatching { Wire.json.decodeFromString(ActivityProjection.serializer(), r.payload) }.getOrNull() ?: return@mapNotNull null
-            val sp = runCatching { Sport.valueOf(p.sport) }.getOrDefault(Sport.OTHER)
-            val cName = contactsMap[r.author] ?: r.author.take(8)
-            UnifiedActivityItem(
-                key = "shared:${r.author}:${r.objectId}",
-                sport = sp,
-                title = "${sp.czechName()} ($cName)",
-                ownerName = cName,
-                isShared = true,
-                startUtcMs = p.startUtcMs,
-                localDate = p.localDate,
-                distanceM = p.distanceM,
-                movingTimeS = p.movingTimeS ?: p.totalTimeS,
-                ascentM = p.ascentM,
-                avgHeartRate = p.avgHeartRate,
-                maxHeartRate = null
-            )
-        }
-        (mine + shared).sortedByDescending { it.startUtcMs ?: 0L }
     }
 
     val filtered = remember(unifiedList, sportsFilter, sourcesFilter, dateFilter, customDate) {

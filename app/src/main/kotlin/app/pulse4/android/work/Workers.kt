@@ -1,6 +1,8 @@
 package app.pulse4.android.work
 
 import android.content.Context
+import android.content.Intent
+import androidx.core.content.ContextCompat
 import androidx.work.BackoffPolicy
 import androidx.work.CoroutineWorker
 import androidx.work.Constraints
@@ -31,10 +33,9 @@ class ImportWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx
         runCatching { sl.garminExt.ensureSession() }
         runCatching { sl.importService.runAll(now) }
 
-        // 2. Withings proaktivní keepalive a import (nezávislý na Garminu)
+        // 2. Withings proaktivní keepalive (import běží v importService.runAll)
         runCatching {
             sl.withings.renewSession()
-            sl.withings.runImport(now)
         }
 
         if (sl.settings.healthConnectEnabled) runCatching { sl.healthConnect.sync(now, background = true) }
@@ -91,9 +92,23 @@ object Scheduler {
             .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()).build(),
     )
 
-    fun shareNow(ctx: Context, manual: Boolean = false): androidx.work.Operation {
-        PulseSyncService.syncState(ctx, triggerSyncNow = true)
-        return WorkManager.getInstance(ctx).enqueueUniqueWork(
+    fun shareNow(ctx: Context, manual: Boolean = false): androidx.work.Operation? {
+        val appCtx = ctx.applicationContext
+        val bgEnabled = runCatching { appCtx.services.settings.backgroundServiceEnabled }.getOrDefault(false)
+        if (bgEnabled && !manual) {
+            val started = runCatching {
+                val intent = Intent(appCtx, PulseSyncService::class.java).apply {
+                    action = PulseSyncService.ACTION_SYNC_NOW
+                }
+                ContextCompat.startForegroundService(appCtx, intent)
+                true
+            }.getOrDefault(false)
+            if (started) return null
+        }
+        if (manual) {
+            PulseSyncService.syncState(appCtx, triggerSyncNow = true)
+        }
+        return WorkManager.getInstance(appCtx).enqueueUniqueWork(
             "$SHARE-now", ExistingWorkPolicy.APPEND_OR_REPLACE,
             OneTimeWorkRequestBuilder<ShareWorker>().setInputData(androidx.work.workDataOf(ShareWorker.KEY_MANUAL to manual)).build(),
         )

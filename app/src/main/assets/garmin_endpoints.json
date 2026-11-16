@@ -144,6 +144,22 @@
       "sampleRef": "docs/samples/sleep.json"
     },
     {
+      "area": "SLEEP",
+      "metric": "RESPIRATION",
+      "path": "/sleep-service/sleep/dailySleep?date={from}",
+      "dateFormat": "yyyy-MM-dd",
+      "maxRangeDays": 1,
+      "itemsPath": "$",
+      "timePath": "sleepEndTimestampGMT",
+      "valuePath": "averageRespirationValue",
+      "timeFormat": "EPOCH_MS",
+      "scale": 1.0,
+      "localDatePath": "calendarDate",
+      "externalIdPath": "id",
+      "verified": true,
+      "sampleRef": "docs/samples/sleep.json"
+    },
+    {
       "area": "HRV",
       "metric": "HRV",
       "path": "/hrv-service/hrv/daily/{from}/{to}",

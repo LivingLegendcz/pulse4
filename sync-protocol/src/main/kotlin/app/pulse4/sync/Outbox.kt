@@ -75,6 +75,28 @@ class OutboxManager(
         store.all().any { it.recipient == recipient && it.state in open }
     }
 
+    /** Počet položek čekajících na odeslání z telefonu (mimo již uložené v LXMF propagaci). */
+    fun pendingCountFor(recipient: String): Int = synchronized(this) {
+        store.all().count {
+            it.recipient == recipient && (it.state == DeliveryState.QUEUED || it.state == DeliveryState.HANDED_TO_TRANSPORT)
+        }
+    }
+
+    /** Odloží všechny čekající položky pro nedostupného příjemce, aby se fronta nezkoušela posílat po jedné položce. */
+    fun deferRecipient(recipient: String, nowMs: Long, waitMs: Long): Int = synchronized(this) {
+        val until = nowMs + waitMs
+        var count = 0
+        store.all().filter {
+            it.recipient == recipient &&
+                (it.state == DeliveryState.QUEUED || it.state == DeliveryState.HANDED_TO_TRANSPORT) &&
+                it.nextAttemptAtMs < until
+        }.forEach {
+            store.update(it.copy(nextAttemptAtMs = until))
+            count++
+        }
+        count
+    }
+
     fun enqueue(item: OutboxItem): EnqueueResult = synchronized(this) {
         if (item.sizeBytes > limits.maxEventBytes) return@synchronized EnqueueResult.OverQuota
         if (queuedBytes() + item.sizeBytes > limits.maxQueueBytes) return@synchronized EnqueueResult.OverQuota
@@ -167,7 +189,12 @@ class OutboxManager(
      */
     fun expireStale(nowMs: Long): List<Pair<String, String>> = synchronized(this) {
         val out = mutableListOf<Pair<String, String>>()
-        store.all().filter { it.state in open && it.kind in Kinds.supersedable && nowMs - it.createdAtMs > limits.unackedSummaryTtlMs }
+        // Položky už uložené na LXMF propagačním uzlu neexpirujeme, jinak by se při delší offline pauze kontaktu řadily znovu.
+        store.all().filter {
+            (it.state == DeliveryState.QUEUED || it.state == DeliveryState.HANDED_TO_TRANSPORT) &&
+                it.kind in Kinds.supersedable &&
+                nowMs - it.createdAtMs > limits.unackedSummaryTtlMs
+        }
             .forEach {
                 store.update(it.copy(state = DeliveryState.EXPIRED_NEEDS_SNAPSHOT))
                 out += it.recipient to it.objectKey

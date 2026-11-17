@@ -105,14 +105,27 @@ class ReticulumTransport(
         ensureContactsRegistered()
 
         val localPeers = if (forceGateway) emptySet() else bridge.localPeerHashes()
+        val unreachableRecipients = HashSet<String>()
+        val probedRecipients = HashMap<String, Boolean>()
         for (item in outbox.due(nowMs, localPeers = localPeers)) {
+            if (item.recipient in unreachableRecipients) continue
+            val isReachable = probedRecipients.getOrPut(item.recipient) {
+                bridge.probeRecipient(item.recipient, usePropagation)
+            }
+            if (!isReachable) {
+                unreachableRecipients += item.recipient
+                outbox.deferRecipient(item.recipient, nowMs, 5 * 60_000L)
+                continue
+            }
             try {
                 // Označit pokus před odesláním, aby asynchronní Delivery event nepřepsal backoff
                 outbox.markAttempt(item.eventId, nowMs, inFlightWaitMs)
                 bridge.send(item.recipient, item.wire.toString(Charsets.UTF_8), propagated = usePropagation, eventId = item.eventId, forceGateway = forceGateway)
                 sent++
             } catch (e: Exception) {
+                unreachableRecipients += item.recipient
                 outbox.onTransportResult(item.eventId, TransportResult.Failed(e.javaClass.simpleName), nowMs)
+                outbox.deferRecipient(item.recipient, nowMs, 5 * 60_000L)
             }
         }
 

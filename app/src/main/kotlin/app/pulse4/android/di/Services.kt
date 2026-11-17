@@ -1927,34 +1927,59 @@ class ShareService(private val sl: ServiceLocator) {
         val activeGrants = grants().filter { it.active && it.ownerId == self }
         val earliestGrantFrom = activeGrants.mapNotNull { it.scope.from?.let { f -> runCatching { LocalDate.parse(f) }.getOrNull() } }.minOrNull()
         val from = earliestGrantFrom ?: today.minusDays(60)
-        val dates = sl.db.observations().datesWithData(from.toString(), today.toString()).map(LocalDate::parse)
+        // Řadíme od nejnovějších dní, aby dnešek a včerejšek měly vždy přednost před starší historií.
+        val dates = sl.db.observations().datesWithData(from.toString(), today.toString())
+            .map(LocalDate::parse)
+            .sortedDescending()
         val allObservations = sl.db.observations().forRange(from.toString(), today.toString()).map { it.toDomain() }
         // Nejdřív nahradit prošlé nepotvrzené souhrny čerstvým snapshotem.
         sl.outbox.expireStale(nowMs).forEach { (recipient, key) -> sl.sentLedger.record(recipient, key, (sl.sentLedger.last(recipient, key)?.version ?: 0), "expired") }
+
+        val recentDateCutoff = today.minusDays(1).toString()
+        val pendingByRecipient = HashMap<String, Int>()
+        fun pendingFor(recipient: String): Int = pendingByRecipient.getOrPut(recipient) { sl.outbox.pendingCountFor(recipient) }
 
         var queued = 0
         val plan = ShareBuilder(self, MessageBuilder(self)).plan(grants(), groups(), dates, allObservations, sl.sentLedger, nowMs)
         for (p in plan) {
             val e = p.message.envelope
+            val datePart = p.objectKey.removePrefix("daily/")
+            val isHistorical = datePart < recentDateCutoff
+            if (isHistorical && pendingFor(e.recipient) >= MAX_PENDING_PER_RECIPIENT) {
+                continue
+            }
             val item = OutboxItem(e.eventId, e.recipient, e.kind, e.objectType, e.objectId, e.objectVersion, p.grantId, Wire.encode(p.message), nowMs)
             when (sl.outbox.enqueue(item)) {
-                is EnqueueResult.Queued -> { sl.sentLedger.record(e.recipient, p.objectKey, e.objectVersion, p.contentHash); queued++ }
+                is EnqueueResult.Queued -> {
+                    sl.sentLedger.record(e.recipient, p.objectKey, e.objectVersion, p.contentHash)
+                    pendingByRecipient[e.recipient] = pendingFor(e.recipient) + 1
+                    queued++
+                }
                 EnqueueResult.OverQuota -> return@synchronized queued // fronta plná: vlastní archiv zůstává, uživatel uvidí stav
             }
         }
-        queued + enqueueActivities(self, nowMs, from)
+        queued + enqueueActivities(self, nowMs, from, pendingByRecipient)
     }
 
-    private fun enqueueActivities(self: String, nowMs: Long, from: LocalDate): Int {
+    private fun enqueueActivities(
+        self: String,
+        nowMs: Long,
+        from: LocalDate,
+        pendingByRecipient: MutableMap<String, Int> = HashMap(),
+    ): Int {
+        val zone = ZoneId.of(sl.settings.zoneId)
         val zones = sl.settings.privacyZones
+        val recentActCutoffMs = LocalDate.now(zone).minusDays(2).atStartOfDay(zone).toInstant().toEpochMilli()
         var queued = 0
-        val acts = sl.db.activities().since(from.atStartOfDay(ZoneId.of(sl.settings.zoneId)).toInstant().toEpochMilli())
+        val acts = sl.db.activities().since(from.atStartOfDay(zone).toInstant().toEpochMilli())
+            .sortedByDescending { it.startUtcMs }
         android.util.Log.i("Pulse4Sync", "enqueueActivities: from=$from, acts=${acts.size}, activeGrants=${grants().filter { it.active }.size}")
         for (row in acts) {
             val act = json.decodeFromString(Activity.serializer(), row.json)
             val track = sl.db.activities().track(row.id)?.let {
                 json.decodeFromString(kotlinx.serialization.builtins.ListSerializer(app.pulse4.domain.TrackPoint.serializer()), it.json)
             }.orEmpty()
+            val isHistorical = act.startUtcMs < recentActCutoffMs
             for (g in grants().filter { it.active && it.ownerId == self && it.fields.any { f -> f.category == app.pulse4.sharing.Category.ACTIVITY } }) {
                 if (!g.allowsProvider(act.provider)) continue
                 val proj = ActivityProjector.project(g, act, track, emptyList<LapIn>(), zones)
@@ -1965,6 +1990,10 @@ class ShareService(private val sl: ServiceLocator) {
                 val recipients = app.pulse4.sharing.MembershipPolicy.effectiveRecipients(g, g.groupId?.let(groups()::get))
                 android.util.Log.i("Pulse4Sync", "act=${act.id}, payloadLen=${payload.length}, recipients=$recipients")
                 for (r in recipients) {
+                    val curPending = pendingByRecipient.getOrPut(r) { sl.outbox.pendingCountFor(r) }
+                    if (isHistorical && curPending >= MAX_PENDING_PER_RECIPIENT) {
+                        continue
+                    }
                     val key = "activity/${act.id}"
                     val last = sl.sentLedger.last(r, key)
                     if (last?.contentHash == hash) {
@@ -1976,13 +2005,21 @@ class ShareService(private val sl: ServiceLocator) {
                     val res = sl.outbox.enqueue(OutboxItem(e.eventId, r, e.kind, e.objectType, e.objectId, e.objectVersion, g.id, Wire.encode(msg), nowMs))
                     android.util.Log.i("Pulse4Sync", "act=${act.id} enqueue result: $res")
                     when (res) {
-                        is EnqueueResult.Queued -> { sl.sentLedger.record(r, key, e.objectVersion, hash); queued++ }
+                        is EnqueueResult.Queued -> {
+                            sl.sentLedger.record(r, key, e.objectVersion, hash)
+                            pendingByRecipient[r] = curPending + 1
+                            queued++
+                        }
                         EnqueueResult.OverQuota -> return queued
                     }
                 }
             }
         }
         return queued
+    }
+
+    private companion object {
+        const val MAX_PENDING_PER_RECIPIENT = 25
     }
 
     /**

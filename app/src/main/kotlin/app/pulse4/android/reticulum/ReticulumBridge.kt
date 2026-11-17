@@ -1123,6 +1123,29 @@ class ReticulumBridge(
     }
 
     /**
+     * Rychlá zkouška dostupnosti kontaktu ("test call") před odesláním dávky z fronty.
+     * Ověří buď lokální Wi-Fi peer (TCP connect), nebo dostupnost RNS brány / LXMF propagace.
+     */
+    fun probeRecipient(destHash: String, usePropagation: Boolean, timeoutMs: Int = 1200): Boolean {
+        val localEndpoint = localPeerMap[destHash]
+        if (localEndpoint != null) {
+            val reachable = runCatching {
+                val uri = java.net.URI(localEndpoint)
+                val port = if (uri.port > 0) uri.port else 80
+                java.net.Socket().use { sock ->
+                    sock.connect(java.net.InetSocketAddress(uri.host, port), timeoutMs)
+                }
+                true
+            }.getOrDefault(false)
+            if (reachable) return true
+            localPeerMap.remove(destHash, localEndpoint)
+        }
+        if (settings.networkMode == NetworkMode.LOCAL_ONLY) return false
+        val propReady = usePropagation && settings.propagationNode.trim().length == 32
+        return isGatewayOnline && (propReady || registeredContacts.containsKey(destHash))
+    }
+
+    /**
      * Odešle zprávu příjemci.
      * 1. Pokusí se o bleskový přímý přenos po lokální Wi-Fi (pokud je peer online v místní síti).
      * 2. Pokusí se o směrování přes Reticulum (RNS) TCP uzel a volitelně uložení do LXMF Propagation uzlu.

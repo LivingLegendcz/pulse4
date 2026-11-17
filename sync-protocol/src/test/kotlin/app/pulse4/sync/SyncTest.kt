@@ -299,4 +299,30 @@ class SyncTest {
         assertFalse(AttachmentGate.verifyReceived(data, Wire.sha256Hex(data), 6))
         assertFalse(AttachmentGate.verifyReceived("hellp".toByteArray(), Wire.sha256Hex(data), 5))
     }
+
+    @Test fun `deferRecipient postpones unreachable contact queue and stored-in-propagation does not expire`() {
+        val store = InMemoryOutboxStore(); val ob = OutboxManager(store)
+        val b1 = upsert(1, key = "2026-10-20")
+        val b2 = upsert(2, key = "2026-10-21")
+        val evaMsg = josef.build("eva", Kinds.PROJECTION_UPSERT, "daily", "2026-10-20", 1, "{}", 1)
+        ob.enqueue(item(b1, at = 0))
+        ob.enqueue(item(b2, at = 0))
+        ob.enqueue(item(evaMsg, at = 0))
+
+        // Položka pro eva je už na propagačním uzlu -> nemá se počítat do lokální fronty ani expirovat
+        ob.onTransportResult(evaMsg.envelope.eventId, TransportResult.StoredInPropagation, 100)
+        assertEquals(2, ob.pendingCountFor("bob"))
+        assertEquals(0, ob.pendingCountFor("eva"))
+        assertEquals(listOf("bob" to "daily/2026-10-20", "bob" to "daily/2026-10-21"), ob.expireStale(8L * 24 * 3600 * 1000))
+        assertEquals(DeliveryState.STORED_IN_PROPAGATION, store.find(evaMsg.envelope.eventId)!!.state)
+
+        // Nová dávka pro bob -> deferRecipient ji odloží najednou bez ovlivnění eva
+        val b3 = upsert(3, key = "2026-10-22")
+        val b4 = upsert(4, key = "2026-10-23")
+        ob.enqueue(item(b3, at = 1000))
+        ob.enqueue(item(b4, at = 1000))
+        assertEquals(2, ob.deferRecipient("bob", 1000, 300_000))
+        assertTrue(ob.due(100_000).isEmpty())
+        assertEquals(2, ob.due(301_000).size)
+    }
 }

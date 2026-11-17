@@ -1234,6 +1234,16 @@ class ReticulumBridge(
         val propHash = settings.propagationNode.trim()
         if (propHash.length != 32 || !isGatewayOnline) return
         val link = ensurePropagationLink() ?: return
+        if (!link.identified) {
+            val xPub = x25519PrivKey?.generatePublicKey()?.encoded
+            val edPriv = ed25519PrivKey
+            val edPub = edPriv?.generatePublicKey()?.encoded
+            if (xPub != null && edPriv != null && edPub != null) {
+                link.buildIdentifyPacket(xPub + edPub, edPriv)?.let { idPkt ->
+                    sendRawRnsPacket(idPkt)
+                }
+            }
+        }
         val reqData = LxmfCodec.buildGetMessagesRequest()
         val (_, reqPkt) = link.buildRequestPacket(LxmfCodec.MESSAGE_GET_PATH, reqData) ?: return
         sendRawRnsPacket(reqPkt)

@@ -216,6 +216,8 @@ class RnsLinkSession(
         private set
     var negotiatedMtu: Int = 500
         private set
+    var identified: Boolean = false
+        private set
 
     private val ephSeed = ByteArray(32).also { SecureRandom().nextBytes(it) }
     private val ephXPriv = X25519PrivateKeyParameters(ephSeed, 0)
@@ -291,6 +293,18 @@ class RnsLinkSession(
     }
 
     fun decryptLinkPayload(ciphertext: ByteArray): ByteArray? = fernet?.decrypt(ciphertext)
+
+    fun buildIdentifyPacket(pubKey64: ByteArray, edPriv: Ed25519PrivateKeyParameters): ByteArray? {
+        if (state != State.ACTIVE || pubKey64.size != 64) return null
+        val signedData = linkIdBytes + pubKey64
+        val signer = Ed25519Signer()
+        signer.init(true, edPriv)
+        signer.update(signedData, 0, signedData.size)
+        val sig64 = signer.generateSignature()
+        val pkt = buildEncryptedLinkPacket(context = 0xFB.toByte(), plaintext = pubKey64 + sig64) ?: return null
+        identified = true
+        return pkt
+    }
 
     fun buildRequestPacket(path: String, data: Any?): Pair<ByteArray, ByteArray>? {
         val pathHash = MessageDigest.getInstance("SHA-256").digest(path.toByteArray(Charsets.UTF_8)).copyOf(16)

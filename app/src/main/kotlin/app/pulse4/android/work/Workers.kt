@@ -29,8 +29,8 @@ class ImportWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val sl = applicationContext.services
         val isManual = inputData.getBoolean(ShareWorker.KEY_MANUAL, false)
-        // Pokud běží nepřetržitá služba na pozadí (PulseSyncService), periodický WorkManager import neduplikujeme.
-        if (sl.settings.backgroundServiceEnabled && !isManual) {
+        // Pokud běží nepřetržitá služba na pozadí s čerstvým heartbeatom, periodický WorkManager import neduplikujeme.
+        if (PulseSyncService.hasFreshHeartbeat(System.currentTimeMillis()) && !isManual) {
             return@withContext Result.success()
         }
         val now = System.currentTimeMillis()

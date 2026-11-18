@@ -149,7 +149,9 @@ import app.pulse4.android.di.FitImportResult
 import app.pulse4.android.di.ServiceLocator
 import app.pulse4.android.di.WithingsService
 import app.pulse4.domain.Activity
+import app.pulse4.domain.MetricObservation
 import app.pulse4.domain.MetricType
+import app.pulse4.domain.PLog
 import app.pulse4.domain.Provider
 import app.pulse4.domain.Reading
 import app.pulse4.domain.Sport
@@ -168,6 +170,18 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.builtins.ListSerializer
+
+internal val ECG_METRIC_TYPES = listOf(
+    MetricType.ECG_QTC,
+    MetricType.ECG_HR,
+    MetricType.ECG_AFIB,
+    MetricType.ECG_QRS,
+    MetricType.ECG,
+)
+
+internal fun pickLatestEcgObservation(rows: List<MetricObservation>): MetricObservation? =
+    rows.filter { !it.deleted && it.type in ECG_METRIC_TYPES }
+        .maxWithOrNull(compareBy<MetricObservation> { it.startUtcMs }.thenBy { -ECG_METRIC_TYPES.indexOf(it.type) })
 
 data class EcgParsed(
     val signalId: Long?,
@@ -662,8 +676,11 @@ fun TodayScreen(
             val todaySleepScore = obsToday.filter { it.type == MetricType.SLEEP_SCORE && !it.deleted }.maxByOrNull { it.startUtcMs }?.value
             val latestWeightObs = weightObs.filter { !it.deleted }.maxByOrNull { it.startUtcMs }
                 ?: sl.db.observations().latest(MetricType.WEIGHT.name)?.toDomain()
-            val latestEcgObs = runCatching { sl.withings.trend(MetricType.ECG, 30).maxByOrNull { it.startUtcMs } }.getOrNull()
-                ?: sl.db.observations().latest(MetricType.ECG.name)?.toDomain()
+            val latestEcgObs = pickLatestEcgObservation(
+                ECG_METRIC_TYPES.flatMap { t -> runCatching { sl.withings.trend(t, 30) }.getOrDefault(emptyList()) }
+            ) ?: pickLatestEcgObservation(
+                ECG_METRIC_TYPES.mapNotNull { t -> sl.db.observations().latest(t.name)?.toDomain() }
+            )
 
             TodayDashboardBundle(
                 today = today,
@@ -2246,14 +2263,26 @@ fun DedicatedMetricDetailScreen(
         val today = LocalDate.now(zone)
         val fromDate = today.minusDays((daysCount - 1).toLong()).toString()
         val toDate = today.toString()
-        val primaryRows = if (type in WithingsService.BODY_COMPOSITION_TYPES) {
-            sl.withings.trend(type, daysCount)
+        val (seriesType, primaryRows) = if (type == MetricType.ECG) {
+            val byType = ECG_METRIC_TYPES.associateWith { t -> sl.withings.trend(t, daysCount) }
+            val bestType = ECG_METRIC_TYPES.firstOrNull { t -> byType[t]?.isNotEmpty() == true } ?: MetricType.ECG
+            bestType to (byType[bestType] ?: emptyList())
+        } else if (type in WithingsService.BODY_COMPOSITION_TYPES) {
+            type to sl.withings.trend(type, daysCount)
         } else {
-            sl.db.observations().forTypeInRange(type.name, fromDate, toDate).map { it.toDomain() }
+            type to sl.db.observations().forTypeInRange(type.name, fromDate, toDate).map { it.toDomain() }
         }
-        val mainSeries = MetricSeries.build(type, primaryRows, today, daysCount)
-        val latestObs = primaryRows.filter { it.type == type && !it.deleted }.maxByOrNull { it.startUtcMs }
-            ?: sl.db.observations().latest(type.name)?.toDomain()
+        val mainSeries = MetricSeries.build(seriesType, primaryRows, today, daysCount)
+        val latestObs = if (type == MetricType.ECG) {
+            pickLatestEcgObservation(
+                ECG_METRIC_TYPES.flatMap { t -> runCatching { sl.withings.trend(t, daysCount) }.getOrDefault(emptyList()) }
+            ) ?: pickLatestEcgObservation(
+                ECG_METRIC_TYPES.mapNotNull { t -> sl.db.observations().latest(t.name)?.toDomain() }
+            )
+        } else {
+            primaryRows.filter { it.type == type && !it.deleted }.maxByOrNull { it.startUtcMs }
+                ?: sl.db.observations().latest(type.name)?.toDomain()
+        }
 
         // Doplňková data specifická pro danou doménu (načítaná cíleně jen pro daný typ)
         val sleepScoreRows = if (type == MetricType.SLEEP_DURATION) {
@@ -2490,7 +2519,7 @@ fun DedicatedMetricDetailScreen(
 
         // Specifický obsah podle typu metriky
         when (type) {
-            MetricType.ECG -> {
+            MetricType.ECG, MetricType.ECG_HR, MetricType.ECG_QTC, MetricType.ECG_QRS, MetricType.ECG_AFIB -> {
                 val ecgDetails = parseEcgOrigin(latestObs.origin, latestObs.value)
                 val rhythmTitle = when (ecgDetails.afibClassification) {
                     0 -> "AFib nezjištěna (Withings)"
@@ -2554,17 +2583,24 @@ fun DedicatedMetricDetailScreen(
                         Spacer(Modifier.height(14.dp))
 
                         // Parametry EKG: Tep + QTc
+                        val qtcDisplay = if (latestObs.type == MetricType.ECG_QTC || (latestObs.type == MetricType.ECG && latestObs.value >= 200.0)) {
+                            "${fmt.number(latestObs.value, 0)} ms"
+                        } else {
+                            "—"
+                        }
+                        val hrDisplay = ecgDetails.heartRate?.takeIf { it > 0 }
+                            ?: if (latestObs.type == MetricType.ECG_HR) latestObs.value.toInt().takeIf { it > 0 } else null
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                             Column {
                                 Text(
-                                    text = if (latestObs.value >= 200.0) "${fmt.number(latestObs.value, 0)} ms" else "—",
+                                    text = qtcDisplay,
                                     style = MaterialTheme.typography.displaySmall,
                                     fontWeight = FontWeight.ExtraBold,
                                     color = Color.White
                                 )
                                 Text("Korigovaný interval QTc (norma 350–450 ms)", style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8))
                             }
-                            ecgDetails.heartRate?.takeIf { it > 0 }?.let { hrVal ->
+                            hrDisplay?.let { hrVal ->
                                 Column(horizontalAlignment = Alignment.End) {
                                     Row(verticalAlignment = Alignment.CenterVertically) {
                                         Icon(Icons.Outlined.Favorite, contentDescription = null, tint = Color(0xFFF43F5E), modifier = Modifier.size(18.dp))
@@ -2603,9 +2639,9 @@ fun DedicatedMetricDetailScreen(
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Icon(Icons.Outlined.Timeline, contentDescription = null, tint = Color(0xFFF43F5E), modifier = Modifier.size(16.dp))
                                 Spacer(Modifier.width(6.dp))
-                                Text("Jednosvodová ECG křivka (Svod I)", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = Color(0xFFE2E8F0))
+                                Text("Orientační EKG křivka", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = Color(0xFFE2E8F0))
                             }
-                            Text("500 Hz · 25 mm/s", style = MaterialTheme.typography.labelSmall, color = Color(0xFF64748B))
+                            Text("Ilustrativní náhled", style = MaterialTheme.typography.labelSmall, color = Color(0xFF64748B))
                         }
                         Spacer(Modifier.height(8.dp))
                         EcgLeadStripCanvas(
@@ -3721,7 +3757,7 @@ fun LazyMetricHistoryListCard(
                                                     fontWeight = FontWeight.SemiBold,
                                                     color = Color.White
                                                 )
-                                                if (type == MetricType.ECG) {
+                                                if (type in ECG_METRIC_TYPES) {
                                                     val det = parseEcgOrigin(obs.origin, obs.value)
                                                     val rhythm = when (det.afibClassification) {
                                                         0 -> "Sinusový rytmus"
@@ -3920,6 +3956,10 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType = MetricType.HRV) 
         MetricType.PULSE_WAVE_VELOCITY,
         MetricType.BMR,
         MetricType.METABOLIC_AGE,
+        MetricType.ECG_QTC,
+        MetricType.ECG_HR,
+        MetricType.ECG_QRS,
+        MetricType.ECG_AFIB,
         MetricType.ECG,
         MetricType.SPO2,
         MetricType.RESPIRATION
@@ -3958,7 +3998,7 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType = MetricType.HRV) 
                 title = "Srdce & EKG",
                 subtitle = "Klidový tep · EKG QTc",
                 icon = PulseIcons.Ecg,
-                types = linkedSetOf(MetricType.RESTING_HEART_RATE, MetricType.ECG),
+                types = linkedSetOf(MetricType.RESTING_HEART_RATE, MetricType.ECG_QTC),
                 artworkRes = R.drawable.img_motif_ecg_signal,
                 accentColor = Color(0xFFF43F5E),
                 secondaryColor = Color(0xFF38BDF8)
@@ -7327,16 +7367,16 @@ fun loadUnifiedActivity(sl: ServiceLocator, key: String): LoadedActivityDetail? 
     } else {
         val row = sl.db.activities().get(key)
         if (row == null) {
-            android.util.Log.w("Pulse4", "loadUnifiedActivity: row not found for key=$key in activities table")
+            PLog.w("Pulse4") { "loadUnifiedActivity: row not found for key=$key in activities table" }
             return null
         }
         val a = runCatching { Wire.json.decodeFromString(Activity.serializer(), row.json) }.getOrElse {
-            android.util.Log.e("Pulse4", "loadUnifiedActivity: failed to decode Activity json for key=$key", it)
+            PLog.e("Pulse4", it) { "loadUnifiedActivity: failed to decode Activity json for key=$key" }
             return null
         }
         var t = sl.db.activities().track(key)?.let {
             runCatching { Wire.json.decodeFromString(ListSerializer(TrackPoint.serializer()), it.json) }.getOrElse { err ->
-                android.util.Log.e("Pulse4", "loadUnifiedActivity: failed to decode track json for key=$key", err)
+                PLog.e("Pulse4", err) { "loadUnifiedActivity: failed to decode track json for key=$key" }
                 null
             }
         }.orEmpty()
@@ -7436,7 +7476,7 @@ fun ActivityDetailScreen(sl: ServiceLocator, id: String, onBack: () -> Unit = {}
             android.util.Log.i("Pulse4", "ActivityDetailScreen: loaded $id -> title=${res?.title}, pts=${res?.track?.size}")
             res
         } catch (e: Throwable) {
-            android.util.Log.e("Pulse4", "ActivityDetailScreen: error loading $id", e)
+            PLog.e("Pulse4", e) { "ActivityDetailScreen: error loading $id" }
             null
         }
     }

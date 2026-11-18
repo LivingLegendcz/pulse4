@@ -342,7 +342,7 @@ object OuraScoreCalculator {
         val bodyFatVal = seriesByType[MetricType.BODY_FAT]?.values?.lastOrNull()
         val pwvVal = seriesByType[MetricType.PULSE_WAVE_VELOCITY]?.values?.lastOrNull()
         val hasBodyData = wKg != null || bodyFatVal != null || pwvVal != null
-        val bodyScore: Int? = if (hasBodyData && wKg != null) 84 else null
+        val bodyScore: Int? = null
         val bodyRating = if (hasBodyData) OuraRating.GOOD else OuraRating.NO_DATA
         val bodyParts = buildList {
             if (wKg != null) add(fmt.weight(wKg))

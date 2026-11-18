@@ -225,26 +225,41 @@ class ShippedConfigTest {
         assertTrue(cfg.endpoints.all { it.verified }, "Všechny endpointy jsou ověřeny proti oficiálnímu API")
     }
 
-    @Test fun `body battery maps level instead of charged`() {
+    @Test fun `body battery maps numeric latestValue from real dailysummaries sample`() {
+        val cfg = GarminEndpointsConfig.parse(file.readText())
+        val bbSpec = cfg.endpoints.first { it.metric == MetricType.BODY_BATTERY }
+        val sampleJson = java.io.File("../docs/samples/dailysummaries.json").readText()
+        val mapped = ResponseMapper.map(bbSpec, sampleJson, "acc", "Europe/Prague")
+        assertEquals(0, mapped.skipped)
+        assertEquals(4, mapped.items.size)
+        assertEquals(listOf(15.0, 16.0, 30.0, 47.0), mapped.items.map { it.value })
+        assertEquals(4, mapped.items.mapNotNull { it.localDate }.distinct().size)
+        assertTrue(mapped.items.all { it.localDate?.matches(Regex("""\d{4}-\d{2}-\d{2}""")) == true })
+    }
+
+    @Test fun `body battery skips entries with missing or non-numeric latestValue`() {
         val cfg = GarminEndpointsConfig.parse(file.readText())
         val bbSpec = cfg.endpoints.first { it.metric == MetricType.BODY_BATTERY }
         val sampleJson = """
-            [
-              {
-                "date": "2026-10-20",
-                "startTimestampGMT": "2026-10-19T22:00:00.0",
-                "endTimestampGMT": "2026-10-20T22:00:00.0",
-                "charged": 55,
-                "drained": 40,
-                "endOfDayBodyBatteryDynamicFeedbackEvent": {
-                  "bodyBatteryLevel": "78"
+            {
+              "data": [
+                {
+                  "calendarDate": "2026-10-28",
+                  "wellnessChronology": {
+                    "startTimestampGmt": "2026-10-27T23:00:00.0",
+                    "endTimestampGmt": "2026-10-28T16:23:00.0"
+                  },
+                  "bodyBattery": {
+                    "dynamicFeedbackEvent": {
+                      "bodyBatteryLevel": "MODERATE"
+                    }
+                  }
                 }
-              }
-            ]
+              ]
+            }
         """.trimIndent()
         val mapped = ResponseMapper.map(bbSpec, sampleJson, "acc", "Europe/Prague")
-        assertEquals(1, mapped.items.size)
-        assertEquals(78.0, mapped.items[0].value)
-        assertEquals("2026-10-20", mapped.items[0].localDate)
+        assertEquals(0, mapped.items.size)
+        assertEquals(1, mapped.skipped)
     }
 }

@@ -325,4 +325,24 @@ class SyncTest {
         assertTrue(ob.due(100_000).isEmpty())
         assertEquals(2, ob.due(301_000).size)
     }
+
+    @Test fun `R1 handler exception returns Rejected INVALID_PAYLOAD instead of throwing`() {
+        val store = MemReceiverStore(setOf("josef"))
+        val throwingHandler = KindHandler { _, _, _, _ -> error("boom") }
+        val r = Receiver("bob", store, mapOf(Kinds.PROJECTION_UPSERT to throwingHandler), AckSink { _, _ -> })
+        val msg = josef.build("bob", Kinds.PROJECTION_UPSERT, "daily", "2026-11-18", 1L, "{}", 1000L)
+        val out = r.receive("josef", Wire.encode(msg), 1000L)
+        val rej = assertIs<Outcome.Rejected>(out)
+        assertEquals(RejectReason.INVALID_PAYLOAD, rej.reason)
+        assertNotNull(rej.ack)
+    }
+
+    @Test fun `SEC-7 BuiltInHandlers rejects unknown objectType`() {
+        val store = MemReceiverStore(setOf("josef"))
+        val r = Receiver("bob", store, BuiltInHandlers.all(), AckSink { _, _ -> })
+        val msg = josef.build("bob", Kinds.PROJECTION_UPSERT, "evil_type", "id1", 1L, "{}", 1000L)
+        val out = r.receive("josef", Wire.encode(msg), 1000L)
+        val rej = assertIs<Outcome.Rejected>(out)
+        assertEquals(RejectReason.INVALID_PAYLOAD, rej.reason)
+    }
 }

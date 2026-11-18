@@ -10,7 +10,9 @@ import app.pulse4.android.reticulum.ReticulumTransport
 import app.pulse4.android.security.KeyVault
 import app.pulse4.android.security.SecretStore
 import app.pulse4.domain.Activity
+import app.pulse4.domain.MetricType
 import app.pulse4.domain.Provider
+import app.pulse4.domain.Quality
 import app.pulse4.domain.Sport
 import app.pulse4.domain.czechName
 import app.pulse4.fit.FitImporter
@@ -26,6 +28,7 @@ import app.pulse4.sharing.AgeProfile
 import app.pulse4.sharing.CircleAdminPolicy
 import app.pulse4.sharing.FamilyLink
 import app.pulse4.sharing.FamilyLinkPolicy
+import app.pulse4.sharing.FamilyLinkStatus
 import app.pulse4.sharing.Field
 import app.pulse4.sharing.Group
 import app.pulse4.sharing.LapIn
@@ -49,6 +52,7 @@ import java.io.File
 import java.security.MessageDigest
 import java.time.LocalDate
 import java.time.ZoneId
+import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.doubleOrNull
 
 /** Ruční, bezzávislostní DI: pro čtyři lidi a jednu aktivitu stačí. Všechno běží v telefonu, žádný vlastní server. */
@@ -67,13 +71,28 @@ class ServiceLocator(internal val context: Context) {
         ReticulumTransport(bridge, settings, db, outbox) {
             planHandlers.handlers() + mapOf(
                 WithingsService.FAMILY_WEIGHT_PUSH_KIND to KindHandler { env, payload, _, nowMs ->
-                    if (!settings.acceptWeightFromParent) return@KindHandler HandlerResult.Applied
+                    if (!settings.acceptWeightFromParent) {
+                        return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
+                    }
+                    val isVerifiedParent = db.familyLinks().allNow().any { row ->
+                        row.status == FamilyLinkStatus.VERIFIED.name &&
+                            row.parentId == env.author &&
+                            row.childId == env.recipient
+                    }
+                    if (!isVerifiedParent) {
+                        return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
+                    }
                     val obs = runCatching {
                         Wire.json.decodeFromString(app.pulse4.domain.MetricObservation.serializer(), payload)
                     }.getOrNull() ?: return@KindHandler HandlerResult.Rejected(RejectReason.INVALID_PAYLOAD)
+                    if (obs.type != MetricType.WEIGHT || obs.value.isNaN() || obs.value !in 1.0..400.0) {
+                        return@KindHandler HandlerResult.Rejected(RejectReason.INVALID_PAYLOAD)
+                    }
                     val savedObs = obs.copy(
+                        id = "parent-weight:${env.author.take(16)}:${obs.startUtcMs}",
+                        provider = Provider.WITHINGS_API,
                         accountId = "withings-family:${env.author.take(8)}",
-                        quality = app.pulse4.domain.Quality.OK,
+                        quality = Quality.OK,
                         deleted = false
                     )
                     db.observations().upsert(listOf(savedObs.toRow()))
@@ -92,16 +111,18 @@ class ServiceLocator(internal val context: Context) {
                     if (existing != null && link.version <= existing.version) {
                         return@KindHandler HandlerResult.Stale
                     }
-                    db.familyLinks().upsert(FamilyLinkRow(link.id, link.parentId, link.childId, link.status.name, link.version, payload))
+                    val sanitized = link.copy(status = FamilyLinkStatus.PENDING, verifiedAtMs = null)
+                    val sanitizedJson = Wire.json.encodeToString(FamilyLink.serializer(), sanitized)
+                    db.familyLinks().upsert(FamilyLinkRow(sanitized.id, sanitized.parentId, sanitized.childId, FamilyLinkStatus.PENDING.name, sanitized.version, sanitizedJson))
                     db.pendingRequests().upsert(
                         PendingRequestRow(
-                            id = link.id,
+                            id = sanitized.id,
                             kind = "FAMILY_LINK_REQUEST",
-                            fromId = link.parentId,
-                            toId = link.childId,
+                            fromId = sanitized.parentId,
+                            toId = sanitized.childId,
                             status = "PENDING",
                             createdAtMs = nowMs,
-                            json = payload,
+                            json = sanitizedJson,
                         )
                     )
                     HandlerResult.Applied
@@ -113,11 +134,19 @@ class ServiceLocator(internal val context: Context) {
                     if (link.parentId != env.recipient || link.childId != env.author) {
                         return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
                     }
+                    if (link.status != FamilyLinkStatus.VERIFIED && link.status != FamilyLinkStatus.REJECTED) {
+                        return@KindHandler HandlerResult.Rejected(RejectReason.INVALID_PAYLOAD)
+                    }
                     val existing = db.familyLinks().get(link.id)
-                    if (existing != null && link.version <= existing.version) {
+                        ?: return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
+                    if (existing.parentId != env.recipient || existing.childId != env.author) {
+                        return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
+                    }
+                    if (link.version <= existing.version) {
                         return@KindHandler HandlerResult.Stale
                     }
-                    db.familyLinks().upsert(FamilyLinkRow(link.id, link.parentId, link.childId, link.status.name, link.version, payload))
+                    val sanitizedJson = Wire.json.encodeToString(FamilyLink.serializer(), link)
+                    db.familyLinks().upsert(FamilyLinkRow(link.id, link.parentId, link.childId, link.status.name, link.version, sanitizedJson))
                     HandlerResult.Applied
                 },
                 Kinds.ADMIN_HANDOVER_REQUEST to KindHandler { env, payload, store, nowMs ->
@@ -151,7 +180,7 @@ class ServiceLocator(internal val context: Context) {
                     }
                     HandlerResult.Applied
                 },
-                Kinds.ADMIN_HANDOVER_ACCEPT to KindHandler { env, payload, store, _ ->
+                Kinds.ADMIN_HANDOVER_ACCEPT to KindHandler { env, payload, store, nowMs ->
                     val g = runCatching {
                         Wire.json.decodeFromString(Group.serializer(), payload)
                     }.getOrNull() ?: return@KindHandler HandlerResult.Rejected(RejectReason.INVALID_PAYLOAD)
@@ -160,10 +189,25 @@ class ServiceLocator(internal val context: Context) {
                     }
                     val existing = store.group(g.id)
                     if (existing != null) {
-                        val permitted = env.author in existing.effectiveAdmins ||
-                            existing.pendingAdminHandover?.targetMemberId == env.author
-                        if (!permitted) return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
-                        if (g.version <= existing.version) return@KindHandler HandlerResult.Stale
+                        if (env.author in existing.effectiveAdmins) {
+                            if (g.version <= existing.version) return@KindHandler HandlerResult.Stale
+                        } else {
+                            val handover = existing.pendingAdminHandover
+                            val validHandover = handover != null &&
+                                handover.targetMemberId == env.author &&
+                                nowMs <= handover.expiresAtMs &&
+                                handover.initiatedBy in existing.effectiveAdmins &&
+                                env.author in existing.members
+                            if (!validHandover) return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
+                            if (g.version <= existing.version) return@KindHandler HandlerResult.Stale
+                            val expectedKeep = CircleAdminPolicy.acceptHandover(existing, env.author, nowMs, removeInitiator = false)
+                            val expectedRemove = CircleAdminPolicy.acceptHandover(existing, env.author, nowMs, removeInitiator = true)
+                            val matchesKeep = expectedKeep != null && g == expectedKeep.copy(version = g.version)
+                            val matchesRemove = expectedRemove != null && g == expectedRemove.copy(version = g.version)
+                            if (!matchesKeep && !matchesRemove) {
+                                return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
+                            }
+                        }
                     } else if (env.author !in g.effectiveAdmins) {
                         return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
                     }
@@ -326,8 +370,10 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
             SyncArea.STEPS_STRESS to app.pulse4.domain.MetricType.STEPS,
         )
         for ((area, mType) in areaCheckMetrics) {
-            if (sl.db.observations().latest(mType.name) == null) {
-                garminStates.put(area, app.pulse4.provider.AreaState())
+            val backfillDone = settings.getRaw("garmin.backfillDone.${area.name}") == "true"
+            if (!backfillDone && sl.db.observations().latest(mType.name) == null) {
+                val prev = garminStates.get(area)
+                garminStates.put(area, prev.copy(cursorMs = null))
             }
         }
         val fetcher = GarminPersonalFetcher(
@@ -338,22 +384,31 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
             },
             accountId = settings.accountId, zoneId = settings.zoneId,
             initialDays = 28,
-            onRawResponse = { spec, body -> saveRaw(spec.metric.name, body, nowMs) },
         )
         val engine = SyncEngine(fetcher, { area, batch ->
             // Celá dávka v jedné transakci; kurzor se posune až po commitu (SyncEngine).
+            val excluded = sl.db.exclusions().allIds().toHashSet()
+            val allowed = batch.items.filter { it.id !in excluded }
             sl.db.runInTransaction {
                 if (area == SyncArea.SLEEP) {
-                    val dates = batch.items.mapNotNull { it.localDate }.distinct()
+                    val dates = allowed.mapNotNull { it.localDate }.distinct()
                     if (dates.isNotEmpty()) {
                         sl.db.observations().deleteLegacyGarminSleepForDates(dates)
                     }
                 }
-                sl.db.observations().upsert(batch.items.map { it.toRow() })
+                if (allowed.isNotEmpty()) {
+                    sl.db.observations().upsert(allowed.map { it.toRow() })
+                }
             }
         }, garminStates)
         val res = engine.singleFlight(settings.accountId) {
-            SyncArea.entries.filter { a -> cfg.endpoints.any { it.area == a } }.associateWith { area -> engine.runArea(area, nowMs) }
+            SyncArea.entries.filter { a -> cfg.endpoints.any { it.area == a } }.associateWith { area ->
+                val r = engine.runArea(area, nowMs)
+                if (r is AreaResult.Success) {
+                    settings.put("garmin.backfillDone.${area.name}", "true")
+                }
+                r
+            }
         }
         val actRes = runCatching {
             val count = syncGarminActivities(nowMs)
@@ -399,17 +454,33 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
         }
     }
 
-    private fun extractFitFromZipOrRaw(bytes: ByteArray): ByteArray? {
-        if (bytes.size < 4) return null
+    internal fun extractFitFromZipOrRaw(bytes: ByteArray): ByteArray? {
+        val maxFitBytes = 25 * 1024 * 1024
+        val maxZipEntries = 32
+        if (bytes.size < 4 || bytes.size > maxFitBytes) return null
         if (bytes[0] == 0x50.toByte() && bytes[1] == 0x4B.toByte()) {
-            val zis = java.util.zip.ZipInputStream(java.io.ByteArrayInputStream(bytes))
-            var entry = zis.nextEntry
-            while (entry != null) {
-                if (entry.name.endsWith(".fit", ignoreCase = true)) {
-                    return zis.readBytes()
+            java.util.zip.ZipInputStream(java.io.ByteArrayInputStream(bytes)).use { zis ->
+                var entries = 0
+                var entry = zis.nextEntry
+                while (entry != null && entries < maxZipEntries) {
+                    entries++
+                    if (!entry.isDirectory && entry.name.endsWith(".fit", ignoreCase = true)) {
+                        val out = java.io.ByteArrayOutputStream()
+                        val buf = ByteArray(8192)
+                        var total = 0
+                        while (true) {
+                            val n = zis.read(buf)
+                            if (n <= 0) break
+                            total += n
+                            if (total > maxFitBytes) return null
+                            out.write(buf, 0, n)
+                        }
+                        return out.toByteArray()
+                    }
+                    entry = zis.nextEntry
                 }
-                entry = zis.nextEntry
             }
+            return null
         }
         if (bytes.size > 14) {
             val tag = String(bytes.sliceArray(8..11), Charsets.US_ASCII)
@@ -418,7 +489,7 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
         return null
     }
 
-    private fun buildActivityFromGarminAndFit(
+    internal fun buildActivityFromGarminAndFit(
         id: String,
         provider: Provider,
         extId: String?,
@@ -492,12 +563,6 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
         val pwrZonesFromJson = (1..5).mapNotNull { z -> dbl("powerTimeInZone_$z") }
         val pwrZones = if (pwrZonesFromJson.size == 5 && pwrZonesFromJson.any { it > 0.0 }) {
             pwrZonesFromJson
-        } else if (pts.size >= 2 && pts.any { it.powerW != null }) {
-            val bounds = listOf(180.0, 230.0, 280.0, 330.0)
-            app.pulse4.analytics.Zones.timeInZones(
-                pts.map { it.tMs to it.powerW?.toDouble() },
-                app.pulse4.analytics.Zones.ZoneSet(bounds)
-            ).toList()
         } else emptyList()
 
         val lapsList = if (parsed != null && parsed.laps.isNotEmpty()) {
@@ -518,31 +583,6 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
                     avgCadence = l.avgCadence,
                     avgPowerW = l.avgPowerW,
                     caloriesKcal = l.caloriesKcal,
-                )
-            }
-        } else if (dist != null && dist >= 1000.0 && moving > 0.0) {
-            // Syntetizovat 1km kola ze souhrnu, pokud není rozpad kol z FITu
-            val fullKm = (dist / 1000.0).toInt().coerceIn(1, 50)
-            val basePace = moving / (dist / 1000.0)
-            var tAcc = startMs
-            (1..fullKm).map { k ->
-                val factor = 1.0 + kotlin.math.sin(k * 1.3) * 0.035
-                val lapDur = basePace * factor
-                val lapStart = tAcc
-                val lapEnd = tAcc + (lapDur * 1000).toLong()
-                tAcc = lapEnd
-                app.pulse4.domain.ActivityLap(
-                    index = k,
-                    startUtcMs = lapStart,
-                    endUtcMs = lapEnd,
-                    durationS = lapDur,
-                    distanceM = 1000.0,
-                    avgHeartRate = avgHr?.let { (it + kotlin.math.sin(k.toDouble()) * 4).toInt() },
-                    maxHeartRate = maxHr,
-                    avgSpeedMps = 1000.0 / lapDur,
-                    ascentM = ascent?.div(fullKm.toDouble()),
-                    avgCadence = dbl("averageRunningCadenceInStepsPerMinute") ?: parsed?.avgCadence,
-                    avgPowerW = (dbl("avgPower") ?: parsed?.avgPowerW)?.toInt()
                 )
             }
         } else emptyList()
@@ -963,7 +1003,7 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
             val rawFit = sl.garminExt.downloadActivityFit(actId)
             if (rawFit != null && rawFit.isNotEmpty()) {
                 val fit = extractFitFromZipOrRaw(rawFit)
-                if (fit != null && importFit(fit, System.currentTimeMillis(), garminObj = null) is FitImportResult.Imported) {
+                if (fit != null && importFit(fit, System.currentTimeMillis(), garminObj = null, targetId = actKey) is FitImportResult.Imported) {
                     return@runCatching true
                 }
             }
@@ -1073,7 +1113,12 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
     }
 
     /** Import FIT (stažený nebo vybraný ručně). Chybný soubor se zachová k diagnostice, ale historii nerozbije. */
-    fun importFit(bytes: ByteArray, nowMs: Long, garminObj: kotlinx.serialization.json.JsonObject? = null): FitImportResult {
+    fun importFit(
+        bytes: ByteArray,
+        nowMs: Long,
+        garminObj: kotlinx.serialization.json.JsonObject? = null,
+        targetId: String? = null,
+    ): FitImportResult {
         val hash = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
         val dir = File(context.noBackupFilesDir, "fit").apply { mkdirs() }
         // Příloha mimo databázi: autentizované šifrování přes Keystore.
@@ -1083,12 +1128,27 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
             is FitResult.Ok -> {
                 val p = r.parsed
                 val actId = garminObj?.get("activityId")?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }
-                val id = if (actId != null) "garmin-$actId" else "fit-$hash"
+                val id = targetId ?: if (actId != null) "garmin-$actId" else "fit-$hash"
+                val existing = sl.db.activities().get(id)
+                if (existing != null && targetId != null) {
+                    if (p.points.isNotEmpty()) {
+                        sl.db.activities().upsertTrack(
+                            TrackRow(
+                                id,
+                                json.encodeToString(
+                                    kotlinx.serialization.builtins.ListSerializer(app.pulse4.domain.TrackPoint.serializer()),
+                                    p.points
+                                )
+                            )
+                        )
+                    }
+                    return FitImportResult.Imported(id)
+                }
                 val prov = if (garminObj != null) Provider.GARMIN_PERSONAL else Provider.MANUAL
                 val a = buildActivityFromGarminAndFit(
                     id = id,
                     provider = prov,
-                    extId = actId ?: hash,
+                    extId = actId ?: id.removePrefix("garmin-").takeIf { id.startsWith("garmin-") } ?: hash,
                     obj = garminObj,
                     parsed = p,
                     nowMs = nowMs
@@ -1108,7 +1168,9 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
     /** Doplní normalizované sloupce souhrnu (title, distance, time, calories atd.) u starších záznamů bez nutnosti číst JSON v seznamu. */
     fun backfillActivitySummaries(): Int {
         var updated = 0
-        while (true) {
+        var iterations = 0
+        while (iterations < 100) {
+            iterations++
             val batch = sl.db.activities().unbackfilled(100)
             if (batch.isEmpty()) break
             sl.db.runInTransaction {
@@ -1116,7 +1178,7 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
                     val a = runCatching { Wire.json.decodeFromString(Activity.serializer(), item.json) }.getOrNull()
                     if (a != null) {
                         sl.db.activities().updateSummary(
-                            id = a.id,
+                            id = item.id,
                             title = a.title?.takeIf { it.isNotBlank() } ?: a.sport.czechName(),
                             distanceM = a.distanceM,
                             movingTimeS = a.movingTimeS ?: a.totalTimeS,
@@ -1132,6 +1194,8 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
                             zoneId = a.zoneId
                         )
                         updated++
+                    } else {
+                        sl.db.activities().markBackfillFailed(item.id)
                     }
                 }
             }
@@ -1158,10 +1222,25 @@ class ShareService(private val sl: ServiceLocator) {
     fun familyLinks(): List<FamilyLink> = sl.db.familyLinks().allNow().map { json.decodeFromString(FamilyLink.serializer(), it.json) }
     fun pendingRequests(): List<PendingRequestRow> = sl.db.pendingRequests().pendingNow()
 
-    fun saveGrant(g: ShareGrant) = sl.db.grants().upsert(GrantRow(g.id, !g.active, json.encodeToString(ShareGrant.serializer(), g)))
+    @Deprecated("ENG-2: use saveGrantWithPolicy; will become private once external callers are removed")
+    fun saveGrant(g: ShareGrant) {
+        if (g.active) {
+            saveGrantWithPolicy(g).getOrThrow()
+        } else {
+            saveGrantDirect(g)
+        }
+    }
+
+    private fun saveGrantDirect(g: ShareGrant) =
+        sl.db.grants().upsert(GrantRow(g.id, !g.active, json.encodeToString(ShareGrant.serializer(), g)))
+
     fun saveGroup(g: Group) = sl.db.grants().upsertGroup(GroupRow(g.id, g.version, json.encodeToString(Group.serializer(), g)))
 
     fun saveGrantWithPolicy(grant: ShareGrant, guardianCoConsentAtMs: Long? = null): Result<ShareGrant> {
+        if (!grant.active) {
+            saveGrantDirect(grant)
+            return Result.success(grant)
+        }
         val self = sl.bridge.ensureStarted().deliveryHash
         val ageProfile = AgeProfile.valueOf(sl.settings.ownAgeProfile)
         if (!FamilyLinkPolicy.canActivateShareGrant(self, ageProfile, grant, familyLinks(), guardianCoConsentAtMs)) {
@@ -1169,7 +1248,7 @@ class ShareService(private val sl: ServiceLocator) {
                 IllegalStateException("Sdílení nelze aktivovat: pro nezletilý účet je nutná ověřená rodinná vazba a souhlas zákonného zástupce.")
             )
         }
-        saveGrant(grant)
+        saveGrantDirect(grant)
         return Result.success(grant)
     }
 
@@ -1447,6 +1526,7 @@ class ShareService(private val sl: ServiceLocator) {
             when (sl.outbox.enqueue(item)) {
                 is EnqueueResult.Queued -> {
                     sl.sentLedger.record(e.recipient, p.objectKey, e.objectVersion, p.contentHash)
+                    recordDeliveredKey(p.grantId, e.recipient, p.objectKey)
                     pendingByRecipient[e.recipient] = pendingFor(e.recipient) + 1
                     queued++
                 }
@@ -1484,7 +1564,7 @@ class ShareService(private val sl: ServiceLocator) {
                 android.util.Log.i("Pulse4Sync", "act=${act.id}, grant=${g.id}, scope=${g.scope}, projIsNull=${proj == null}")
                 if (proj == null) continue
                 val payload = json.encodeToString(app.pulse4.sharing.ActivityProjection.serializer(), proj)
-                val hash = Wire.sha256Hex(payload.toByteArray())
+                val hash = Wire.sha256Hex("${g.id}:$payload".toByteArray())
                 val recipients = app.pulse4.sharing.MembershipPolicy.effectiveRecipients(g, g.groupId?.let(groups()::get))
                 android.util.Log.i("Pulse4Sync", "act=${act.id}, payloadLen=${payload.length}, recipients=$recipients")
                 for (r in recipients) {
@@ -1506,6 +1586,7 @@ class ShareService(private val sl: ServiceLocator) {
                     when (res) {
                         is EnqueueResult.Queued -> {
                             sl.sentLedger.record(r, key, e.objectVersion, hash)
+                            recordDeliveredKey(g.id, r, key)
                             pendingByRecipient[r] = curPending + 1
                             queued++
                         }
@@ -1560,6 +1641,30 @@ class ShareService(private val sl: ServiceLocator) {
         return n
     }
 
+    private val deliveredKeysSerializer = kotlinx.serialization.builtins.MapSerializer(
+        String.serializer(),
+        kotlinx.serialization.builtins.SetSerializer(String.serializer())
+    )
+
+    private fun recordDeliveredKey(grantId: String, recipient: String, objectKey: String) {
+        val k = "delivered_keys.$grantId"
+        val current = sl.settings.getRaw(k)?.let {
+            runCatching { json.decodeFromString(deliveredKeysSerializer, it) }.getOrNull()
+        }.orEmpty().toMutableMap()
+        val updatedSet = (current[recipient].orEmpty() + objectKey)
+        if (updatedSet != current[recipient]) {
+            current[recipient] = updatedSet
+            sl.settings.put(k, json.encodeToString(deliveredKeysSerializer, current))
+        }
+    }
+
+    private fun deliveredKeysForGrant(grantId: String): Map<String, Set<String>> {
+        val k = "delivered_keys.$grantId"
+        return sl.settings.getRaw(k)?.let {
+            runCatching { json.decodeFromString(deliveredKeysSerializer, it) }.getOrNull()
+        }.orEmpty()
+    }
+
     /**
      * Odvolání: zruší čekající položky, odešle požadavek na odstranění už doručených kopií a vrátí plán s popisem omezení,
      * který UI musí uživateli ukázat přesně (doručená data nelze vzít zpět).
@@ -1568,15 +1673,52 @@ class ShareService(private val sl: ServiceLocator) {
         val row = sl.db.grants().get(grantId) ?: return null
         val g = json.decodeFromString(ShareGrant.serializer(), row.json)
         val self = sl.bridge.ensureStarted().deliveryHash
-        val sentRows = sl.db.outbox().all().filter { it.grantId == grantId && it.state == "ACKED" }
-        val delivered = g.recipients.associateWith { r ->
-            sentRows.filter { it.recipient == r }.map { "${it.objectType}/${it.objectId}" }.distinct()
+        val allOutbox = sl.db.outbox().all()
+        val outboxSentRows = allOutbox.filter {
+            it.grantId == grantId && it.state !in setOf("CANCELLED", "SUPERSEDED")
         }
-        val inNode = sl.db.outbox().all().any { it.grantId == grantId && it.state == "STORED_IN_PROPAGATION" }
+        val durableDelivered = deliveredKeysForGrant(grantId)
+        val allRecipients = (g.recipients + durableDelivered.keys + outboxSentRows.map { it.recipient }).distinct()
+        val delivered = allRecipients.associateWith { r ->
+            val fromOutbox = outboxSentRows.filter { it.recipient == r }.map { "${it.objectType}/${it.objectId}" }
+            val fromDurable = durableDelivered[r].orEmpty()
+            (fromOutbox + fromDurable).distinct()
+        }
+        val inNode = allOutbox.any { it.grantId == grantId && it.state == "STORED_IN_PROPAGATION" }
         val plan = Revocation.plan(g, nowMs, delivered, inNode)
-        saveGrant(plan.revokedGrant)
+        saveGrantDirect(plan.revokedGrant)
         sl.outbox.cancelForGrant(plan.cancelQueuedForGrantId)
+        for ((recipient, keys) in delivered) {
+            for (key in keys) {
+                sl.db.inbox().deleteSent(recipient, key)
+            }
+        }
+        sl.settings.put("delivered_keys.$grantId", "{}")
+        val allGroups = groups()
+        val otherActiveGrants = grants().filter { it.id != grantId && it.active && it.ownerId == self }
+        val zone = ZoneId.of(sl.settings.zoneId)
+        fun isCoveredByOtherGrant(recipient: String, objectKey: String): Boolean {
+            return otherActiveGrants.any { other ->
+                val recipients = app.pulse4.sharing.MembershipPolicy.effectiveRecipients(other, other.groupId?.let(allGroups::get))
+                if (recipient !in recipients) return@any false
+                when {
+                    objectKey.startsWith("daily/") -> {
+                        val date = runCatching { LocalDate.parse(objectKey.removePrefix("daily/")) }.getOrNull() ?: return@any false
+                        other.fields.any { it.category != app.pulse4.sharing.Category.ACTIVITY } && other.scope.covers(date)
+                    }
+                    objectKey.startsWith("activity/") -> {
+                        if (other.fields.none { it.category == app.pulse4.sharing.Category.ACTIVITY }) return@any false
+                        val actDate = sl.db.activities().get(objectKey.removePrefix("activity/"))?.let {
+                            java.time.Instant.ofEpochMilli(it.startUtcMs).atZone(zone).toLocalDate()
+                        }
+                        actDate == null || other.scope.covers(actDate)
+                    }
+                    else -> false
+                }
+            }
+        }
         for (rq in plan.removalRequests) {
+            if (isCoveredByOtherGrant(rq.recipient, rq.objectKey)) continue
             val (type, id) = rq.objectKey.split('/', limit = 2)
             val msg = MessageBuilder(self).build(rq.recipient, Kinds.PROJECTION_REMOVE, type, id, nowMs, "{}", nowMs, grantRef = grantId)
             val e = msg.envelope

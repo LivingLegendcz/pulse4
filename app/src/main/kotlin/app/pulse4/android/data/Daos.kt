@@ -19,7 +19,9 @@ interface ObservationDao {
     @Query("SELECT * FROM observation WHERE deleted = 0 AND type = :type AND localDate BETWEEN :from AND :to ORDER BY startUtcMs") fun series(type: String, from: String, to: String): Flow<List<ObservationRow>>
     @Query("UPDATE observation SET deleted = 1 WHERE id IN (:ids)") fun markDeleted(ids: List<String>)
     @Query("SELECT id FROM observation WHERE provider = :provider AND deleted = 0 AND startUtcMs BETWEEN :from AND :to") fun idsIn(provider: String, from: Long, to: Long): List<String>
-    @Query("SELECT id FROM observation WHERE provider = :provider AND accountId = :accountId AND (origin IS NULL OR origin != 'csv') AND id NOT LIKE 'family-%' AND deleted = 0 AND startUtcMs BETWEEN :from AND :to") fun idsInForAccount(provider: String, accountId: String, from: Long, to: Long): List<String>
+    @Query("SELECT id FROM observation WHERE provider = :provider AND accountId = :accountId AND (origin IS NULL OR origin NOT LIKE '%csv') AND id NOT LIKE 'family-%' AND deleted = 0 AND startUtcMs BETWEEN :from AND :to") fun idsInForAccount(provider: String, accountId: String, from: Long, to: Long): List<String>
+    @Query("SELECT id FROM observation WHERE provider = :provider AND accountId = :accountId AND deleted = 0") fun idsForAccount(provider: String, accountId: String): List<String>
+    @Query("DELETE FROM observation WHERE type = 'ECG'") fun deleteLegacyCombinedEcg(): Int
     @Query("SELECT * FROM observation WHERE type IN (:types) AND localDate BETWEEN :from AND :to ORDER BY startUtcMs DESC") fun ofTypesIncludingDeleted(types: List<String>, from: String, to: String): List<ObservationRow>
     @Query("UPDATE observation SET quality = 'OK' WHERE id = :id") fun confirm(id: String)
     @Query("SELECT DISTINCT localDate FROM observation WHERE deleted = 0 AND localDate IS NOT NULL AND localDate BETWEEN :from AND :to") fun datesWithData(from: String, to: String): List<String>
@@ -44,6 +46,7 @@ interface ActivityDao {
     @Query("SELECT id, startUtcMs, sport, title, distanceM, movingTimeS, ascentM, avgHeartRate, maxHeartRate, caloriesKcal, aerobicTe, anaerobicTe, trainingLoad, avgPowerW, avgCadence, zoneId, (CASE WHEN title IS NULL THEN json ELSE NULL END) AS json FROM activity ORDER BY startUtcMs DESC LIMIT :limit") fun recentSummaries(limit: Int): Flow<List<ActivitySummaryRow>>
     @Query("SELECT id, startUtcMs, sport, title, distanceM, movingTimeS, ascentM, avgHeartRate, maxHeartRate, caloriesKcal, aerobicTe, anaerobicTe, trainingLoad, avgPowerW, avgCadence, zoneId, (CASE WHEN title IS NULL THEN json ELSE NULL END) AS json FROM activity ORDER BY startUtcMs DESC LIMIT :limit") fun recentSummariesNow(limit: Int): List<ActivitySummaryRow>
     @Query("SELECT id, json FROM activity WHERE title IS NULL LIMIT :limit") fun unbackfilled(limit: Int): List<IdAndJson>
+    @Query("UPDATE activity SET title = sport WHERE id = :id AND title IS NULL") fun markBackfillFailed(id: String)
     @Query("UPDATE activity SET title = :title, distanceM = :distanceM, movingTimeS = :movingTimeS, ascentM = :ascentM, avgHeartRate = :avgHeartRate, maxHeartRate = :maxHeartRate, caloriesKcal = :caloriesKcal, aerobicTe = :aerobicTe, anaerobicTe = :anaerobicTe, trainingLoad = :trainingLoad, avgPowerW = :avgPowerW, avgCadence = :avgCadence, zoneId = :zoneId WHERE id = :id")
     fun updateSummary(
         id: String,
@@ -125,6 +128,7 @@ interface InboxDao {
     @Query("SELECT * FROM received_object WHERE author = :a AND objectType = :t") fun objectsOf(a: String, t: String): Flow<List<ReceivedRow>>
     @Query("SELECT * FROM sent_projection WHERE recipient = :r AND objectKey = :k") fun sent(r: String, k: String): SentRow?
     @Insert(onConflict = OnConflictStrategy.REPLACE) fun putSent(row: SentRow)
+    @Query("DELETE FROM sent_projection WHERE recipient = :r AND objectKey = :k") fun deleteSent(r: String, k: String)
     @Query("DELETE FROM received_object WHERE author = :a") fun removeAllFrom(a: String)
     @Query("SELECT MAX(appliedAtMs) FROM receipt WHERE author = :a") fun lastReceived(a: String): Long?
     @Query("DELETE FROM received_object") fun deleteAll()
@@ -161,6 +165,7 @@ interface SettingDao {
 @Dao
 interface ExclusionDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE) fun put(row: ExcludedRow)
+    @Query("SELECT observationId FROM excluded_measurement") fun allIds(): List<String>
     @Query("SELECT COUNT(*) FROM excluded_measurement WHERE observationId = :id") fun count(id: String): Int
     @Query("DELETE FROM excluded_measurement WHERE observationId = :id") fun remove(id: String)
 }

@@ -105,6 +105,7 @@ class HealthConnectSource(private val context: Context, private val sl: ServiceL
         try {
             var mode = HealthConnectMapper.plan(token != null, tokenExpired = false)
             var applied: app.pulse4.withings.HcApplied
+            var tokenToSave: String? = null
             if (token != null) {
                 val changes = ArrayList<HcChange>()
                 var t: String = token; var expired = false
@@ -129,15 +130,21 @@ class HealthConnectSource(private val context: Context, private val sl: ServiceL
                     mode = HealthConnectMapper.plan(true, true)
                     val from = nowMs - historyDays * 86_400_000L
                     applied = HealthConnectMapper.reread(readWindow(), db.observations().idsIn(Provider.HEALTH_CONNECT.name, from, nowMs).toSet(), zone, origins)
-                    s.healthConnectToken = newToken()
-                } else { applied = HealthConnectMapper.apply(changes, zone, origins); s.healthConnectToken = t }
+                    tokenToSave = newToken()
+                } else {
+                    applied = HealthConnectMapper.apply(changes, zone, origins)
+                    tokenToSave = t
+                }
             } else {
                 applied = HealthConnectMapper.reread(readWindow(), emptySet(), zone, origins)
-                s.healthConnectToken = newToken()
+                tokenToSave = newToken()
             }
             db.runInTransaction {
                 db.observations().upsert(applied.upserts.map { it.toRow() })
                 if (applied.deletedObservationIds.isNotEmpty()) db.observations().markDeleted(applied.deletedObservationIds)
+            }
+            if (tokenToSave != null) {
+                s.healthConnectToken = tokenToSave
             }
             // Stav po zdroji (čas posledního úspěchu) – oddělený od Garminu.
             RoomAreaStateStore(db, "hc.").put(SyncArea.WEIGHT, AreaState(null, nowMs, nowMs, null, null))

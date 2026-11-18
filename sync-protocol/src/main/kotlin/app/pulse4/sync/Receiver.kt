@@ -1,5 +1,6 @@
 package app.pulse4.sync
 
+import app.pulse4.sharing.CircleAdminPolicy
 import app.pulse4.sharing.Group
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -85,14 +86,21 @@ class Receiver(
             when {
                 seen != null && seen == env.contentHash -> Result.Dup
                 seen != null -> Result.Conflict
-                else -> when (val r = handler.handle(env, msg.payload, store, nowMs)) {
-                    HandlerResult.Applied, HandlerResult.Stale -> {
-                        store.recordReceipt(env.eventId, env.contentHash, env.author, nowMs)
-                        if (r == HandlerResult.Applied) Result.Ok else Result.StaleOk
+                else -> {
+                    val handled = try {
+                        handler.handle(env, msg.payload, store, nowMs)
+                    } catch (_: Exception) {
+                        HandlerResult.Rejected(RejectReason.INVALID_PAYLOAD)
                     }
-                    // Bez záznamu přijetí: pozdější doručení chybějící revize může událost ještě aplikovat.
-                    HandlerResult.NeedSnapshot -> Result.Gap
-                    is HandlerResult.Rejected -> Result.Reject(r.reason)
+                    when (handled) {
+                        HandlerResult.Applied, HandlerResult.Stale -> {
+                            store.recordReceipt(env.eventId, env.contentHash, env.author, nowMs)
+                            if (handled == HandlerResult.Applied) Result.Ok else Result.StaleOk
+                        }
+                        // Bez záznamu přijetí: pozdější doručení chybějící revize může událost ještě aplikovat.
+                        HandlerResult.NeedSnapshot -> Result.Gap
+                        is HandlerResult.Rejected -> Result.Reject(handled.reason)
+                    }
                 }
             }
         }
@@ -138,12 +146,16 @@ class Receiver(
 /** Vestavěné obsluhy druhů událostí, které nepotřebují znalost plánů. */
 object BuiltInHandlers {
     private val json = Json { ignoreUnknownKeys = true }
+    private val allowedProjectionTypes = setOf("daily", "activity")
 
     /**
      * Projekce o autorovi smí publikovat jen on sám: klíč úložiště vždy obsahuje autora z ověřené obálky,
      * takže cizí objekt nelze přepsat. Starší verze nikdy nevrací stav zpět.
      */
     val projectionUpsert = KindHandler { env, payload, store, _ ->
+        if (env.objectType !in allowedProjectionTypes || env.objectId.isBlank() || env.objectId.length > 128) {
+            return@KindHandler HandlerResult.Rejected(RejectReason.INVALID_PAYLOAD)
+        }
         if (runCatching { json.parseToJsonElement(payload) }.isFailure) return@KindHandler HandlerResult.Rejected(RejectReason.INVALID_PAYLOAD)
         val cur = store.objectVersion(env.author, env.objectType, env.objectId)
         if (cur != null && env.objectVersion <= cur) return@KindHandler HandlerResult.Stale
@@ -152,6 +164,9 @@ object BuiltInHandlers {
     }
 
     val projectionRemove = KindHandler { env, _, store, _ ->
+        if (env.objectType !in allowedProjectionTypes || env.objectId.isBlank() || env.objectId.length > 128) {
+            return@KindHandler HandlerResult.Rejected(RejectReason.INVALID_PAYLOAD)
+        }
         val cur = store.objectVersion(env.author, env.objectType, env.objectId)
         if (cur != null && env.objectVersion < cur) return@KindHandler HandlerResult.Stale
         store.removeObject(env.author, env.objectType, env.objectId, env.objectVersion)
@@ -159,7 +174,7 @@ object BuiltInHandlers {
     }
 
     /** Změnu členství podepisuje správce nebo cíl probíhajícího předání; samo o sobě nerozšiřuje souhlas vlastníků dat. */
-    val membershipUpdate = KindHandler { env, payload, store, _ ->
+    val membershipUpdate = KindHandler { env, payload, store, nowMs ->
         val g = runCatching { json.decodeFromString<Group>(payload) }.getOrNull()
             ?: return@KindHandler HandlerResult.Rejected(RejectReason.INVALID_PAYLOAD)
         if (!g.dissolved && g.effectiveAdmins.isEmpty()) {
@@ -167,10 +182,25 @@ object BuiltInHandlers {
         }
         val existing = store.group(g.id)
         if (existing != null) {
-            val permitted = env.author in existing.effectiveAdmins ||
-                existing.pendingAdminHandover?.targetMemberId == env.author
-            if (!permitted) return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
-            if (g.version <= existing.version) return@KindHandler HandlerResult.Stale
+            if (env.author in existing.effectiveAdmins) {
+                if (g.version <= existing.version) return@KindHandler HandlerResult.Stale
+            } else {
+                val handover = existing.pendingAdminHandover
+                val validHandover = handover != null &&
+                    handover.targetMemberId == env.author &&
+                    nowMs <= handover.expiresAtMs &&
+                    handover.initiatedBy in existing.effectiveAdmins &&
+                    env.author in existing.members
+                if (!validHandover) return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
+                if (g.version <= existing.version) return@KindHandler HandlerResult.Stale
+                val expectedKeep = CircleAdminPolicy.acceptHandover(existing, env.author, nowMs, removeInitiator = false)
+                val expectedRemove = CircleAdminPolicy.acceptHandover(existing, env.author, nowMs, removeInitiator = true)
+                val matchesKeep = expectedKeep != null && g == expectedKeep.copy(version = g.version)
+                val matchesRemove = expectedRemove != null && g == expectedRemove.copy(version = g.version)
+                if (!matchesKeep && !matchesRemove) {
+                    return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
+                }
+            }
         } else {
             if (env.author !in g.effectiveAdmins) return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
         }

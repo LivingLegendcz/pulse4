@@ -53,7 +53,18 @@ class PulseSyncService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val sl = (applicationContext as Pulse4App).services
-        promoteToForeground("Reticulum připraveno na pozadí")
+        val promoted = try {
+            promoteToForeground("Reticulum připraveno na pozadí")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "startForeground failed; falling back to WorkManager", e)
+            stopSelf()
+            Scheduler.schedulePeriodic(applicationContext)
+            false
+        }
+        if (!promoted) return START_NOT_STICKY
+
+        lastHeartbeatAtMs.set(System.currentTimeMillis())
 
         if (intent?.action == ACTION_SYNC_NOW) {
             wakeSignal.trySend(Unit)
@@ -85,15 +96,14 @@ class PulseSyncService : Service() {
                 }
 
                 val now = System.currentTimeMillis()
+                lastHeartbeatAtMs.set(now)
                 val online = hasActiveNetwork()
 
                 // 1. Periodické stahování zdravotních dat ze zdrojů (každých 15 min, jen když je síť).
                 if (online && now - lastImportAtMs >= IMPORT_INTERVAL_MS) {
                     lastImportAtMs = now
-                    runCatching {
-                        sl.garminExt.ensureSession()
-                        sl.importService.runAll(now)
-                    }
+                    runCatching { sl.garminExt.ensureSession() }
+                    runCatching { sl.importService.runAll(now) }
                     runCatching {
                         sl.withings.renewSession()
                     }
@@ -131,6 +141,7 @@ class PulseSyncService : Service() {
     }
 
     override fun onDestroy() {
+        lastHeartbeatAtMs.set(0L)
         wakeSignal.close()
         loopJob?.cancel()
         scope.cancel()
@@ -223,7 +234,14 @@ class PulseSyncService : Service() {
         private const val NOTIFICATION_ID = 4109
         private const val IMPORT_INTERVAL_MS = 15L * 60_000L
         private const val IDLE_TICK_DELAY_MS = 10L * 60_000L
+        private const val HEARTBEAT_FRESH_MS = 20L * 60_000L
+        private val lastHeartbeatAtMs = java.util.concurrent.atomic.AtomicLong(0L)
         const val ACTION_SYNC_NOW = "app.pulse4.android.action.SYNC_NOW"
+
+        fun hasFreshHeartbeat(nowMs: Long): Boolean {
+            val ts = lastHeartbeatAtMs.get()
+            return ts > 0L && nowMs - ts in 0L..HEARTBEAT_FRESH_MS
+        }
 
         /**
          * Bezpečně spustí nebo zastaví službu podle nastavení uživatele (`backgroundServiceEnabled`).

@@ -484,12 +484,16 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
             }
             sl.secrets.putString("withings.full_backfill_v2", "1")
         }
-        if (sl.secrets.getString("withings.ecg_typed_v1") == null) {
-            val legacyEcgIds = db.observations().latestRows(MetricType.ECG.name, 500).map { it.id }
+        if (sl.secrets.getString("withings.ecg_typed_v2") == null) {
+            val legacyEcgIds = db.observations().latestRows(MetricType.ECG.name, 500)
+                .filter { it.provider == Provider.WITHINGS_API.name }
+                .map { it.id }
             if (legacyEcgIds.isNotEmpty()) {
                 db.observations().markDeleted(legacyEcgIds)
             }
-            sl.secrets.putString("withings.ecg_typed_v1", "1")
+            // Jednorázový reset kurzoru Withings, aby se historie ECG znovu naimportovala do typovaných ECG_* řádků.
+            stateStore.put(SyncArea.WEIGHT, app.pulse4.provider.AreaState())
+            sl.secrets.putString("withings.ecg_typed_v2", "1")
         }
         val activeUserId = loadWebSession()?.primaryUserId?.toString()
         val fetcher = WithingsWebFetcher(

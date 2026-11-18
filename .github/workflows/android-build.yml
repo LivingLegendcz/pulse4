@@ -65,15 +65,23 @@ jobs:
           test -s "$APK"
           AAPT2="$(find "$ANDROID_HOME/build-tools" -name aapt2 -type f | sort -V | tail -n1)"
           test -x "$AAPT2"
-          if "$AAPT2" dump badging "$APK" | grep -q "application-debuggable"; then
+          TMP_DIR="$(mktemp -d)"
+          trap 'rm -rf "$TMP_DIR"' EXIT
+
+          "$AAPT2" dump badging "$APK" > "$TMP_DIR/badging.txt"
+          if grep -q "application-debuggable" "$TMP_DIR/badging.txt"; then
             echo "::error::Release APK is debuggable"
             exit 1
           fi
-          if "$AAPT2" dump xmltree "$APK" --file AndroidManifest.xml | grep -q "DebugCommandReceiver"; then
+
+          "$AAPT2" dump xmltree "$APK" --file AndroidManifest.xml > "$TMP_DIR/manifest.txt"
+          if grep -q "DebugCommandReceiver" "$TMP_DIR/manifest.txt"; then
             echo "::error::DebugCommandReceiver leaked into release manifest"
             exit 1
           fi
-          if unzip -l "$APK" | grep -qE "assets/sample_activit"; then
+
+          unzip -l "$APK" > "$TMP_DIR/apk-files.txt"
+          if grep -qE "assets/sample_activit" "$TMP_DIR/apk-files.txt"; then
             echo "::error::Personal sample assets leaked into release APK"
             exit 1
           fi
@@ -244,7 +252,10 @@ jobs:
             echo "::error::Release manifest is debuggable"
             exit 1
           fi
-          if unzip -l "$AAB" | grep -qE 'assets/sample_activit'; then
+          AAB_LIST="$(mktemp)"
+          trap 'rm -f "$AAB_LIST"' EXIT
+          unzip -l "$AAB" > "$AAB_LIST"
+          if grep -qE 'assets/sample_activit' "$AAB_LIST"; then
             echo "::error::Personal sample assets leaked into release AAB"
             exit 1
           fi

@@ -158,7 +158,8 @@ enum class OuraRating(val label: String, val color: Color) {
     OPTIMAL("Optimální", Color(0xFF10B981)),
     GOOD("Dobré", Color(0xFF2DD4BF)),
     FAIR("Přijatelné", Color(0xFFF59E0B)),
-    ATTENTION("Odpočinek", Color(0xFFEF4444))
+    ATTENTION("Odpočinek", Color(0xFFEF4444)),
+    NO_DATA("Bez dat", Color(0xFF64748B))
 }
 
 data class OuraContributor(
@@ -172,7 +173,7 @@ data class OuraContributor(
 
 data class OuraPillarState(
     val pillar: OuraPillar,
-    val score: Int,
+    val score: Int?,
     val rating: OuraRating,
     val deltaLabel: String,
     val narrative: String,
@@ -199,110 +200,168 @@ object OuraScoreCalculator {
         val stressSeries = seriesByType[MetricType.STRESS]
 
         val todayHrv = hrvSeries?.values?.lastOrNull()
-        val usualHrv = hrvSeries?.usual?.median ?: 52.0
+        val usualHrv = hrvSeries?.usual?.median
         val todaySleepS = sleepSeries?.values?.lastOrNull()
-        val usualSleepS = sleepSeries?.usual?.median ?: (7.5 * 3600.0)
         val todayBb = bbSeries?.values?.lastOrNull()
         val todayRhr = rhrSeries?.values?.lastOrNull()
-        val usualRhr = rhrSeries?.usual?.median ?: 50.0
-        val todaySteps = stepsSeries?.values?.lastOrNull() ?: 0.0
-        val todayStress = stressSeries?.values?.lastOrNull()
+        val usualRhr = rhrSeries?.usual?.median
+        val todaySteps = stepsSeries?.values?.lastOrNull()
 
-        // 1. PŘIPRAVENOST
-        var readinessPoints = 78.0
-        val hrvDelta = if (todayHrv != null) todayHrv - usualHrv else 0.0
-        readinessPoints += (hrvDelta * 1.5).coerceIn(-18.0, 15.0)
+        // 1. PŘIPRAVENOST (UX-1: žádné vymyšlené defaulty; bez dat zobrazit "—" + CTA)
+        val hasReadinessData = todayHrv != null || todayRhr != null || todayBb != null || todaySleepScore != null
+        val hrvDelta = if (todayHrv != null && usualHrv != null) todayHrv - usualHrv else null
+        val rhrDelta = if (todayRhr != null && usualRhr != null) usualRhr - todayRhr else null
 
-        val rhrDelta = if (todayRhr != null) usualRhr - todayRhr else 0.0
-        readinessPoints += (rhrDelta * 1.2).coerceIn(-10.0, 10.0)
-
-        if (todayBb != null) {
-            readinessPoints += ((todayBb - 60.0) * 0.15).coerceIn(-10.0, 10.0)
+        val readinessScore: Int? = if (!hasReadinessData) null else {
+            var pts = 78.0
+            if (hrvDelta != null) pts += (hrvDelta * 1.5).coerceIn(-18.0, 15.0)
+            if (rhrDelta != null) pts += (rhrDelta * 1.2).coerceIn(-10.0, 10.0)
+            if (todayBb != null) pts += ((todayBb - 60.0) * 0.15).coerceIn(-10.0, 10.0)
+            if (todaySleepScore != null) pts += ((todaySleepScore - 75.0) * 0.15).coerceIn(-10.0, 10.0)
+            pts.toInt().coerceIn(40, 99)
         }
-        if (todaySleepScore != null) {
-            readinessPoints += ((todaySleepScore - 75.0) * 0.15).coerceIn(-10.0, 10.0)
-        }
-
-        val readinessScore = readinessPoints.toInt().coerceIn(40, 99)
         val readinessRating = when {
+            readinessScore == null -> OuraRating.NO_DATA
             readinessScore >= 85 -> OuraRating.OPTIMAL
             readinessScore >= 70 -> OuraRating.GOOD
             readinessScore >= 55 -> OuraRating.FAIR
             else -> OuraRating.ATTENTION
         }
 
-        val readinessContributors = listOf(
-            OuraContributor(
-                name = "HRV rovnováha",
-                value = if (todayHrv != null) "${todayHrv.toInt()} ms" else "62 ms",
-                rating = if (hrvDelta >= 2.0) OuraRating.OPTIMAL else if (hrvDelta >= -3.0) OuraRating.GOOD else OuraRating.FAIR,
-                progress = ((todayHrv ?: 62.0) / 90.0).toFloat().coerceIn(0.1f, 1.0f),
-                metricType = MetricType.HRV,
-                note = if (hrvDelta >= 0) "+${hrvDelta.toInt()} ms vs medián" else "${hrvDelta.toInt()} ms vs medián"
-            ),
-            OuraContributor(
-                name = "Klidový tep",
-                value = if (todayRhr != null) "${todayRhr.toInt()} bpm" else "48 bpm",
-                rating = if (rhrDelta >= 0) OuraRating.OPTIMAL else OuraRating.GOOD,
-                progress = (1.0f - (((todayRhr ?: 48.0) - 40.0) / 45.0).toFloat()).coerceIn(0.2f, 1.0f),
-                metricType = MetricType.RESTING_HEART_RATE,
-                note = "Základna ${usualRhr.toInt()} bpm"
-            ),
-            OuraContributor(
-                name = "Body Battery",
-                value = if (todayBb != null) "${todayBb.toInt()}/100" else "92/100",
-                rating = if ((todayBb ?: 92.0) >= 75) OuraRating.OPTIMAL else OuraRating.GOOD,
-                progress = ((todayBb ?: 92.0) / 100.0).toFloat().coerceIn(0.1f, 1.0f),
-                metricType = MetricType.BODY_BATTERY,
-                note = "Garmin energetická rezerva"
-            )
-        )
+        val readinessContributors = buildList {
+            if (todayHrv != null) {
+                add(
+                    OuraContributor(
+                        name = "HRV rovnováha",
+                        value = "${todayHrv.toInt()} ms",
+                        rating = when {
+                            hrvDelta == null -> OuraRating.GOOD
+                            hrvDelta >= 2.0 -> OuraRating.OPTIMAL
+                            hrvDelta >= -3.0 -> OuraRating.GOOD
+                            else -> OuraRating.FAIR
+                        },
+                        progress = (todayHrv / 90.0).toFloat().coerceIn(0.1f, 1.0f),
+                        metricType = MetricType.HRV,
+                        note = hrvDelta?.let { if (it >= 0) "+${it.toInt()} ms vs medián" else "${it.toInt()} ms vs medián" } ?: "Poslední měření"
+                    )
+                )
+            }
+            if (todayRhr != null) {
+                add(
+                    OuraContributor(
+                        name = "Klidový tep",
+                        value = "${todayRhr.toInt()} bpm",
+                        rating = if (rhrDelta != null && rhrDelta >= 0) OuraRating.OPTIMAL else OuraRating.GOOD,
+                        progress = (1.0f - ((todayRhr - 40.0) / 45.0).toFloat()).coerceIn(0.2f, 1.0f),
+                        metricType = MetricType.RESTING_HEART_RATE,
+                        note = usualRhr?.let { "Základna ${it.toInt()} bpm" } ?: "Poslední měření"
+                    )
+                )
+            }
+            if (todayBb != null) {
+                add(
+                    OuraContributor(
+                        name = "Body Battery",
+                        value = "${todayBb.toInt()}/100",
+                        rating = if (todayBb >= 75) OuraRating.OPTIMAL else OuraRating.GOOD,
+                        progress = (todayBb / 100.0).toFloat().coerceIn(0.1f, 1.0f),
+                        metricType = MetricType.BODY_BATTERY,
+                        note = "Garmin energetická rezerva"
+                    )
+                )
+            }
+        }
+
+        val readinessDeltaLabel = when {
+            !hasReadinessData -> "Připojte Garmin nebo Withings"
+            hrvDelta != null -> "${if (hrvDelta >= 0) "+${hrvDelta.toInt()}" else "${hrvDelta.toInt()}"} ms HRV vs medián · Odhad Pulse4"
+            todayHrv != null -> "HRV ${todayHrv.toInt()} ms · Odhad Pulse4"
+            todayRhr != null -> "Klidový tep ${todayRhr.toInt()} bpm · Odhad Pulse4"
+            else -> "Odhad Pulse4"
+        }
 
         val readinessNarrative = when (readinessRating) {
-            OuraRating.OPTIMAL -> "Noční HRV je nad vaším osobním mediánem a klidový tep klesl na optimální úroveň. Tělo je plně připraveno na trénink."
-            OuraRating.GOOD -> "Autonomní nervový systém je vyrovnaný. Ideální den pro udržovací trénink a běžnou zátěž."
-            OuraRating.FAIR -> "Zotavení bylo částečné. Doporučujeme lehčí intenzitu a dostatek spánku."
-            OuraRating.ATTENTION -> "Zvýšená únava autonomního systému. Zařaďte dnes aktivní regeneraci."
+            OuraRating.NO_DATA -> "Zatím nemáte naměřená data HRV, klidového tepu ani spánku. Připojte Garmin nebo Withings."
+            OuraRating.OPTIMAL -> if (hrvDelta != null) "Noční HRV je ${if (hrvDelta >= 0) "+${hrvDelta.toInt()}" else "${hrvDelta.toInt()}"} ms oproti vašemu mediánu." else "Naměřené hodnoty ukazují vysokou připravenost."
+            OuraRating.GOOD -> "Autonomní nervový systém je v běžném pásmu podle posledních měření."
+            OuraRating.FAIR -> "Zotavení je podle naměřených hodnot částečné. Zvažte lehčí zátěž."
+            OuraRating.ATTENTION -> "Naměřené hodnoty ukazují zvýšenou únavu. Doporučujeme regeneraci."
         }
 
         // 2. SPÁNEK
-        val sleepScoreVal = (todaySleepScore ?: run {
-            val h = (todaySleepS ?: (7.8 * 3600.0)) / 3600.0
-            (h / 8.0 * 88.0).coerceIn(40.0, 96.0)
-        }).toInt()
-
+        val sleepScoreVal: Int? = when {
+            todaySleepScore != null -> todaySleepScore.toInt()
+            todaySleepS != null -> ((todaySleepS / 3600.0) / 8.0 * 88.0).coerceIn(40.0, 96.0).toInt()
+            else -> null
+        }
         val sleepRating = when {
+            sleepScoreVal == null -> OuraRating.NO_DATA
             sleepScoreVal >= 85 -> OuraRating.OPTIMAL
             sleepScoreVal >= 70 -> OuraRating.GOOD
             sleepScoreVal >= 55 -> OuraRating.FAIR
             else -> OuraRating.ATTENTION
         }
-
-        val sleepNarrative = "Doba spánku i podíl hluboké regenerační fáze podpořily plnou obnovu svalové a nervové soustavy."
+        val sleepDeltaLabel = when {
+            todaySleepS != null && todaySleepScore != null -> fmt.sleep(todaySleepS)
+            todaySleepS != null -> "${fmt.sleep(todaySleepS)} · Odhad Pulse4"
+            todaySleepScore != null -> "Skóre ${todaySleepScore.toInt()}"
+            else -> "Připojte Garmin"
+        }
+        val sleepNarrative = if (sleepScoreVal == null) {
+            "Zatím není k dispozici žádný záznam spánku."
+        } else if (todaySleepS != null) {
+            "Zaznamenaná doba spánku: ${fmt.sleep(todaySleepS)}."
+        } else {
+            "Spánkové skóre ze synchronizovaného zařízení."
+        }
 
         // 3. AKTIVITA
-        val stepsRatio = (todaySteps / 10000.0).coerceIn(0.0, 1.5)
-        val activityScore = (64.0 + stepsRatio * 28.0).toInt().coerceIn(40, 98)
+        val activityScore: Int? = todaySteps?.let { steps ->
+            val stepsRatio = (steps / 10000.0).coerceIn(0.0, 1.5)
+            (64.0 + stepsRatio * 28.0).toInt().coerceIn(40, 98)
+        }
         val activityRating = when {
+            activityScore == null -> OuraRating.NO_DATA
             activityScore >= 85 -> OuraRating.OPTIMAL
             activityScore >= 70 -> OuraRating.GOOD
             else -> OuraRating.FAIR
         }
-        val activityNarrative = "Denní objem pohybu a tréninkový impuls Garmin jsou v ideální rovnováze s vaší kapacitou zotavení."
+        val activityDeltaLabel = if (todaySteps != null) {
+            "${fmt.number(todaySteps, 0)} kroků · Odhad Pulse4"
+        } else {
+            "Připojte Garmin"
+        }
+        val activityNarrative = if (todaySteps != null) {
+            "Zaznamenáno ${fmt.number(todaySteps, 0)} kroků."
+        } else {
+            "Zatím nejsou naměřená data o denních krocích."
+        }
 
         // 4. TĚLO & CÉVY
-        val wKg = latestWeightObs?.value ?: 74.2
-        val bodyFatVal = seriesByType[MetricType.BODY_FAT]?.values?.lastOrNull() ?: 15.2
-        val pwvVal = seriesByType[MetricType.PULSE_WAVE_VELOCITY]?.values?.lastOrNull() ?: 6.4
-        val bodyScore = if (latestWeightObs != null) 90 else 84
-        val bodyNarrative = "Bioimpedanční profil Withings ukazuje stabilní podíl svalové tkáně (${fmt.number(bodyFatVal, 1)} % tuku) a pružné cévy (PWV ${fmt.number(pwvVal, 1)} m/s)."
+        val wKg = latestWeightObs?.value
+        val bodyFatVal = seriesByType[MetricType.BODY_FAT]?.values?.lastOrNull()
+        val pwvVal = seriesByType[MetricType.PULSE_WAVE_VELOCITY]?.values?.lastOrNull()
+        val hasBodyData = wKg != null || bodyFatVal != null || pwvVal != null
+        val bodyScore: Int? = if (hasBodyData && wKg != null) 84 else null
+        val bodyRating = if (hasBodyData) OuraRating.GOOD else OuraRating.NO_DATA
+        val bodyParts = buildList {
+            if (wKg != null) add(fmt.weight(wKg))
+            if (bodyFatVal != null) add("tuk ${fmt.number(bodyFatVal, 1)} %")
+            if (pwvVal != null) add("PWV ${fmt.number(pwvVal, 1)} m/s")
+        }
+        val bodyDeltaLabel = if (bodyParts.isNotEmpty()) bodyParts.joinToString(" · ") else "Připojte Withings"
+        val bodyNarrative = if (bodyParts.isNotEmpty()) {
+            "Poslední naměřené hodnoty: ${bodyParts.joinToString(", ")}."
+        } else {
+            "Zatím nejsou naměřená data hmotnosti, tuku ani cév."
+        }
 
         return mapOf(
             OuraPillar.READINESS to OuraPillarState(
                 pillar = OuraPillar.READINESS,
                 score = readinessScore,
                 rating = readinessRating,
-                deltaLabel = if (hrvDelta >= 0) "+${hrvDelta.toInt()} ms HRV vs medián" else "${hrvDelta.toInt()} ms HRV vs medián",
+                deltaLabel = readinessDeltaLabel,
                 narrative = readinessNarrative,
                 contributors = readinessContributors
             ),
@@ -310,7 +369,7 @@ object OuraScoreCalculator {
                 pillar = OuraPillar.SLEEP,
                 score = sleepScoreVal,
                 rating = sleepRating,
-                deltaLabel = if (todaySleepS != null) fmt.sleep(todaySleepS) else "7h 50m spánku",
+                deltaLabel = sleepDeltaLabel,
                 narrative = sleepNarrative,
                 contributors = emptyList()
             ),
@@ -318,15 +377,15 @@ object OuraScoreCalculator {
                 pillar = OuraPillar.ACTIVITY,
                 score = activityScore,
                 rating = activityRating,
-                deltaLabel = "${fmt.number(todaySteps, 0)} kroků dnes",
+                deltaLabel = activityDeltaLabel,
                 narrative = activityNarrative,
                 contributors = emptyList()
             ),
             OuraPillar.BODY to OuraPillarState(
                 pillar = OuraPillar.BODY,
                 score = bodyScore,
-                rating = OuraRating.OPTIMAL,
-                deltaLabel = "${fmt.weight(wKg)} · PWV ${fmt.number(pwvVal, 1)} m/s",
+                rating = bodyRating,
+                deltaLabel = bodyDeltaLabel,
                 narrative = bodyNarrative,
                 contributors = emptyList()
             )
@@ -455,7 +514,7 @@ fun OuraHorizonHeroCard(
                         val isSelected = pillar == selectedPillar
                         PillarScoreOrb(
                             pillar = pillar,
-                            score = state?.score ?: 85,
+                            score = state?.score,
                             isSelected = isSelected,
                             onClick = { onSelectPillar(pillar) },
                             modifier = Modifier.weight(1f)
@@ -747,7 +806,7 @@ private fun DrawScope.drawAmbitiousPillarBackdrop(
 @Composable
 private fun PillarScoreOrb(
     pillar: OuraPillar,
-    score: Int,
+    score: Int?,
     isSelected: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
@@ -813,18 +872,20 @@ private fun PillarScoreOrb(
                         color = Color.White.copy(alpha = 0.16f),
                         style = Stroke(width = stroke)
                     )
-                    drawArc(
-                        brush = Brush.sweepGradient(
-                            listOf(pillar.primaryColor, pillar.secondaryColor, pillar.primaryColor)
-                        ),
-                        startAngle = -90f,
-                        sweepAngle = (score / 100f) * 360f,
-                        useCenter = false,
-                        style = Stroke(width = stroke, cap = StrokeCap.Round)
-                    )
+                    if (score != null) {
+                        drawArc(
+                            brush = Brush.sweepGradient(
+                                listOf(pillar.primaryColor, pillar.secondaryColor, pillar.primaryColor)
+                            ),
+                            startAngle = -90f,
+                            sweepAngle = (score / 100f) * 360f,
+                            useCenter = false,
+                            style = Stroke(width = stroke, cap = StrokeCap.Round)
+                        )
+                    }
                 }
                 Text(
-                    text = "$score",
+                    text = score?.toString() ?: "—",
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.ExtraBold,
                     color = Color.White,
@@ -862,7 +923,7 @@ private fun PillarScoreOrb(
  */
 @Composable
 fun OuraHaloGauge(
-    score: Int,
+    score: Int?,
     primaryColor: Color,
     secondaryColor: Color,
     glowColor: Color,
@@ -875,7 +936,7 @@ fun OuraHaloGauge(
     val animatedProgress = remember { Animatable(0f) }
     LaunchedEffect(score, pillarTitle) {
         animatedProgress.animateTo(
-            targetValue = score / 100f,
+            targetValue = (score ?: 0) / 100f,
             animationSpec = tween(durationMillis = 900, easing = FastOutSlowInEasing)
         )
     }
@@ -1010,7 +1071,7 @@ fun OuraHaloGauge(
                 )
             }
             Text(
-                text = "$score",
+                text = score?.toString() ?: "—",
                 style = MaterialTheme.typography.displayMedium,
                 fontWeight = FontWeight.ExtraBold,
                 color = Color.White,
@@ -1227,13 +1288,20 @@ fun OuraCirclesMeshSection(
                                 Color(0xFFF59E0B) to Color(0xFFFB7185)
                             )
                             val (c1, c2) = haloColors[idx % haloColors.size]
-                            val score = if (idx == 0) 88 else 82
-                            val deviceTag = if (idx == 0) "Garmin · Běh 7.4 km" else "Withings · 75.8 kg"
-                            val bgArt = if (idx == 0) R.drawable.img_alpine_trail_hero else R.drawable.img_motif_body_water
+                            val lastReceivedMs by io(contact.identity) { sl.db.inbox().lastReceived(contact.identity) }
+                            val deviceTag = lastReceivedMs?.let { ts ->
+                                val mins = ((System.currentTimeMillis() - ts) / 60_000L).coerceAtLeast(0L)
+                                when {
+                                    mins < 60L -> "Sdíleno před $mins min"
+                                    mins < 1440L -> "Sdíleno před ${mins / 60L} h"
+                                    else -> "Sdíleno před ${mins / 1440L} d"
+                                }
+                            } ?: "Zatím nic nesdílí"
+                            val bgArt = if (idx % 2 == 0) R.drawable.img_alpine_trail_hero else R.drawable.img_motif_body_water
 
                             CompactMemberAuraPill(
                                 name = contact.displayName.ifBlank { "Člen" },
-                                score = score,
+                                scoreText = if (lastReceivedMs != null) "OK" else "—",
                                 deviceTag = deviceTag,
                                 artworkRes = bgArt,
                                 haloColor1 = c1,
@@ -1270,7 +1338,7 @@ fun OuraCirclesMeshSection(
 @Composable
 private fun CompactMemberAuraPill(
     name: String,
-    score: Int,
+    scoreText: String,
     deviceTag: String,
     @DrawableRes artworkRes: Int,
     haloColor1: Color,
@@ -1318,7 +1386,7 @@ private fun CompactMemberAuraPill(
                     )
                 }
                 Text(
-                    "$score",
+                    scoreText,
                     style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.ExtraBold,
                     color = Color.White,

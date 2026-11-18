@@ -46,7 +46,10 @@ data class Workout(
     fun flatSteps(): List<WorkoutNode.Step> = nodes.flatMap {
         when (it) {
             is WorkoutNode.Step -> listOf(it)
-            is WorkoutNode.Repeat -> List(it.count) { _ -> it.steps }.flatten()
+            is WorkoutNode.Repeat -> {
+                require(it.count in 1..999) { "Neplatný počet opakování: ${it.count}" }
+                List(it.count) { _ -> it.steps }.flatten()
+            }
         }
     }
 
@@ -87,17 +90,29 @@ object WorkoutValidator {
         val allowed = caps.targets[w.sport]
         if (allowed == null) { out += Issue("sport", "Sport ${w.sport} editor nepodporuje (v1: běh a kolo)"); return out }
         if (w.nodes.isEmpty()) out += Issue("nodes", "Trénink nemá žádný krok")
+        var totalFlatSteps = 0L
+        var allCountsValid = true
         w.nodes.forEachIndexed { i, n ->
             when (n) {
-                is WorkoutNode.Step -> step("nodes[$i]", n, allowed, out)
+                is WorkoutNode.Step -> {
+                    step("nodes[$i]", n, allowed, out)
+                    totalFlatSteps += 1L
+                }
                 is WorkoutNode.Repeat -> {
-                    if (n.count !in 2..99) out += Issue("nodes[$i].count", "Počet opakování musí být 2–99")
+                    if (n.count !in 2..99) {
+                        out += Issue("nodes[$i].count", "Počet opakování musí být 2–99")
+                        allCountsValid = false
+                    } else {
+                        totalFlatSteps += n.count.toLong() * n.steps.size
+                    }
                     if (n.steps.isEmpty()) out += Issue("nodes[$i].steps", "Opakování je prázdné")
                     n.steps.forEachIndexed { j, s -> step("nodes[$i].steps[$j]", s, allowed, out) }
                 }
             }
         }
-        if (w.flatSteps().size > caps.maxFlatSteps) out += Issue("nodes", "Po rozbalení opakování je kroků více než ${caps.maxFlatSteps}")
+        if (allCountsValid && totalFlatSteps > caps.maxFlatSteps) {
+            out += Issue("nodes", "Po rozbalení opakování je kroků více než ${caps.maxFlatSteps}")
+        }
         return out
     }
 

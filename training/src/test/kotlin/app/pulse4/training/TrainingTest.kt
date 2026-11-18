@@ -57,6 +57,13 @@ class WorkoutTest {
         assertTrue(WorkoutValidator.validate(many).any { it.message.contains("kroků") })
     }
 
+    @Test fun `R1 negative or huge repeat count does not crash or OOM validator`() {
+        val neg = run1().copy(nodes = listOf(WorkoutNode.Repeat(-1, listOf(WorkoutNode.Step(StepType.WORK, DurationSpec.Time(5))))))
+        assertTrue(WorkoutValidator.validate(neg).any { it.path.endsWith("count") })
+        val huge = run1().copy(nodes = listOf(WorkoutNode.Repeat(Int.MAX_VALUE, listOf(WorkoutNode.Step(StepType.WORK, DurationSpec.Time(5))))))
+        assertTrue(WorkoutValidator.validate(huge).any { it.path.endsWith("count") })
+    }
+
     @Test fun `signature ignores name but not structure`() {
         assertEquals(run1().signature(), run1("Jiný název").signature())
         val changed = run1().copy(nodes = run1().nodes.dropLast(1))

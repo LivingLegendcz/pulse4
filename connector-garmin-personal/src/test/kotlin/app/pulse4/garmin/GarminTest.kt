@@ -224,4 +224,27 @@ class ShippedConfigTest {
         assertTrue(cfg.token.verified)
         assertTrue(cfg.endpoints.all { it.verified }, "Všechny endpointy jsou ověřeny proti oficiálnímu API")
     }
+
+    @Test fun `body battery maps level instead of charged`() {
+        val cfg = GarminEndpointsConfig.parse(file.readText())
+        val bbSpec = cfg.endpoints.first { it.metric == MetricType.BODY_BATTERY }
+        val sampleJson = """
+            [
+              {
+                "date": "2026-10-20",
+                "startTimestampGMT": "2026-10-19T22:00:00.0",
+                "endTimestampGMT": "2026-10-20T22:00:00.0",
+                "charged": 55,
+                "drained": 40,
+                "endOfDayBodyBatteryDynamicFeedbackEvent": {
+                  "bodyBatteryLevel": "78"
+                }
+              }
+            ]
+        """.trimIndent()
+        val mapped = ResponseMapper.map(bbSpec, sampleJson, "acc", "Europe/Prague")
+        assertEquals(1, mapped.items.size)
+        assertEquals(78.0, mapped.items[0].value)
+        assertEquals("2026-10-20", mapped.items[0].localDate)
+    }
 }

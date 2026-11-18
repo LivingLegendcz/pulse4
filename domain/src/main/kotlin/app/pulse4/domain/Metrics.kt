@@ -36,6 +36,34 @@ enum class MetricType(val unit: String) {
     BMR("kcal"),
     METABOLIC_AGE("yr"),
     ECG("ms"),
+    ECG_HR("bpm"),
+    ECG_QTC("ms"),
+    ECG_QRS("ms"),
+    ECG_AFIB("class"),
+}
+
+@Serializable
+enum class EcgAfibClassification(val code: Double) {
+    NONE_DETECTED(0.0),
+    AFIB(1.0),
+    INCONCLUSIVE(2.0),
+    UNKNOWN(-1.0);
+
+    companion object {
+        fun fromWithingsCode(code: Int?): EcgAfibClassification = when (code) {
+            0 -> NONE_DETECTED
+            1 -> AFIB
+            2 -> INCONCLUSIVE
+            else -> UNKNOWN
+        }
+
+        fun fromValue(value: Double): EcgAfibClassification = when (value.toInt()) {
+            0 -> NONE_DETECTED
+            1 -> AFIB
+            2 -> INCONCLUSIVE
+            else -> UNKNOWN
+        }
+    }
 }
 
 @Serializable

@@ -42,6 +42,7 @@ class WithingsSessionCoordinator(
     fun clearAuthPauseAndBackoff() {
         store.delete(KEY_PAUSED_REASON)
         store.delete(KEY_PAUSED_MESSAGE)
+        store.delete(KEY_OTHER_AUTH_FAILURES)
         resetNetworkBackoff()
     }
 
@@ -195,7 +196,13 @@ class WithingsSessionCoordinator(
                     false
                 }
                 WithingsAuthFailureKind.OTHER -> {
-                    pauseAutoRelogin(REASON_AUTH_ERROR, ssoRes.message)
+                    val failures = (store.getString(KEY_OTHER_AUTH_FAILURES)?.toIntOrNull() ?: 0) + 1
+                    store.putString(KEY_OTHER_AUTH_FAILURES, failures.toString())
+                    if (failures >= MAX_CONSECUTIVE_OTHER_FAILURES) {
+                        pauseAutoRelogin(REASON_AUTH_ERROR, ssoRes.message)
+                    } else {
+                        onLog("Non-network auth failure #$failures/$MAX_CONSECUTIVE_OTHER_FAILURES, not pausing yet")
+                    }
                     false
                 }
             }
@@ -209,6 +216,8 @@ class WithingsSessionCoordinator(
         const val KEY_PAUSED_MESSAGE = "withings.auth.paused_message"
         const val KEY_NET_FAILURES = "withings.auth.net_failures"
         const val KEY_NET_BACKOFF_UNTIL_MS = "withings.auth.net_backoff_until_ms"
+        const val KEY_OTHER_AUTH_FAILURES = "withings.auth.other_failures"
+        const val MAX_CONSECUTIVE_OTHER_FAILURES = 3
 
         const val REASON_INVALID_CREDENTIALS = "INVALID_CREDENTIALS"
         const val REASON_RATE_LIMITED = "RATE_LIMITED"

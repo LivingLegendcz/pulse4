@@ -875,7 +875,7 @@ fun TrainingScreen(sl: ServiceLocator) {
                     Icon(Icons.Outlined.CalendarToday, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(24.dp))
                     Spacer(Modifier.height(6.dp))
                     Text("Plán je zatím prázdný", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = Color.White)
-                    Text("Uložte připravenou šablonu výše do kalendáře pro přímý export do hodinek Garmin.", style = MaterialTheme.typography.bodySmall, color = Color(0xFF94A3B8))
+                    Text("Uložte připravenou šablonu výše do kalendáře. Přímý export do Garmin Connect je experimentální.", style = MaterialTheme.typography.bodySmall, color = Color(0xFF94A3B8))
                 }
             }
         } else {
@@ -1004,7 +1004,7 @@ fun TrainingScreen(sl: ServiceLocator) {
                             ) {
                                 Icon(Icons.Outlined.CloudUpload, contentDescription = null, tint = swAccent, modifier = Modifier.size(16.dp))
                                 Spacer(Modifier.width(6.dp))
-                                Text("Exportovat do Garmin Connect", color = swAccent, fontWeight = FontWeight.Bold)
+                                Text("Exportovat do Garmin Connect (experimentální)", color = swAccent, fontWeight = FontWeight.Bold)
                             }
                         }
                     }

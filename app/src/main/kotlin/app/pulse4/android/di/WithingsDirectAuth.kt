@@ -1,6 +1,7 @@
 package app.pulse4.android.di
 
 import app.pulse4.sync.Wire
+import app.pulse4.withings.WITHINGS_WEB_APPLIVER
 import app.pulse4.withings.WithingsUserProfile
 import app.pulse4.withings.WithingsWebClient
 import app.pulse4.withings.WithingsWebSession
@@ -132,13 +133,13 @@ private class PersistentCookieJar(
     @Synchronized
     fun getCookieString(): String {
         ensureLoaded()
-        val byName = LinkedHashMap<String, String>()
+        val byKey = LinkedHashMap<Triple<String, String, String>, String>()
         for (c in store) {
             if (c.value.isNotBlank() && c.value != "deleted") {
-                byName[c.name] = c.value
+                byKey[Triple(c.domain, c.path, c.name)] = c.value
             }
         }
-        return byName.entries.joinToString("; ") { "${it.key}=${it.value}" }
+        return byKey.entries.joinToString("; ") { "${it.key.third}=${it.value}" }
     }
 
     @Synchronized
@@ -238,8 +239,6 @@ class WithingsDirectAuth(
 
     @Volatile var pendingEmail: String? = null
         private set
-    @Volatile var pendingPassword: String? = null
-        private set
     @Volatile var isAwaitingCode: Boolean = false
         private set
 
@@ -279,15 +278,12 @@ class WithingsDirectAuth(
 
     fun clearPersistedCookies() {
         cookieJar.clear()
-        pendingPassword = null
         isAwaitingCode = false
     }
 
     fun hasUsableCookies(): Boolean = cookieJar.hasAnyCookies()
 
-    fun clearPendingPassword() {
-        pendingPassword = null
-    }
+    fun clearPendingPassword() = Unit
 
     /**
      * Tiché obnovení webové relace Withings pomocí uložených dlouhodobých SSO / důvěryhodných cookies
@@ -341,7 +337,6 @@ class WithingsDirectAuth(
      */
     fun requestEmailCode(email: String): WithingsLoginResult {
         cookieJar.clearSessionAndWorkflowCookies()
-        pendingPassword = null
         val em = email.trim()
         if (em.isBlank() || !em.contains("@")) {
             return WithingsLoginResult.Error("Zadejte platnou e-mailovou adresu vašeho účtu Withings (nebo Google / Apple účtu).")
@@ -409,8 +404,10 @@ class WithingsDirectAuth(
                 email = em,
                 message = "Na e-mail $em byl odeslán 8místný přihlašovací kód Withings. Zadejte ho do pole níže."
             )
+        } catch (e: IOException) {
+            WithingsLoginResult.Error("Nepodařilo se spojit se serverem Withings. Zkontrolujte připojení a zkuste to znovu.", WithingsAuthFailureKind.NETWORK)
         } catch (e: Exception) {
-            WithingsLoginResult.Error(e.message ?: "Chyba sítě při vyžádání přihlašovacího kódu.")
+            WithingsLoginResult.Error("Nepodařilo se vyžádat přihlašovací kód.", WithingsAuthFailureKind.OTHER)
         }
     }
 
@@ -434,7 +431,7 @@ class WithingsDirectAuth(
                 .add("no_jwt", "false")
                 .add("appname", "hmw")
                 .add("apppfm", "web")
-                .add("appliver", "d2e7b8e1")
+                .add("appliver", WITHINGS_WEB_APPLIVER)
                 .build()
             val req = Request.Builder()
                 .url("https://scalews.withings.com/cgi-bin/v2/account")
@@ -447,15 +444,17 @@ class WithingsDirectAuth(
                 res.code to res.body?.string().orEmpty()
             }
             if (code == 429) {
-                return WithingsLoginResult.Error("Withings dočasně omezil odesílání kódů (HTTP 429).", WithingsAuthFailureKind.RATE_LIMITED)
+                return WithingsLoginResult.Error("Withings dočasně omezil odesílání kódů. Počkejte prosím několik minut.", WithingsAuthFailureKind.RATE_LIMITED)
             }
             if (code !in 200..299 || body.contains("\"status\":") && !body.contains("\"status\":0")) {
-                return WithingsLoginResult.Error("Nepodařilo se znovu odeslat kód (HTTP $code).", WithingsAuthFailureKind.OTHER)
+                return WithingsLoginResult.Error("Nepodařilo se znovu odeslat kód. Zkuste to za chvíli znovu.", WithingsAuthFailureKind.OTHER)
             }
             isAwaitingCode = true
             WithingsLoginResult.NeedsMfa(em, "Nový 8místný kód byl odeslán na $em. Zadejte ho do pole níže.")
+        } catch (e: IOException) {
+            WithingsLoginResult.Error("Nepodařilo se spojit se serverem Withings. Zkontrolujte připojení a zkuste to znovu.", WithingsAuthFailureKind.NETWORK)
         } catch (e: Exception) {
-            WithingsLoginResult.Error("Nepodařilo se znovu odeslat kód: ${e.message}")
+            WithingsLoginResult.Error("Nepodařilo se znovu odeslat kód.", WithingsAuthFailureKind.OTHER)
         }
     }
 
@@ -464,10 +463,8 @@ class WithingsDirectAuth(
             return WithingsLoginResult.Error("Zadejte heslo k účtu Withings.")
         }
         cookieJar.clearSessionAndWorkflowCookies()
-        pendingPassword = null
         val em = email.trim()
         pendingEmail = em
-        pendingPassword = password
         android.util.Log.i("WithingsDirectAuth", "loginPassword starting")
 
         return try {
@@ -543,16 +540,13 @@ class WithingsDirectAuth(
                 android.util.Log.i("WithingsDirectAuth", "loginPassword requires 2FA: lastMfaUrl=$lastMfaUrl")
                 return classified
             }
-            pendingPassword = null
             classified
         } catch (e: IOException) {
-            pendingPassword = null
-            android.util.Log.w("WithingsDirectAuth", "loginPassword network exception: ${e.message}", e)
-            WithingsLoginResult.Error(e.message ?: "Chyba sítě při přihlašování.", WithingsAuthFailureKind.NETWORK)
+            android.util.Log.w("WithingsDirectAuth", "loginPassword network exception", e)
+            WithingsLoginResult.Error("Nepodařilo se spojit se serverem Withings. Zkontrolujte připojení a zkuste to znovu.", WithingsAuthFailureKind.NETWORK)
         } catch (e: Exception) {
-            pendingPassword = null
-            android.util.Log.e("WithingsDirectAuth", "loginPassword exception: ${e.message}", e)
-            WithingsLoginResult.Error(e.message ?: "Chyba při přihlašování.", WithingsAuthFailureKind.OTHER)
+            android.util.Log.e("WithingsDirectAuth", "loginPassword exception", e)
+            WithingsLoginResult.Error("Přihlášení se nezdařilo. Zkuste to prosím znovu.", WithingsAuthFailureKind.OTHER)
         }
     }
 
@@ -698,8 +692,10 @@ class WithingsDirectAuth(
             }
 
             finishLogin()
+        } catch (e: IOException) {
+            WithingsLoginResult.Error("Nepodařilo se spojit se serverem Withings. Zkontrolujte připojení a zkuste to znovu.", WithingsAuthFailureKind.NETWORK)
         } catch (e: Exception) {
-            WithingsLoginResult.Error(e.message ?: "Chyba sítě při ověření kódu.")
+            WithingsLoginResult.Error("Ověření kódu se nezdařilo. Zkuste to prosím znovu.", WithingsAuthFailureKind.OTHER)
         }
     }
 
@@ -719,7 +715,7 @@ class WithingsDirectAuth(
         android.util.Log.i("WithingsDirectAuth", "finishLogin: cookies=[${cookieJar.describe()}], hasSessionToken=${sessionToken != null}")
         return try {
             val profiles = webClient.getUsersList(cookies, sessionToken)
-            android.util.Log.i("WithingsDirectAuth", "finishLogin: fetched ${profiles.size} profiles: ${profiles.map { "${it.displayName} (${it.id})" }}")
+            android.util.Log.i("WithingsDirectAuth", "finishLogin: fetched ${profiles.size} profiles")
             if (profiles.isEmpty()) {
                 WithingsLoginResult.Error("Přihlášeno k Withings, ale nebyl nalezen žádný profil.")
             } else {
@@ -742,10 +738,12 @@ class WithingsDirectAuth(
                 )
                 WithingsLoginResult.Ok(session, profiles)
             }
+        } catch (e: IOException) {
+            android.util.Log.w("WithingsDirectAuth", "finishLogin network exception", e)
+            WithingsLoginResult.Error("Nepodařilo se spojit se serverem Withings. Zkontrolujte připojení a zkuste to znovu.", WithingsAuthFailureKind.NETWORK)
         } catch (e: Exception) {
-            android.util.Log.e("WithingsDirectAuth", "finishLogin exception: ${e.message}", e)
-            val err = e.message ?: "Chyba při načtení profilů účtu Withings."
-            WithingsLoginResult.Error(err)
+            android.util.Log.e("WithingsDirectAuth", "finishLogin exception", e)
+            WithingsLoginResult.Error("Chyba při načtení profilů účtu Withings.", WithingsAuthFailureKind.OTHER)
         }
     }
 }

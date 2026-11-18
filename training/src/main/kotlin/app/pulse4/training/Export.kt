@@ -121,8 +121,13 @@ class ExportRunner(private val api: GarminWorkoutApi, private val caps: DeviceCa
         } else r = r.with(ExportStep.SCHEDULE, StepState.DONE, null)
 
         // 5) požadavek na zařízení (idempotentní; neznamená přijetí hodinkami)
-        r = try { api.requestDeviceSync(); r.with(ExportStep.REQUEST_DEVICE, StepState.DONE, null) } catch (e: ProviderError) {
+        r = try {
+            api.requestDeviceSync()
+            r.with(ExportStep.REQUEST_DEVICE, StepState.DONE, null)
+        } catch (e: ProviderError) {
             return ExportOutcome.Failed(r.with(ExportStep.REQUEST_DEVICE, StepState.FAILED, e.message))
+        } catch (e: UnsupportedOperationException) {
+            return ExportOutcome.Failed(r.with(ExportStep.REQUEST_DEVICE, StepState.FAILED, e.message ?: "Synchronizaci hodinek spusťte v aplikaci Garmin Connect"))
         }
         return ExportOutcome.Finished(r)
     }

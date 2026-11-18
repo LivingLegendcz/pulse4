@@ -78,7 +78,7 @@ sealed interface WithingsUiState {
 /**
  * Konektor Withings:
  * 1. Webový konektor (doporučený, bez nutnosti developer účtu, API klíčů či serveru):
- *    Uživatel se přihlásí ve WebView, konektor převezme session cookies a komunikuje přímo
+ *    Uživatel se přihlásí v nativním dialogu, konektor převezme session cookies a komunikuje přímo
  *    se scalews.withings.com API.
  * 2. OAuth API (záložní cesta pro vývojářské účty s Client ID a Secretem).
  * 3. CSV import a manuální zápis váhy.
@@ -90,9 +90,7 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
     private val childVault = SecretTokenVault(sl.secrets, "withings.child.tokens")
     private val http = OkHttpGateway()
     private val webClient by lazy {
-        WithingsWebClient(http).apply {
-            onDebugLog = { android.util.Log.w("WithingsUsers", it) }
-        }
+        WithingsWebClient(http)
     }
 
     fun loadWebSession(): WithingsWebSession? =
@@ -361,7 +359,10 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
         )
         saveWebSession(s)
         sl.settings.withingsProfileLabel = primary.displayName
-        runCatching { RoomAreaStateStore(sl.db, "withings.").put(SyncArea.WEIGHT, app.pulse4.provider.AreaState()) }
+        // Ruční re-login stejného účtu nesmí resetovat kurzor na 730denní re-import:
+        if (existing?.primaryUserId != primary.id) {
+            runCatching { RoomAreaStateStore(sl.db, "withings.").put(SyncArea.WEIGHT, app.pulse4.provider.AreaState()) }
+        }
         // Spustit počáteční import na pozadí, aby neblokoval okamžité zavření UI dialogu:
         kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
             kotlinx.coroutines.delay(1000L)
@@ -483,6 +484,13 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
             }
             sl.secrets.putString("withings.full_backfill_v2", "1")
         }
+        if (sl.secrets.getString("withings.ecg_typed_v1") == null) {
+            val legacyEcgIds = db.observations().latestRows(MetricType.ECG.name, 500).map { it.id }
+            if (legacyEcgIds.isNotEmpty()) {
+                db.observations().markDeleted(legacyEcgIds)
+            }
+            sl.secrets.putString("withings.ecg_typed_v1", "1")
+        }
         val activeUserId = loadWebSession()?.primaryUserId?.toString()
         val fetcher = WithingsWebFetcher(
             client = webClient,
@@ -503,7 +511,11 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
                     .filter { !it.deleted && it.provider == Provider.WITHINGS_API.name }
                     .associate { (it.startUtcMs / 1000L) to it.value }
             },
-            onRefreshFallback = { if (renewSession(forceExtend = true)) loadWebSession() else null }
+            onRefreshFallback = { if (renewSession(forceExtend = true)) loadWebSession() else null },
+            existingIdsByGrpIds = { _ ->
+                if (activeUserId != null) db.observations().idsInForAccount(Provider.WITHINGS_API.name, activeUserId, 0L, Long.MAX_VALUE).toSet()
+                else emptySet()
+            },
         )
         val engine = SyncEngine(
             fetcher = fetcher,
@@ -674,9 +686,15 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
                 }
             }
             if (valid.isNotEmpty()) {
+                val zone = runCatching { ZoneId.of(sl.settings.zoneId) }.getOrElse { ZoneId.systemDefault() }
                 val best = if (pref.isNotEmpty()) {
-                    valid.sortedWith(compareByDescending<app.pulse4.domain.MetricObservation> { pref.indexOf(it.provider).let { idx -> if (idx >= 0) 100 - idx else 0 } }
-                        .thenByDescending { it.startUtcMs }).first()
+                    valid.sortedWith(
+                        compareByDescending<app.pulse4.domain.MetricObservation> {
+                            java.time.Instant.ofEpochMilli(it.startUtcMs).atZone(zone).toLocalDate()
+                        }.thenByDescending {
+                            pref.indexOf(it.provider).let { idx -> if (idx >= 0) 100 - idx else 0 }
+                        }.thenByDescending { it.startUtcMs }
+                    ).first()
                 } else {
                     valid.maxByOrNull { it.startUtcMs }
                 }
@@ -781,15 +799,21 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
             }
         }
 
-        // 3. Pokud je zapnuté automatické přeposílání dětského váhového pásma z váhy rodiče (např. 12–45 kg):
-        if (sl.settings.childWeightAutoForward) {
+        // 3. Pokud je zapnuté automatické přeposílání dětského váhového pásma z Withings (např. 12–45 kg):
+        val childWebUid = loadWebSession()?.childUserId?.toString() ?: cUid?.toString()
+        if (sl.settings.childWeightAutoForward && childWebUid != null) {
             val cMin = sl.settings.childWeightMinKg
             val cMax = sl.settings.childWeightMaxKg
             val today = LocalDate.now(ZoneId.of(sl.settings.zoneId))
             val recent = sl.db.observations()
                 .ofTypesIncludingDeleted(listOf(MetricType.WEIGHT.name), today.minusDays(30).toString(), today.toString())
                 .map { it.toDomain() }
-                .filter { !it.deleted && it.value in cMin..cMax }
+                .filter {
+                    !it.deleted &&
+                        it.provider == Provider.WITHINGS_API &&
+                        it.accountId == childWebUid &&
+                        it.value in cMin..cMax
+                }
             recent.forEach { obs ->
                 toForward += obs.copy(quality = app.pulse4.domain.Quality.OK)
                 // Pokud dětské vážení leží mimo dospělý filtr rodiče, vyřadíme ho z grafu rodiče
@@ -865,6 +889,10 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
             MetricType.PULSE_WAVE_VELOCITY,
             MetricType.BMR,
             MetricType.METABOLIC_AGE,
+            MetricType.ECG_HR,
+            MetricType.ECG_QTC,
+            MetricType.ECG_QRS,
+            MetricType.ECG_AFIB,
             MetricType.ECG,
         )
     }

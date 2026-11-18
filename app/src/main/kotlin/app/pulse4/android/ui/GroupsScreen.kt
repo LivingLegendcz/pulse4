@@ -126,6 +126,7 @@ import app.pulse4.sync.PairingPayload
 import app.pulse4.sync.PairingResult
 import app.pulse4.sync.Wire
 import app.pulse4.ui.Aggregation
+import app.pulse4.ui.GrantEditor
 import app.pulse4.ui.Labels
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
@@ -2023,13 +2024,164 @@ private fun GroupBranchMembersAndSharingSection(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     modifier = Modifier.padding(top = 4.dp, bottom = 6.dp)
                 ) {
-                    listOf(0 to "Všechny zdroje", 1 to "Pouze Withings", 2 to "Pouze Garmin").forEach { (mode, lbl) ->
+                    GrantEditor.SourceChoice.entries.forEachIndexed { mode, choice ->
                         FilterChip(
                             selected = selectedSourceMode == mode,
                             onClick = { selectedSourceMode = mode },
-                            label = { Text(lbl) }
+                            label = { Text(choice.label) }
                         )
                     }
+                }
+
+                var pendingGroupEnableCat by remember { mutableStateOf<Pair<Category, String>?>(null) }
+                var pendingGroupDisableCat by remember { mutableStateOf<Pair<Category, String>?>(null) }
+                var includeActRoute by remember { mutableStateOf(false) }
+                var includeActExactTime by remember { mutableStateOf(false) }
+                var includeActFullRecord by remember { mutableStateOf(false) }
+
+                pendingGroupEnableCat?.let { (cat, catTitle) ->
+                    AlertDialog(
+                        onDismissRequest = { pendingGroupEnableCat = null },
+                        containerColor = Color(0xFF0A101B),
+                        titleContentColor = Color.White,
+                        textContentColor = Color(0xFFCBD5E1),
+                        title = { Text("Zapnout sdílení: $catTitle", fontWeight = FontWeight.ExtraBold) },
+                        text = {
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text(
+                                    "Zapnutím sdílení do kruhu se členům odešle i posledních 60 dní historie této sekce.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color(0xFFFDE68A)
+                                )
+                                if (cat == Category.ACTIVITY) {
+                                    Text(
+                                        "Výchozí volba sdílí pouze souhrn aktivity. Citlivé detaily vyžadují výslovné zapnutí:",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color.White
+                                    )
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Checkbox(checked = includeActRoute, onCheckedChange = { includeActRoute = it })
+                                        Text("GPS trasa (může odhalit polohu)", style = MaterialTheme.typography.labelSmall)
+                                    }
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Checkbox(checked = includeActExactTime, onCheckedChange = { includeActExactTime = it })
+                                        Text("Přesný čas startu a konce", style = MaterialTheme.typography.labelSmall)
+                                    }
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Checkbox(checked = includeActFullRecord, onCheckedChange = { includeActFullRecord = it })
+                                        Text("Úplný FIT záznam (obsahuje přesný čas)", style = MaterialTheme.typography.labelSmall)
+                                    }
+                                }
+                            }
+                        },
+                        confirmButton = {
+                            Button(onClick = {
+                                val chosenSources = GrantEditor.SourceChoice.entries.getOrNull(selectedSourceMode)?.providers
+                                val extraAct = buildSet {
+                                    if (includeActRoute) add(Field.ACT_ROUTE)
+                                    if (includeActExactTime) add(Field.ACT_EXACT_TIME)
+                                    if (includeActFullRecord) add(Field.ACT_FULL_RECORD)
+                                }
+                                pendingGroupEnableCat = null
+                                scope.launch {
+                                    val preparedGrant = withContext(Dispatchers.IO) {
+                                        val now = System.currentTimeMillis()
+                                        val self = sl.bridge.ensureStarted().deliveryHash
+                                        val today = LocalDate.now(ZoneId.of(sl.settings.zoneId))
+                                        val res = GrantEditor.toggleGroupCategory(
+                                            activeGrants = activeGrants,
+                                            groupId = currentGroup?.id,
+                                            category = cat,
+                                            enable = true,
+                                            targetRecipients = targetRecipients,
+                                            ownerId = self,
+                                            today = today,
+                                            nowMs = now,
+                                            sources = chosenSources,
+                                            newGrantId = UUID.randomUUID().toString(),
+                                            extraActivityFields = extraAct,
+                                        )
+                                        (res as? GrantEditor.GroupToggleResult.Save)?.grant
+                                    } ?: return@launch
+                                    if (isMinorAccount) {
+                                        pendingMinorGrant = preparedGrant to catTitle
+                                    } else {
+                                        notice = withContext(Dispatchers.IO) {
+                                            val now = System.currentTimeMillis()
+                                            sl.shareService.saveGrantWithPolicy(preparedGrant, null).fold(
+                                                onSuccess = {
+                                                    sl.shareService.planAndEnqueue(now)
+                                                    "Sdílení sekce '$catTitle' do kruhu zapnuto."
+                                                },
+                                                onFailure = { it.message ?: "Aktivace sdílení selhala." }
+                                            )
+                                        }
+                                    }
+                                }
+                            }) { Text("Potvrdit a zapnout") }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { pendingGroupEnableCat = null }) { Text("Zrušit") }
+                        }
+                    )
+                }
+
+                pendingGroupDisableCat?.let { (cat, catTitle) ->
+                    AlertDialog(
+                        onDismissRequest = { pendingGroupDisableCat = null },
+                        containerColor = Color(0xFF0A101B),
+                        titleContentColor = Color.White,
+                        textContentColor = Color(0xFFCBD5E1),
+                        title = { Text("Odvolat sdílení: $catTitle?", fontWeight = FontWeight.ExtraBold) },
+                        text = {
+                            Text(
+                                "Budoucí synchronizace této sekce pro kruh se okamžitě zastaví a příjemcům odejde požadavek na smazání. Již doručené kopie v cizích zařízeních nelze technicky vynutit zpět.",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        },
+                        confirmButton = {
+                            Button(onClick = {
+                                pendingGroupDisableCat = null
+                                scope.launch {
+                                    notice = withContext(Dispatchers.IO) {
+                                        val now = System.currentTimeMillis()
+                                        val self = sl.bridge.ensureStarted().deliveryHash
+                                        val today = LocalDate.now(ZoneId.of(sl.settings.zoneId))
+                                        when (val res = GrantEditor.toggleGroupCategory(
+                                            activeGrants = activeGrants,
+                                            groupId = currentGroup?.id,
+                                            category = cat,
+                                            enable = false,
+                                            targetRecipients = targetRecipients,
+                                            ownerId = self,
+                                            today = today,
+                                            nowMs = now,
+                                            sources = null,
+                                            newGrantId = "",
+                                        )) {
+                                            is GrantEditor.GroupToggleResult.Save -> {
+                                                sl.shareService.saveGrantWithPolicy(res.grant, null).fold(
+                                                    onSuccess = {
+                                                        sl.shareService.planAndEnqueue(now)
+                                                        "Sdílení sekce '$catTitle' bylo zúženo."
+                                                    },
+                                                    onFailure = { it.message ?: "Úprava sdílení selhala." }
+                                                )
+                                            }
+                                            is GrantEditor.GroupToggleResult.Revoke -> {
+                                                sl.shareService.revoke(res.grantId, now)
+                                                "Sdílení sekce '$catTitle' bylo odvoláno."
+                                            }
+                                            GrantEditor.GroupToggleResult.Noop -> "Žádná změna."
+                                        }
+                                    }
+                                }
+                            }) { Text("Odvolat") }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { pendingGroupDisableCat = null }) { Text("Zrušit") }
+                        }
+                    )
                 }
 
                 if (targetRecipients.isEmpty()) {
@@ -2042,20 +2194,17 @@ private fun GroupBranchMembersAndSharingSection(
                     categories.forEach { (cat, info, bgRes) ->
                         val (title, subtitle) = info
                         val catColor = cat.unifiedColor()
-                        val catFields = Field.entries.filter { it.category == cat }.toSet()
-                        val matchingGrant = activeGrants.firstOrNull { g ->
-                            g.fields.intersect(catFields).isNotEmpty() &&
-                                (g.groupId == currentGroup?.id || g.recipients.intersect(targetRecipients).isNotEmpty())
-                        }
+                        val matchingGrant = GrantEditor.findGroupCategoryGrant(activeGrants, currentGroup?.id, cat)
                         val isEnabled = matchingGrant != null
+                        val otherCoverage = GrantEditor.otherCoverageRecipients(activeGrants, currentGroup?.id, targetRecipients, cat)
                         val grantSourceText = matchingGrant?.let { g ->
-                            when {
-                                g.sources == null -> " · Všechny zdroje"
-                                Provider.WITHINGS_API in g.sources!! && Provider.GARMIN_PERSONAL !in g.sources!! -> " · Pouze Withings"
-                                Provider.GARMIN_PERSONAL in g.sources!! && Provider.WITHINGS_API !in g.sources!! -> " · Pouze Garmin"
-                                else -> ""
-                            }
+                            GrantEditor.sourceChoiceFrom(g.sources)?.let { " · ${it.label}" }.orEmpty()
                         }.orEmpty()
+                        val otherInfoText = if (!isEnabled && otherCoverage.isNotEmpty()) {
+                            " · ${otherCoverage.size} členů už tato data dostává jinak"
+                        } else {
+                            ""
+                        }
 
                         Card(
                             shape = RoundedCornerShape(14.dp),
@@ -2101,57 +2250,19 @@ private fun GroupBranchMembersAndSharingSection(
                                         Spacer(Modifier.width(10.dp))
                                         Column {
                                             Text(title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.ExtraBold, color = Color.White)
-                                            Text("$subtitle$grantSourceText", style = MaterialTheme.typography.labelSmall, color = Color(0xFFCBD5E1))
+                                            Text("$subtitle$grantSourceText$otherInfoText", style = MaterialTheme.typography.labelSmall, color = Color(0xFFCBD5E1))
                                         }
                                     }
                                     Switch(
                                         checked = isEnabled,
                                         onCheckedChange = { enable ->
                                             if (enable) {
-                                                val chosenSources: Set<Provider>? = when (selectedSourceMode) {
-                                                    1 -> setOf(Provider.WITHINGS_API)
-                                                    2 -> setOf(Provider.GARMIN_PERSONAL, Provider.GARMIN_EXTENDED)
-                                                    else -> null
-                                                }
-                                                scope.launch {
-                                                    val preparedGrant = withContext(Dispatchers.IO) {
-                                                        val now = System.currentTimeMillis()
-                                                        val self = sl.bridge.ensureStarted().deliveryHash
-                                                        val today = LocalDate.now(ZoneId.of(sl.settings.zoneId))
-                                                        ShareGrant(
-                                                            id = UUID.randomUUID().toString(),
-                                                            ownerId = self,
-                                                            recipients = targetRecipients,
-                                                            fields = catFields,
-                                                            scope = TimeScope.continuousFrom(today.minusDays(60)),
-                                                            groupId = currentGroup?.id,
-                                                            createdAtMs = now,
-                                                            sources = chosenSources
-                                                        )
-                                                    }
-                                                    if (isMinorAccount) {
-                                                        pendingMinorGrant = preparedGrant to title
-                                                    } else {
-                                                        notice = withContext(Dispatchers.IO) {
-                                                            val now = System.currentTimeMillis()
-                                                            sl.shareService.saveGrantWithPolicy(preparedGrant, null).fold(
-                                                                onSuccess = {
-                                                                    sl.shareService.planAndEnqueue(now)
-                                                                    "Sdílení sekce '$title' do kruhu zapnuto."
-                                                                },
-                                                                onFailure = { it.message ?: "Aktivace sdílení selhala." }
-                                                            )
-                                                        }
-                                                    }
-                                                }
+                                                includeActRoute = false
+                                                includeActExactTime = false
+                                                includeActFullRecord = false
+                                                pendingGroupEnableCat = cat to title
                                             } else {
-                                                scope.launch {
-                                                    notice = withContext(Dispatchers.IO) {
-                                                        val now = System.currentTimeMillis()
-                                                        matchingGrant?.let { sl.shareService.revoke(it.id, now) }
-                                                        "Sdílení sekce '$title' bylo odvoláno."
-                                                    }
-                                                }
+                                                pendingGroupDisableCat = cat to title
                                             }
                                         }
                                     )

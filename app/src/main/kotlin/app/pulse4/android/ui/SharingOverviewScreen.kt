@@ -2,6 +2,8 @@
 
 package app.pulse4.android.ui
 
+import app.pulse4.ui.GrantEditor
+
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -273,6 +275,45 @@ fun SharingOverviewScreen(
 
         Spacer(Modifier.height(10.dp))
 
+        var pendingRevokeGrant by remember { mutableStateOf<ShareGrant?>(null) }
+
+        pendingRevokeGrant?.let { grantToRevoke ->
+            val recNames = grantToRevoke.recipients.joinToString(", ") { id ->
+                contacts.firstOrNull { it.identity == id }?.displayName ?: id.take(10)
+            }
+            AlertDialog(
+                onDismissRequest = { pendingRevokeGrant = null },
+                containerColor = Color(0xFF0A101B),
+                titleContentColor = Color.White,
+                textContentColor = Color(0xFFCBD5E1),
+                title = { Text("Odvolat oprávnění?", fontWeight = FontWeight.ExtraBold) },
+                text = {
+                    Text(
+                        "Sdílení pro $recNames bude okamžitě zastaveno a příjemci obdrží požadavek na smazání. Již doručené kopie v cizích zařízeních nelze technicky vynutit zpět.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                },
+                confirmButton = {
+                    Button(onClick = {
+                        pendingRevokeGrant = null
+                        scope.launch {
+                            val plan = withContext(Dispatchers.IO) {
+                                sl.shareService.revoke(grantToRevoke.id, System.currentTimeMillis())
+                            }
+                            if (plan != null) {
+                                revocationPlanDialog = plan
+                            } else {
+                                notice = "Oprávnění se nepodařilo odvolat."
+                            }
+                        }
+                    }) { Text("Odvolat", fontWeight = FontWeight.Bold) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { pendingRevokeGrant = null }) { Text("Zrušit", color = Color(0xFF94A3B8)) }
+                }
+            )
+        }
+
         Column(
             Modifier
                 .fillMaxSize()
@@ -284,18 +325,7 @@ fun SharingOverviewScreen(
                     groupsById = groupsById,
                     contacts = contacts,
                     onEdit = { editingGrant = it },
-                    onRevoke = { grant ->
-                        scope.launch {
-                            val plan = withContext(Dispatchers.IO) {
-                                sl.shareService.revoke(grant.id, System.currentTimeMillis())
-                            }
-                            if (plan != null) {
-                                revocationPlanDialog = plan
-                            } else {
-                                notice = "Oprávnění se nepodařilo odvolat."
-                            }
-                        }
-                    }
+                    onRevoke = { grant -> pendingRevokeGrant = grant }
                 )
                 1 -> IncomingSharingTab(
                     contacts = contacts,
@@ -922,18 +952,17 @@ private fun EditGrantDialog(
     val scope = rememberCoroutineScope()
     val isMinor by sl.settings.isMinorFlow.collectAsState()
     var guardianConfirmed by remember(isMinor) { mutableStateOf(!isMinor) }
-    var selectedSourceMode by remember {
-        mutableStateOf(
-            when {
-                grant.sources == null -> 0
-                Provider.WITHINGS_API in grant.sources!! && Provider.GARMIN_PERSONAL !in grant.sources!! -> 1
-                else -> 2
-            }
-        )
+    var selectedSourceChoice by remember(grant.id) {
+        mutableStateOf(GrantEditor.sourceChoiceFrom(grant.sources))
     }
-    var selectedCategories by remember {
+    var sourceModified by remember(grant.id) { mutableStateOf(false) }
+    var selectedCategories by remember(grant.id) {
         mutableStateOf(grant.fields.map { it.category }.toSet())
     }
+    var activityDetailsModified by remember(grant.id) { mutableStateOf(false) }
+    var includeActRoute by remember(grant.id) { mutableStateOf(Field.ACT_ROUTE in grant.fields) }
+    var includeActExactTime by remember(grant.id) { mutableStateOf(Field.ACT_EXACT_TIME in grant.fields) }
+    var includeActFullRecord by remember(grant.id) { mutableStateOf(Field.ACT_FULL_RECORD in grant.fields) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -950,11 +979,14 @@ private fun EditGrantDialog(
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Zdroj zdravotních dat:", style = MaterialTheme.typography.labelMedium, color = Color.White)
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    listOf(0 to "Všechny zdroje", 1 to "Pouze Withings", 2 to "Pouze Garmin").forEach { (mode, lbl) ->
+                    GrantEditor.SourceChoice.entries.forEach { choice ->
                         FilterChip(
-                            selected = selectedSourceMode == mode,
-                            onClick = { selectedSourceMode = mode },
-                            label = { Text(lbl) }
+                            selected = selectedSourceChoice == choice,
+                            onClick = {
+                                selectedSourceChoice = choice
+                                sourceModified = true
+                            },
+                            label = { Text(choice.label) }
                         )
                     }
                 }
@@ -969,6 +1001,26 @@ private fun EditGrantDialog(
                             },
                             label = { Text(categoryLabel(cat)) }
                         )
+                    }
+                }
+
+                if (Category.ACTIVITY in selectedCategories) {
+                    Text(
+                        "Citlivé detaily aktivit (výchozí je pouze souhrn):",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xFFFDE68A)
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(checked = includeActRoute, onCheckedChange = { includeActRoute = it; activityDetailsModified = true })
+                        Text("GPS trasa (může odhalit polohu)", style = MaterialTheme.typography.labelSmall)
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(checked = includeActExactTime, onCheckedChange = { includeActExactTime = it; activityDetailsModified = true })
+                        Text("Přesný čas startu a konce", style = MaterialTheme.typography.labelSmall)
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(checked = includeActFullRecord, onCheckedChange = { includeActFullRecord = it; activityDetailsModified = true })
+                        Text("Úplný FIT záznam (obsahuje přesný čas)", style = MaterialTheme.typography.labelSmall)
                     }
                 }
 
@@ -1002,13 +1054,23 @@ private fun EditGrantDialog(
                 enabled = selectedCategories.isNotEmpty() && guardianConfirmed,
                 onClick = {
                     if (isMinor && !guardianConfirmed) return@Button
-                    val newSources: Set<Provider>? = when (selectedSourceMode) {
-                        1 -> setOf(Provider.WITHINGS_API)
-                        2 -> setOf(Provider.GARMIN_PERSONAL, Provider.GARMIN_EXTENDED)
-                        else -> null
+                    val explicitAct = if (activityDetailsModified) {
+                        buildSet<Field> {
+                            if (Field.ACT_CHARTS in grant.fields) add(Field.ACT_CHARTS)
+                            if (includeActRoute) add(Field.ACT_ROUTE)
+                            if (includeActExactTime) add(Field.ACT_EXACT_TIME)
+                            if (includeActFullRecord) add(Field.ACT_FULL_RECORD)
+                        }
+                    } else {
+                        null
                     }
-                    val newFields = Field.entries.filter { it.category in selectedCategories }.toSet()
-                    val updated = grant.copy(fields = newFields, sources = newSources)
+                    val updated = GrantEditor.editGrant(
+                        existing = grant,
+                        selectedCategories = selectedCategories,
+                        selectedSourceChoice = selectedSourceChoice,
+                        sourceModified = sourceModified,
+                        explicitActivityFields = explicitAct,
+                    )
                     scope.launch {
                         val res = withContext(Dispatchers.IO) {
                             val consentTs = if (isMinor && guardianConfirmed) System.currentTimeMillis() else null

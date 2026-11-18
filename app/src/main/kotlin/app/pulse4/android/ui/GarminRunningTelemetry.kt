@@ -1210,7 +1210,7 @@ fun RelativeEffortCard(
                         )
                         Spacer(Modifier.width(8.dp))
                         Text(
-                            "KARDIO ZÁTĚŽ · RELATIVNÍ ÚSILÍ",
+                            "KARDIO ZÁTĚŽ · ODHAD PULSE4",
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.ExtraBold,
                             color = accentOrange,
@@ -1360,10 +1360,8 @@ fun BestEffortsCard(
                 Spacer(Modifier.height(12.dp))
 
                 bestEfforts.forEachIndexed { idx, be ->
-                    val timeFmt = "%02d:%02d".format((be.timeS / 60).toInt(), (be.timeS % 60).toInt())
-                    val paceMin = (be.paceSPerKm / 60).toInt()
-                    val paceSec = (be.paceSPerKm % 60).toInt()
-                    val paceFmt = "%d:%02d /km".format(paceMin, paceSec)
+                    val timeFmt = "%02d:%02d".format((be.timeS / 60).toInt(), kotlin.math.round(be.timeS % 60).toInt().coerceAtMost(59))
+                    val paceFmt = fmt.pace(be.paceSPerKm)
                     val (badgeBg, badgeFg) = when (idx) {
                         0 -> Color(0xFFF59E0B).copy(alpha = 0.22f) to Color(0xFFFBBF24)
                         1 -> Color(0xFF94A3B8).copy(alpha = 0.22f) to Color(0xFFE2E8F0)
@@ -1406,8 +1404,11 @@ fun BestEffortsCard(
                                 Spacer(Modifier.width(10.dp))
                                 Column {
                                     Text(be.label, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.ExtraBold, color = Color.White)
+                                    val eleSuffix = be.elevationChangeM?.let {
+                                        " · převýšení ${if (it >= 0) "+%.0f".format(it) else "%.0f".format(it)} m"
+                                    } ?: ""
                                     Text(
-                                        "na ${"%.1f".format(be.startKm)} km · převýšení ${if (be.elevationChangeM >= 0) "+%.0f".format(be.elevationChangeM) else "%.0f".format(be.elevationChangeM)} m",
+                                        "na ${"%.1f".format(be.startKm)} km$eleSuffix",
                                         style = MaterialTheme.typography.labelSmall,
                                         color = Color(0xFF94A3B8)
                                     )
@@ -1450,11 +1451,7 @@ fun GapCard(
         )
     }
 
-    fun fmtP(p: Double): String {
-        val m = (p / 60).toInt()
-        val s = (p % 60).toInt()
-        return "%d:%02d /km".format(m, s)
-    }
+    fun fmtP(p: Double): String = fmt.pace(p)
 
     val deltaS = realPaceSPerKm - gapPaceSPerKm
     val deltaStr = if (deltaS > 0) "-%d s/km".format(deltaS.toInt()) else "+%d s/km".format(-deltaS.toInt())

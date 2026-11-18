@@ -444,16 +444,6 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
         }
     }
 
-    @Deprecated("Moved to app/src/debug/.../DemoSeeder.kt (P0-1)")
-    fun seedDemoData(nowMs: Long = System.currentTimeMillis()) {
-        if (!app.pulse4.android.BuildConfig.DEBUG) return
-        runCatching {
-            Class.forName("app.pulse4.android.debug.DemoSeeder")
-                .getMethod("seed", Context::class.java, ServiceLocator::class.java, Long::class.javaPrimitiveType)
-                .invoke(null, context, sl, nowMs)
-        }
-    }
-
     internal fun extractFitFromZipOrRaw(bytes: ByteArray): ByteArray? {
         val maxFitBytes = 25 * 1024 * 1024
         val maxZipEntries = 32
@@ -1222,8 +1212,7 @@ class ShareService(private val sl: ServiceLocator) {
     fun familyLinks(): List<FamilyLink> = sl.db.familyLinks().allNow().map { json.decodeFromString(FamilyLink.serializer(), it.json) }
     fun pendingRequests(): List<PendingRequestRow> = sl.db.pendingRequests().pendingNow()
 
-    @Deprecated("ENG-2: use saveGrantWithPolicy; will become private once external callers are removed")
-    fun saveGrant(g: ShareGrant) {
+    private fun saveGrant(g: ShareGrant) {
         if (g.active) {
             saveGrantWithPolicy(g).getOrThrow()
         } else {

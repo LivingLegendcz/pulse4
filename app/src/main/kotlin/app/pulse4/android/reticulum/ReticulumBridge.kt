@@ -11,6 +11,7 @@ import android.net.wifi.WifiManager
 import app.pulse4.android.data.NetworkMode
 import app.pulse4.android.data.Settings
 import app.pulse4.android.security.SecretStore
+import app.pulse4.sync.E2eeEnvelope
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.io.OutputStream
@@ -81,20 +82,11 @@ sealed interface BridgeEvent {
     data class Delivery(val eventId: String, val state: String, val reason: String?) : BridgeEvent
 }
 
-@Serializable
-internal data class EncryptedEnvelope(
-    val v: Int = 1,
-    val sender: String,
-    val recipient: String,
-    val iv: String,
-    val ciphertext: String,
-    val mac: String,
-    val eventId: String? = null
-)
+internal typealias EncryptedEnvelope = E2eeEnvelope
 
 /**
  * Nativní Kotlin transportní most (PulseSync):
- * 1. Plné end-to-end šifrování (E2EE v2: X25519 ECDH + Ed25519 podpis + AES-256-GCM).
+ * 1. Plné end-to-end šifrování (E2EE v3: ephemeral X25519 + HKDF-SHA256 + Ed25519 podpis + AES-256-GCM + SEC-3 metadata protection; zpětně kompatibilní s v2).
  * 2. Tier 1: Lokální Wi-Fi přenos s nulovou konfigurací přes Android NSD (mDNS) a vestavěný mikro-server.
  * 3. Tier 2: Směrování přes Reticulum (RNS) TCP uzel v internetu s HDLC paketovým rámováním a nativní LXMF Propagation schránkou.
  */
@@ -1278,7 +1270,7 @@ class ReticulumBridge(
     fun send(destHash: String, content: String, propagated: Boolean, eventId: String, forceGateway: Boolean = false) {
         val selfInfo = ensureStarted()
         val encryptedEnvelope = encryptPayload(selfInfo.deliveryHash, destHash, content, eventId)
-        val jsonPayload = json.encodeToString(encryptedEnvelope)
+        val jsonPayload = BridgeEnvelopeCrypto.encode(encryptedEnvelope)
 
         // 1. Zkouška přímého přenosu po lokální Wi-Fi (raw Socket, nepodléhá Android cleartext HTTP omezení)
         val localEndpoint = if (forceGateway) null else localPeerMap[destHash]
@@ -1472,21 +1464,24 @@ class ReticulumBridge(
     }
 
     private fun decodeIncomingEncryptedEnvelope(rawJson: String, selfHash: String): BridgeEvent.Message? {
-        val env = runCatching { json.decodeFromString<EncryptedEnvelope>(rawJson) }
-            .onFailure { android.util.Log.w("PulseSync", "Chyba dekódování JSON obálky: ${it.message}") }
-            .getOrNull() ?: return null
-        if (env.recipient != selfHash && env.recipient != legacyDeliveryHash) {
-            android.util.Log.w("PulseSync", "Příjemce v obálce nesouhlasí: ${env.recipient} != $selfHash")
-            return null
+        val xPriv = x25519PrivKey ?: return null
+        val expectedRecipients = buildSet {
+            add(selfHash)
+            legacyDeliveryHash?.let(::add)
         }
-
-        val decrypted = decryptPayload(env)
-        val normalizedSource = legacyToPrimaryContact[env.sender] ?: env.sender
-        return if (decrypted != null) {
-            android.util.Log.i("PulseSync", "Úspěšně dešifrována zpráva od $normalizedSource (v=${env.v}, len=${decrypted.length})")
-            BridgeEvent.Message(source = normalizedSource, validated = true, content = decrypted)
+        val result = BridgeEnvelopeCrypto.decryptToBridgeMessage(
+            rawJson = rawJson,
+            xPriv = xPriv,
+            expectedRecipients = expectedRecipients,
+            lookupContactPubKeyB64 = { sender -> registeredContacts[sender] },
+            normalizeSource = { sender -> legacyToPrimaryContact[sender] ?: sender },
+        )
+        return if (result != null) {
+            val (dec, msg) = result
+            android.util.Log.i("PulseSync", "Úspěšně dešifrována zpráva od ${msg.source} (v=${dec.version}, len=${msg.content.length})")
+            msg
         } else {
-            android.util.Log.w("PulseSync", "Dešifrování nebo ověření podpisu selhalo pro zprávu od $normalizedSource")
+            android.util.Log.w("PulseSync", "Dešifrování nebo ověření podpisu příchozí obálky selhalo")
             null
         }
     }
@@ -1503,85 +1498,35 @@ class ReticulumBridge(
         X25519PublicKeyParameters(raw, 0) to Ed25519PublicKeyParameters(raw, 32)
     }.getOrNull()
 
-    private fun deriveE2eeAesKey(sharedSecret: ByteArray, sender: String, recipient: String): ByteArray {
-        val (a, b) = if (sender <= recipient) sender to recipient else recipient to sender
-        val md = MessageDigest.getInstance("SHA-256")
-        md.update(sharedSecret)
-        md.update("pulse4-e2ee-v2".toByteArray(Charsets.UTF_8))
-        md.update(a.toByteArray(Charsets.UTF_8))
-        md.update(b.toByteArray(Charsets.UTF_8))
-        return md.digest()
-    }
-
-    private fun canonicalSignatureInput(sender: String, recipient: String, ivB64: String, ciphertextB64: String, eventId: String?): ByteArray =
-        "pulse4-v2:$sender:$recipient:$ivB64:$ciphertextB64:${eventId ?: ""}".toByteArray(Charsets.UTF_8)
-
     internal fun encryptPayload(sender: String, recipient: String, content: String, eventId: String): EncryptedEnvelope {
-        val recipientPub = registeredContacts[recipient]?.let { decodeContactPubKey64(it) }
-        val xPriv = x25519PrivKey
+        val recPubKeyB64 = registeredContacts[recipient]
+            ?: throw IllegalStateException("Unknown recipient public key for E2EE v3")
         val edPriv = ed25519PrivKey
-        if (recipientPub == null || xPriv == null || edPriv == null) {
-            throw IllegalStateException("Unknown recipient public key for E2EE v2")
-        }
-        val agreement = X25519Agreement()
-        agreement.init(xPriv)
-        val sharedSecret = ByteArray(agreement.agreementSize)
-        agreement.calculateAgreement(recipientPub.first, sharedSecret, 0)
-        val aesBytes = deriveE2eeAesKey(sharedSecret, sender, recipient)
-        val key = SecretKeySpec(aesBytes, "AES")
-
-        val iv = ByteArray(12).also { SecureRandom().nextBytes(it) }
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(128, iv))
-        val ciphertext = cipher.doFinal(content.toByteArray(Charsets.UTF_8))
-        val ivB64 = Base64.getEncoder().encodeToString(iv)
-        val ctB64 = Base64.getEncoder().encodeToString(ciphertext)
-
-        val sigInput = canonicalSignatureInput(sender, recipient, ivB64, ctB64, eventId)
-        val signer = Ed25519Signer()
-        signer.init(true, edPriv)
-        signer.update(sigInput, 0, sigInput.size)
-        val sigBytes = signer.generateSignature()
-
-        return EncryptedEnvelope(
-            v = 2,
+            ?: throw IllegalStateException("Missing Ed25519 identity key for E2EE v3")
+        return BridgeEnvelopeCrypto.encrypt(
             sender = sender,
             recipient = recipient,
-            iv = ivB64,
-            ciphertext = ctB64,
-            mac = bytesToHex(sigBytes),
-            eventId = eventId
+            content = content,
+            eventId = eventId,
+            edPriv = edPriv,
+            recipientPubKeyB64 = recPubKeyB64,
         )
     }
 
     internal fun decryptPayload(env: EncryptedEnvelope): String? = runCatching {
-        when (env.v) {
-            2 -> {
-                val senderPub = registeredContacts[env.sender]?.let { decodeContactPubKey64(it) } ?: return null
-                val xPriv = x25519PrivKey ?: return null
-                val sigBytes = hexToBytes(env.mac)
-                if (sigBytes.size != 64) return null
-                val sigInput = canonicalSignatureInput(env.sender, env.recipient, env.iv, env.ciphertext, env.eventId)
-                val verifier = Ed25519Signer()
-                verifier.init(false, senderPub.second)
-                verifier.update(sigInput, 0, sigInput.size)
-                if (!verifier.verifySignature(sigBytes)) return null
-
-                val agreement = X25519Agreement()
-                agreement.init(xPriv)
-                val sharedSecret = ByteArray(agreement.agreementSize)
-                agreement.calculateAgreement(senderPub.first, sharedSecret, 0)
-                val aesBytes = deriveE2eeAesKey(sharedSecret, env.sender, env.recipient)
-                val key = SecretKeySpec(aesBytes, "AES")
-
-                val iv = Base64.getDecoder().decode(env.iv)
-                val cipherBytes = Base64.getDecoder().decode(env.ciphertext)
-                val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-                cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, iv))
-                String(cipher.doFinal(cipherBytes), Charsets.UTF_8)
+        val xPriv = x25519PrivKey ?: return null
+        val expectedRecipients = info?.deliveryHash?.let { selfHash ->
+            buildSet {
+                add(selfHash)
+                legacyDeliveryHash?.let(::add)
             }
-            else -> null
         }
+        BridgeEnvelopeCrypto.decrypt(
+            envelope = env,
+            xPriv = xPriv,
+            expectedRecipients = expectedRecipients,
+            lookupContactPubKeyB64 = { sender -> registeredContacts[sender] },
+        )?.content
     }.getOrNull()
 
     fun drainEvents(): List<BridgeEvent> {

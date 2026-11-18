@@ -16,16 +16,30 @@ import com.google.android.play.core.install.InstallStateUpdatedListener
 import com.google.android.play.core.install.model.AppUpdateType
 import com.google.android.play.core.install.model.InstallStatus
 import com.google.android.play.core.install.model.UpdateAvailability
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.CalendarToday
 import androidx.compose.material.icons.outlined.Group
@@ -51,6 +65,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -83,13 +98,19 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import app.pulse4.android.Pulse4App
+import app.pulse4.android.security.CorruptedSecretIssue
+import app.pulse4.android.security.CriticalSecretKind
+import app.pulse4.backup.BackupCodec
+import app.pulse4.backup.BackupException
 import app.pulse4.domain.MetricType
+import app.pulse4.domain.PLog
 import app.pulse4.ui.Fmt
 import java.time.ZoneId
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private val navRequestFlow = MutableStateFlow<String?>(null)
 private val activeFmtFlow = MutableStateFlow(activeFmt)
@@ -113,13 +134,20 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         val sl = (application as Pulse4App).services
         CoroutineScope(Dispatchers.IO).launch {
-            sl.settings.warmUp()
-            val u = sl.settings.unitSystem
-            val _mp = sl.settings.mapProvider
-            val z = runCatching { ZoneId.of(sl.settings.zoneId) }.getOrDefault(ZoneId.systemDefault())
-            val updatedFmt = Fmt(z, units = u)
-            activeFmt = updatedFmt
-            activeFmtFlow.value = updatedFmt
+            if (sl.vault.probeCriticalSecrets(sl.secrets) != null) {
+                return@launch
+            }
+            runCatching {
+                sl.settings.warmUp()
+                val u = sl.settings.unitSystem
+                val _mp = sl.settings.mapProvider
+                val z = runCatching { ZoneId.of(sl.settings.zoneId) }.getOrDefault(ZoneId.systemDefault())
+                val updatedFmt = Fmt(z, units = u)
+                activeFmt = updatedFmt
+                activeFmtFlow.value = updatedFmt
+            }.onFailure { e ->
+                PLog.e("MainActivity", e) { "Startup warmup failed" }
+            }
         }
         setContent {
             Pulse4Theme {
@@ -195,7 +223,13 @@ class MainActivity : ComponentActivity() {
         val receivedAt = System.currentTimeMillis()
         val url = data.toString()
         intent.data = null
-        CoroutineScope(Dispatchers.IO).launch { (application as Pulse4App).services.withings.handleCallback(url, receivedAt) }
+        CoroutineScope(Dispatchers.IO).launch {
+            runCatching {
+                (application as Pulse4App).services.withings.handleCallback(url, receivedAt)
+            }.onFailure { e ->
+                PLog.e("MainActivity", e) { "Withings callback handling failed" }
+            }
+        }
     }
 }
 
@@ -257,6 +291,33 @@ private data class Dest(val route: String, val label: String, val icon: androidx
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun Root(sl: app.pulse4.android.di.ServiceLocator, onCompletePlayUpdate: () -> Unit = {}) {
+    val recoveryIssue by sl.vault.recoveryIssue.collectAsState()
+    val recoveryScope = rememberCoroutineScope()
+    val issue = recoveryIssue
+    if (issue != null) {
+        CriticalSecretRecoveryScreen(
+            issue = issue,
+            sl = sl,
+            onRecovered = {
+                recoveryScope.launch(Dispatchers.IO) {
+                    runCatching {
+                        sl.settings.warmUp()
+                        val u = sl.settings.unitSystem
+                        val z = runCatching { ZoneId.of(sl.settings.zoneId) }.getOrDefault(ZoneId.systemDefault())
+                        val updatedFmt = Fmt(z, units = u)
+                        activeFmt = updatedFmt
+                        activeFmtFlow.value = updatedFmt
+                        sl.transport
+                        sl.bridge.ensureStarted()
+                    }.onFailure { e ->
+                        PLog.e("MainActivity", e) { "Post-recovery startup failed" }
+                    }
+                }
+            },
+        )
+        return
+    }
+
     val nav = rememberNavController()
     val main = listOf(
         Dest("today", "Dnes", Icons.Outlined.CalendarToday),
@@ -504,5 +565,171 @@ private fun Root(sl: app.pulse4.android.di.ServiceLocator, onCompletePlayUpdate:
             }
         }
         }
+    }
+}
+
+@Composable
+private fun CriticalSecretRecoveryScreen(
+    issue: CorruptedSecretIssue,
+    sl: app.pulse4.android.di.ServiceLocator,
+    onRecovered: () -> Unit,
+) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var pass by remember { mutableStateOf("") }
+    var statusMsg by remember { mutableStateOf<String?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    var confirmNewIdentity by remember { mutableStateOf(false) }
+
+    val openBackup = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        busy = true
+        statusMsg = null
+        scope.launch {
+            val resultMsg = withContext(Dispatchers.IO) {
+                try {
+                    val bytes = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                        ?: error("Nelze přečíst soubor zálohy")
+                    // Nejprve ověříme a dešifrujeme zálohu, než smažeme poškozený klíč / databázi.
+                    val entries = BackupCodec.open(bytes, pass.toCharArray())
+                    sl.vault.resetCorruptedForRecovery(
+                        secrets = sl.secrets,
+                        issue = issue,
+                        resetDatabaseToo = (issue.kind == CriticalSecretKind.DB_KEY),
+                    )
+                    sl.backupService.restore(entries)
+                    sl.bridge.ensureStarted()
+                    onRecovered()
+                    null
+                } catch (e: BackupException) {
+                    "Chyba hesla nebo poškozená záloha: ${e.message}"
+                } catch (e: Exception) {
+                    PLog.e("Recovery", e) { "Backup recovery failed" }
+                    "Obnova ze zálohy selhala: ${e.message ?: e::class.simpleName}"
+                }
+            }
+            statusMsg = resultMsg
+            busy = false
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .verticalScroll(rememberScrollState())
+            .padding(20.dp),
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Card(
+            shape = RoundedCornerShape(20.dp),
+            border = BorderStroke(1.dp, Color(0xFFEF4444).copy(alpha = 0.55f)),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    "Obnova poškozeného šifrovacího klíče",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFFFEE2E2),
+                )
+                Text(
+                    if (issue.kind == CriticalSecretKind.DB_KEY) {
+                        "Nepodařilo se dešifrovat klíč databáze (${issue.secretName}: ${issue.error}). " +
+                            "Bez obnovy ze zálohy nelze původní šifrovaná data odemknout."
+                    } else {
+                        "Nepodařilo se dešifrovat soukromou identitu Reticulum (${issue.secretName}: ${issue.error}). " +
+                            "Můžete obnovit data ze zálohy nebo vytvořit novou identitu."
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MineralOnSurfaceVariantDark,
+                )
+
+                OutlinedTextField(
+                    value = pass,
+                    onValueChange = { pass = it },
+                    label = { Text("Heslo k záloze (.p4bk)") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    singleLine = true,
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+
+                Button(
+                    onClick = { openBackup.launch(arrayOf("*/*")) },
+                    enabled = !busy && pass.isNotEmpty(),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Obnovit ze zálohy")
+                }
+
+                OutlinedButton(
+                    onClick = { confirmNewIdentity = true },
+                    enabled = !busy,
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFFCA5A5)),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Vytvořit novou identitu (ztráta párování)")
+                }
+
+                statusMsg?.let { msg ->
+                    Spacer(Modifier.height(4.dp))
+                    Text(msg, style = MaterialTheme.typography.bodySmall, color = Color(0xFFFCA5A5))
+                }
+            }
+        }
+    }
+
+    if (confirmNewIdentity) {
+        AlertDialog(
+            onDismissRequest = { if (!busy) confirmNewIdentity = false },
+            title = { Text("Vytvořit novou identitu?") },
+            text = {
+                Text(
+                    if (issue.kind == CriticalSecretKind.DB_KEY) {
+                        "Vytvoření nového klíče a identity vymaže nepřístupnou databázi a zruší všechna stávající párování i sdílení. Kontakty bude nutné znovu spárovat."
+                    } else {
+                        "Vytvoření nové identity zruší stávající párování s kontakty a sdílení; bude nutné zařízení znovu spárovat."
+                    },
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !busy,
+                    onClick = {
+                        busy = true
+                        statusMsg = null
+                        scope.launch {
+                            val errMsg = withContext(Dispatchers.IO) {
+                                runCatching {
+                                    sl.vault.resetCorruptedForRecovery(
+                                        secrets = sl.secrets,
+                                        issue = issue,
+                                        resetDatabaseToo = (issue.kind == CriticalSecretKind.DB_KEY),
+                                    )
+                                    sl.bridge.ensureStarted()
+                                    onRecovered()
+                                    null
+                                }.getOrElse { e ->
+                                    PLog.e("Recovery", e) { "New identity creation failed" }
+                                    "Vytvoření nové identity selhalo: ${e.message ?: e::class.simpleName}"
+                                }
+                            }
+                            if (errMsg != null) statusMsg = errMsg
+                            confirmNewIdentity = false
+                            busy = false
+                        }
+                    },
+                ) {
+                    Text("Vytvořit novou identitu", color = Color(0xFFFCA5A5), fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(enabled = !busy, onClick = { confirmNewIdentity = false }) {
+                    Text("Zrušit")
+                }
+            },
+        )
     }
 }

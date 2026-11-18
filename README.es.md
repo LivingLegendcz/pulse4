@@ -51,7 +51,7 @@ El intercambio selectivo de métricas con familiares o entrenadores se realiza m
 
 ### 4. Compartición Descentralizada (Reticulum Mesh)
 - **Sin nube central:** Comunicación directa P2P entre dispositivos.
-- **Cifrado asimétrico:** Seguridad criptográfica basada en Curve25519/Ed25519.
+- **Cifrado de extremo a extremo (E2EE v3):** Claves de identidad Curve25519/Ed25519 con clave efímera X25519 del remitente por mensaje (ephemeral-static ECIES, protegiendo mensajes pasados si se compromete la clave del remitente) y sobres internos con metadatos minimizados.
 - **Permisos granulares:** Control total sobre qué datos se comparten con cada contacto.
 
 ---

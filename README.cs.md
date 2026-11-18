@@ -51,7 +51,7 @@ Sdílení vybraných údajů mezi členy rodiny či sportovní skupiny probíhá
 
 ### 4. Decentralizované sdílení (Reticulum Mesh)
 - **Zero Cloud Architecture:** Žádná centrální databáze ani server třetí strany.
-- **Kryptografické P2P šifrování:** Přenos vybraných metrik a souhrnů probíhá šifrovaně přes protokol LXMF přímo mezi zařízeními.
+- **Kryptografické P2P šifrování (E2EE v3):** Identitní klíče Curve25519/Ed25519 s efemérním X25519 klíčem odesílatele pro každou zprávu (ephemeral-static ECIES, ochrana minulých zpráv při kompromitaci klíče odesílatele) a minimalizací metadat uvnitř obálky; přenos vybraných metrik a souhrnů probíhá přes protokol LXMF přímo mezi zařízeními.
 - **Granulární oprávnění:** Uživatel přesně určuje, jaké metriky s kým sdílí (např. pouze regenerace pro trenéra, kompletní souhrn pro partnera).
 
 ---

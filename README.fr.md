@@ -51,7 +51,7 @@ Le partage décentralisé d'informations choisies entre membres d'une famille ou
 
 ### 4. Partage Décentralisé (Reticulum Mesh)
 - **Architecture sans cloud :** Échanges directs pair-à-pair entre téléphones.
-- **Chiffrement de bout en bout :** Clés asymétriques Ed25519 garantissant l'intégrité et la confidentialité.
+- **Chiffrement de bout en bout (E2EE v3) :** Clés d'identité Curve25519/Ed25519 avec une clé éphémère X25519 de l'expéditeur par message (ephemeral-static ECIES, protégeant les messages passés si la clé de l'expéditeur est compromise) et enveloppes internes à métadonnées minimisées.
 - **Permissions granulaires :** Contrôle précis des métriques partagées avec chaque contact.
 
 ---

@@ -25,9 +25,11 @@ class WeakX25519KeyException(message: String) : SecurityException(message)
 /**
  * Outer wire envelope for Pulse4 E2EE transport.
  *
- * - **v3 (default, forward-secret + SEC-3 metadata protection):**
+ * - **v3 (default, per-message ephemeral sender X25519 key / ephemeral-static ECIES + SEC-3 metadata protection):**
  *   Carries only `v = 3`, `epk` (32B ephemeral X25519 public key, Base64), `iv` (12B GCM IV, Base64),
  *   `ciphertext` (Base64 AES-256-GCM of padded [InnerEnvelope]), and `eventId` (used as HKDF salt + AAD).
+ *   Protects past messages if the sender's long-term key is compromised (compromise of the recipient's
+ *   static X25519 key still decrypts recorded v3 envelopes without ratchet/prekey rotation).
  *   `sender` and `mac` are omitted from the outer JSON so relays/observers cannot see who is
  *   communicating or verify a public signature. `recipient` is also omitted by default.
  * - **v2 (legacy):**
@@ -90,9 +92,10 @@ data class DecryptedEnvelope(
 
 /**
  * End-to-end encryption primitives for Pulse4:
- * - **E2EE v3**: Per-message ephemeral X25519 ECDH + all-zero shared-secret rejection +
- *   HKDF-SHA256 (`info = "pulse4-e2ee-v3"`, `salt = msgId`) + AES-256-GCM with AAD binding
- *   (`epk`, `msgId`) + padded [InnerEnvelope] hiding sender/recipient/signature (SEC-3).
+ * - **E2EE v3**: Per-message ephemeral sender X25519 key (ephemeral-static ECIES, protecting past messages
+ *   if sender's key is compromised) + all-zero shared-secret rejection + HKDF-SHA256
+ *   (`info = "pulse4-e2ee-v3"`, `salt = msgId`) + AES-256-GCM with AAD binding (`epk`, `msgId`) +
+ *   padded [InnerEnvelope] hiding sender/recipient/signature (SEC-3).
  * - **E2EE v2**: Legacy static X25519 + Ed25519 decryption for backward compatibility during transition.
  */
 object E2eeCrypto {
@@ -199,7 +202,8 @@ object E2eeCrypto {
     }
 
     /**
-     * Encrypts an outbound message using E2EE v3 (forward secrecy + SEC-3 metadata minimization).
+     * Encrypts an outbound message using E2EE v3 (per-message ephemeral sender X25519 key —
+     * ephemeral-static ECIES, protecting past messages if sender's key is compromised — + SEC-3 metadata minimization).
      * Defaults to v3 for all new outbound messages.
      */
     fun encrypt(
@@ -300,7 +304,7 @@ object E2eeCrypto {
      * Legacy E2EE v2 encryption (static X25519 + Ed25519), retained for backward-compatibility tests.
      * New outbound messages should use [encrypt] / [encryptV3].
      */
-    @Deprecated("Use encrypt() / encryptV3() for forward secrecy")
+    @Deprecated("Use encrypt() / encryptV3() for per-message ephemeral sender X25519 key (ephemeral-static ECIES)")
     fun encryptV2Legacy(
         senderId: String,
         recipientId: String,
@@ -338,7 +342,7 @@ object E2eeCrypto {
     }
 
     /**
-     * Decrypts and authenticates an [E2eeEnvelope] (supports both v3 forward-secret and v2 legacy).
+     * Decrypts and authenticates an [E2eeEnvelope] (supports both v3 ephemeral-static ECIES and v2 legacy).
      *
      * @param expectedRecipients If non-null, verifies the authenticated recipient is in this set
      *   (e.g. `setOfNotNull(selfHash, legacyDeliveryHash)`).

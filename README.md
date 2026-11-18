@@ -51,7 +51,7 @@ Voluntary sharing of selected biometrics and workouts between family members or 
 
 ### 4. Decentralized Mesh Sharing (Reticulum Mesh & LXMF)
 - **Serverless P2P Architecture:** Zero external application servers or third-party cloud aggregators.
-- **End-to-End Cryptography:** Asymmetric Curve25519/Ed25519 identity keys ensure message authenticity and encryption.
+- **End-to-End Cryptography (E2EE v3):** Curve25519/Ed25519 identity keys with a per-message ephemeral sender X25519 key (ephemeral-static ECIES, protecting past messages if sender's key is compromised) and metadata-minimized inner envelopes ensure message authenticity and confidentiality.
 - **Granular Field Permissions:** Users selectively grant specific metric visibility on a per-contact basis (e.g. sharing only recovery metrics with a coach, while sharing full telemetry with family).
 
 ---

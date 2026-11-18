@@ -12,7 +12,6 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.IBinder
-import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import app.pulse4.android.Pulse4App
@@ -20,6 +19,7 @@ import app.pulse4.android.R
 import app.pulse4.android.data.NetworkMode
 import app.pulse4.android.reticulum.GatewayHealthState
 import app.pulse4.android.ui.MainActivity
+import app.pulse4.domain.PLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -57,7 +57,7 @@ class PulseSyncService : Service() {
             promoteToForeground("Reticulum připraveno na pozadí")
             true
         } catch (e: Exception) {
-            Log.e(TAG, "startForeground failed; falling back to WorkManager", e)
+            PLog.e(TAG, e) { "startForeground failed; falling back to WorkManager" }
             stopSelf()
             Scheduler.schedulePeriodic(applicationContext)
             false
@@ -75,7 +75,11 @@ class PulseSyncService : Service() {
         }
 
         loopJob = scope.launch {
-            if (!sl.settings.backgroundServiceEnabled) {
+            val bgEnabled = runCatching { sl.settings.backgroundServiceEnabled }.getOrElse { e ->
+                PLog.w(TAG, e) { "Cannot read settings in PulseSyncService; stopping service" }
+                false
+            }
+            if (!bgEnabled) {
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
                 return@launch
@@ -85,11 +89,12 @@ class PulseSyncService : Service() {
                 sl.transport
                 sl.bridge.ensureStarted()
             }.onFailure {
-                Log.w(TAG, "Bridge start failed in PulseSyncService", it)
+                PLog.w(TAG, it) { "Bridge start failed in PulseSyncService" }
             }
 
             while (isActive) {
-                if (!sl.settings.backgroundServiceEnabled) {
+                val stillEnabled = runCatching { sl.settings.backgroundServiceEnabled }.getOrDefault(false)
+                if (!stillEnabled) {
                     stopForeground(STOP_FOREGROUND_REMOVE)
                     stopSelf()
                     break
@@ -124,7 +129,7 @@ class PulseSyncService : Service() {
                             sl.shareService.flushPlanNotifications(System.currentTimeMillis())
                         }
                     }.onFailure {
-                        Log.w(TAG, "Background sync tick failed", it)
+                        PLog.w(TAG, it) { "Background sync tick failed" }
                     }
                 }
 
@@ -260,7 +265,7 @@ class PulseSyncService : Service() {
                     runCatching {
                         ContextCompat.startForegroundService(appCtx, intent)
                     }.onFailure {
-                        Log.w(TAG, "Nelze spustit ForegroundService z aktuálního kontextu", it)
+                        PLog.w(TAG, it) { "Nelze spustit ForegroundService z aktuálního kontextu" }
                     }
                 } else {
                     runCatching { appCtx.stopService(intent) }

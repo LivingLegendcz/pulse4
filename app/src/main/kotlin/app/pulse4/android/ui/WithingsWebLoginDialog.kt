@@ -79,9 +79,8 @@ fun WithingsNativeLoginForm(
 ) {
     val scope = rememberCoroutineScope()
     val savedEmail = sl.secrets.getString("withings.web.email") ?: sl.withings.loadWebSession()?.email ?: sl.withings.pendingEmail()
-    val savedPass = sl.secrets.getString("withings.web.password")
     var email by rememberSaveable { mutableStateOf(savedEmail ?: "") }
-    var password by remember { mutableStateOf(savedPass ?: "") }
+    var password by remember { mutableStateOf("") }
     var code by rememberSaveable { mutableStateOf("") }
     var awaitingCode by rememberSaveable { mutableStateOf(sl.withings.isAwaitingCode()) }
     var busy by remember { mutableStateOf(false) }
@@ -209,7 +208,7 @@ fun WithingsNativeLoginForm(
                         color = Color(0xFF38BDF8)
                     )
                     Text(
-                        "Pulse4 se přihlašuje pouze e-mailem a heslem. Pokud se k Withings přihlašujete přes Google nebo Apple, založte si nejdřív k účtu heslo: na account.withings.com zvolte „Zapomenuté heslo“, zadejte svůj e-mail a v doručeném e-mailu si heslo nastavte. Heslo se uloží šifrovaně v telefonu a slouží k automatickému obnovení spojení.",
+                        "Pulse4 se přihlašuje jako webový prohlížeč. Heslo se použije jen jednou a nikdy se neukládá. Ukládá se pouze šifrovaná relace (cookies) pro automatické obnovení spojení. Pokud se k Withings přihlašujete přes Google nebo Apple, založte si nejdřív heslo přes „Zapomenuté heslo“ na account.withings.com.",
                         style = MaterialTheme.typography.bodySmall,
                         color = Color(0xFFCBD5E1)
                     )
@@ -341,8 +340,7 @@ fun WithingsReconnectForm(
         ?: sl.withings.loadWebSession()?.email
         ?: sl.withings.pendingEmail()
         ?: ""
-    val savedPass = sl.secrets.getString("withings.web.password").orEmpty()
-    var password by remember { mutableStateOf(savedPass) }
+    var password by remember { mutableStateOf("") }
     var code by rememberSaveable { mutableStateOf("") }
     var codeSent by rememberSaveable { mutableStateOf(sl.withings.isAwaitingCode()) }
     var verifyingCode by remember { mutableStateOf(false) }
@@ -431,7 +429,7 @@ fun WithingsReconnectForm(
                         color = Color(0xFF38BDF8)
                     )
                     Text(
-                        "Pokud se k Withings přihlašujete přes Google nebo Apple, založte si k účtu heslo: na account.withings.com zvolte „Zapomenuté heslo“ a heslo si nastavte z doručeného e-mailu. Heslo se uloží šifrovaně v telefonu a slouží k automatickému obnovení spojení.",
+                        "Pulse4 se přihlašuje jako webový prohlížeč. Heslo se použije jen jednou a nikdy se neukládá. Ukládá se pouze šifrovaná relace (cookies) pro automatické obnovení spojení. Pokud se k Withings přihlašujete přes Google nebo Apple, založte si heslo přes „Zapomenuté heslo“ na account.withings.com.",
                         style = MaterialTheme.typography.bodySmall,
                         color = Color(0xFFCBD5E1)
                     )
@@ -621,7 +619,7 @@ fun WithingsWebLoginDialog(
                     NativeDialogStage.LoginForm
                 }
             } catch (e: Exception) {
-                stage = NativeDialogStage.Error(e.message ?: "Nepodařilo se načíst profily z Withings.")
+                stage = NativeDialogStage.Error("Nepodařilo se načíst profily z Withings. Zkuste to prosím znovu.")
             }
         }
     }

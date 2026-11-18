@@ -102,13 +102,10 @@ odkazované webem Withings. Statický kód neprokazuje úspěšné přihlášen�
 
 ### Návrh uživatelského průchodu
 
-1. „Připojit Withings“ otevře přihlášení Withings v samostatném WebView P4; ověřit běžné přihlášení a MFA.
-   Automatické přihlášení přes Google/Apple ve WebView není potvrzené. P4 nesbírá ani neukládá heslo.
+1. „Připojit Withings“ otevře nativní přihlašovací dialog P4 (bez WebView; OkHttp HTML/form tok proti `account.withings.com`), včetně podpory 2FA kódu. P4 nikdy neukládá heslo – použije se pouze jednorázově pro přihlášení.
 2. Po dokončení přihlášení konektor ověří relaci čtením účtu a nabídne seznam profilů. Uživatel vybere svůj
    profil a případně profil dítěte. Data se přiřazují podle `userid`, nikoli odhadem podle váhy.
-3. Relace zůstane pouze na daném telefonu. Nativní HTTP klient převezme potřebný stav z vlastního WebView;
-   nelze předpokládat přístup ke cookies běžného Chrome. Ověřit přenos cookies, jejich rozsah a případný
-   `session_token`. Kopie relace mimo WebView se šifruje pomocí Keystore a nevstupuje do záloh ani logů.
+3. Relace (šifrované cookies důvěryhodného zařízení a `session_token`) zůstane pouze na daném telefonu v úložišti šifrovaném pomocí Android Keystore a nevstupuje do záloh ani logů.
 4. První import načte dostupnou historii po ověřených časových oknech. Další importy čtou změny a kontrolní
    překryv při otevření aplikace a přes WorkManager. Interval není zárukou přesného času provedení na Androidu.
 5. Při neplatné relaci zobrazit „Obnovit přihlášení“, zachovat historii a kurzor. Nepředpokládat trvalou platnost
@@ -264,16 +261,30 @@ Snímky: `vault/attachments/settings_accounts_*.png`.
 
 ---
 
-## Zvažované a zamítnuté cesty
+## ADR: Web login jako hlavní cesta (2026-11-18)
 
-| Cesta | Proč ne |
+**Rozhodnutí:** Přihlášení e-mailem a heslem přes nativní formulář napodobující webové rozhraní Withings (`WithingsDirectAuth` + `WithingsWebClient`) je **hlavní a záměrná cesta** integrace Withings.
+
+**Důvody:**
+- Oficiální Withings OAuth API vyžaduje, aby si každý uživatel založil vlastní developer organizaci a aplikaci na `developer.withings.com`, což je pro běžného uživatele (BFU) nepoužitelné.
+- Sdílený `client_secret` na vlastním token-broker serveru je v přímém rozporu s principem **Zero Cloud** (Pulse4 nemá žádný vlastní server).
+- Health Connect poskytuje pouze váhu a tělesný tuk (nikoli svaly, kosti, vodu, viscerální tuk, PWV, EKG), takže slouží jen jako záloha.
+
+**Rizika a mitigace:**
+- *Změny HTML / rozhraní Withings a ToS:* třída `WithingsDirectAuth` klasifikuje neznámé stavy odděleně a neopakuje chybné pokusy.
+- *Zablokování účtu (lockout / 429):* `WithingsSessionCoordinator` obsahuje perzistovaný circuit-breaker a exponenciální backoff při síťových chybách; při chybě hesla / 429 / 2FA okamžitě zastaví automatické pokusy.
+- *Bezpečnost hesla:* heslo se nikdy neukládá (pouze jednorázový vstup při ručním přihlášení, při startu aplikace se případné staré heslo maže). Ukládají se pouze šifrované cookies důvěryhodného zařízení.
+- *OAuth režim:* zůstává pouze jako volitelná záložní cesta pro pokročilé uživatele s vlastním developer účtem.
+
+## Zvažované alternativy
+
+| Cesta | Proč ne jako hlavní cesta |
 |---|---|
 | Každý uživatel si zakládá vlastní organizaci/aplikaci | Nepoužitelné pro běžné lidi. |
-| Health Connect | Uživatelé do něj data neposílají; přidává závislost a povolení. |
+| Health Connect | Uživatelé do něj data neposílají; jen váha a tuk. |
 | Withings → Garmin Connect (partner sync) a čtení z Garminu | Jen váha, ne plná data. U dětských profilů nejisté. |
-| E-mail + heslo do neveřejného API aplikace Withings | Nedokumentované, porušuje podmínky, křehké. |
 | Čtení přímo z váhy přes Bluetooth | Uzavřený protokol, váha je spárovaná s aplikací Withings. |
-| Výměnná služba se Secretem na serveru | Funkční, ale pro malý okruh zbytečná. Zvážit před Google Play. |
+| Výměnná služba se Secretem na serveru | Porušuje princip Zero Cloud. |
 
 ---
 

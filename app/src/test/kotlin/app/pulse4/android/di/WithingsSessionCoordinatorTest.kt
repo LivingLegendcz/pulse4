@@ -165,6 +165,8 @@ class WithingsSessionCoordinatorTest {
         )
 
         assertFalse(coord.tryAutoReLogin())
+        assertFalse(coord.tryAutoReLogin())
+        assertFalse(coord.tryAutoReLogin())
         assertEquals(0, loginCalls)
         assertTrue(coord.isAutoReloginPaused())
 
@@ -305,5 +307,32 @@ class WithingsSessionCoordinatorTest {
         )
         assertTrue(server503 is WithingsLoginResult.Error)
         assertEquals(WithingsAuthFailureKind.NETWORK, (server503 as WithingsLoginResult.Error).kind)
+    }
+
+    @Test
+    fun `other auth errors pause only after 3 consecutive failures`() {
+        val store = InMemoryAuthStore()
+        val coord = WithingsSessionCoordinator(
+            store = store,
+            nowMs = { 10_000_000L },
+            isDirectEnabled = { true },
+            loadSession = { null },
+            saveSession = {},
+            extendSession = { _, _ -> WithingsExtendResult.Unauthorized },
+            hasUsableCookies = { true },
+            trySilentSsoRefresh = { WithingsLoginResult.Error("Temporary parse issue", WithingsAuthFailureKind.OTHER) },
+            loginPassword = { _, _ -> sampleOk() },
+            onSilentRefreshOk = { _, _ -> },
+        )
+
+        assertFalse(coord.tryAutoReLogin())
+        assertFalse(coord.isAutoReloginPaused())
+
+        assertFalse(coord.tryAutoReLogin())
+        assertFalse(coord.isAutoReloginPaused())
+
+        assertFalse(coord.tryAutoReLogin())
+        assertTrue(coord.isAutoReloginPaused())
+        assertEquals(WithingsSessionCoordinator.REASON_AUTH_ERROR, coord.pausedReason())
     }
 }

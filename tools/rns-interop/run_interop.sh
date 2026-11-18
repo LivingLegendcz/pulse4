@@ -22,6 +22,7 @@ flock /tmp/pulse4-gradle.lock "$ROOT_DIR/gradlew" --offline :rns-core:jar >/dev/
 
 RNS_CORE_JAR="$ROOT_DIR/rns-core/build/libs/rns-core.jar"
 BCPROV_JAR="$(find "$HOME/.gradle/caches/modules-2/files-2.1/org.bouncycastle/bcprov-jdk18on" -name "bcprov-jdk18on-*.jar" | head -n1)"
+COMMONS_COMPRESS_JAR="$(find "$HOME/.gradle/caches/modules-2/files-2.1/org.apache.commons/commons-compress/1.21" -name "commons-compress-1.21.jar" | head -n1)"
 KOTLIN_STDLIB="$(find "$HOME/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.4.21" -name "kotlin-stdlib-2.4.21.jar" | head -n1)"
 if [[ -z "$KOTLIN_STDLIB" ]]; then
   KOTLIN_STDLIB="$(find "$HOME/.gradle" -name "kotlin-stdlib-2.*.jar" | head -n1)"
@@ -29,7 +30,7 @@ fi
 
 if command -v kotlinc >/dev/null 2>&1; then
   kotlinc "$ROOT_DIR/tools/rns-interop/InteropHarness.kt" \
-    -cp "$RNS_CORE_JAR:$BCPROV_JAR:$KOTLIN_STDLIB" \
+    -cp "$RNS_CORE_JAR:$BCPROV_JAR:$COMMONS_COMPRESS_JAR:$KOTLIN_STDLIB" \
     -d "$WORK_DIR/out"
 else
   KOTLIN_COMPILER_CP="$(find "$HOME/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-compiler-embeddable/2.4.21" -name "*.jar" | tr '\n' ':'):"
@@ -41,7 +42,7 @@ else
   KOTLIN_COMPILER_CP+="$KOTLIN_STDLIB"
   "$JAVA_HOME/bin/java" -cp "$KOTLIN_COMPILER_CP" org.jetbrains.kotlin.cli.jvm.K2JVMCompiler \
     "$ROOT_DIR/tools/rns-interop/InteropHarness.kt" \
-    -cp "$RNS_CORE_JAR:$BCPROV_JAR:$KOTLIN_STDLIB" \
+    -cp "$RNS_CORE_JAR:$BCPROV_JAR:$COMMONS_COMPRESS_JAR:$KOTLIN_STDLIB" \
     -d "$WORK_DIR/out" \
     -no-stdlib
 fi
@@ -61,15 +62,15 @@ if [[ ! -f "$WORK_DIR/node/info.json" ]]; then
   exit 1
 fi
 
-read -r PROP_DEST ALICE_PUB ALICE_DEST PY_TID STAMP_COST STAMP_FLEX < <("$VENV/bin/python" -c '
+read -r PROP_DEST ALICE_PUB ALICE_DEST BOB_PUB BOB_DEST PY_TID STAMP_COST STAMP_FLEX < <("$VENV/bin/python" -c '
 import json, sys
 d = json.load(open(sys.argv[1]))
-print(d["prop_dest"], d["alice_pub"], d["alice_lxmf_dest"], d["py_to_kt_tid"], d["stamp_cost"], d["stamp_flex"])
+print(d["prop_dest"], d["alice_pub"], d["alice_lxmf_dest"], d["bob_pub"], d["bob_lxmf_dest"], d["py_to_kt_tid"], d["stamp_cost"], d["stamp_flex"])
 ' "$WORK_DIR/node/info.json")
 
-"$JAVA_HOME/bin/java" -cp "$WORK_DIR/out:$RNS_CORE_JAR:$BCPROV_JAR:$KOTLIN_STDLIB" \
+"$JAVA_HOME/bin/java" -cp "$WORK_DIR/out:$RNS_CORE_JAR:$BCPROV_JAR:$COMMONS_COMPRESS_JAR:$KOTLIN_STDLIB" \
   interop.InteropHarnessKt \
-  "$PORT" "$SEED_HEX" "$PROP_DEST" "$ALICE_PUB" "$ALICE_DEST" "$PY_TID" "$STAMP_COST" "$STAMP_FLEX" "$KEEPALIVE_SECS"
+  "$PORT" "$SEED_HEX" "$PROP_DEST" "$ALICE_PUB" "$ALICE_DEST" "$PY_TID" "$STAMP_COST" "$STAMP_FLEX" "$KEEPALIVE_SECS" "$BOB_PUB" "$BOB_DEST"
 
 sleep 1
 "$VENV/bin/python" -c '
@@ -78,6 +79,9 @@ d = json.load(open(sys.argv[1]))
 msgs = d.get("kt_to_py", [])
 assert any(m.get("sig_valid") and m.get("content") == "hello from kotlin rns-core" for m in msgs), f"Missing verified kt->py msg: {msgs}"
 print("[2b] PASS: Kotlin -> Python LXMF message verified on PN:", msgs)
+direct_msgs = d.get("direct_kt_to_py", [])
+assert any(m.get("sig_valid") and m.get("content_len") == 16384 for m in direct_msgs), f"Missing verified 16KB kt->py Resource LXMF msg: {direct_msgs}"
+print("[5a] PASS: Kotlin -> Python 16KB LXMF via RNS.Resource verified:", direct_msgs)
 ' "$WORK_DIR/node/entries.json"
 
 echo "ALL INTEROP CHECKS PASSED"

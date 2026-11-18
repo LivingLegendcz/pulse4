@@ -50,6 +50,35 @@ kid = RNS.Identity.from_bytes(hashlib.sha256(seed).digest() + seed)
 alice = RNS.Identity()
 src_in = RNS.Destination(alice, RNS.Destination.IN, RNS.Destination.SINGLE, "lxmf", "delivery")
 
+bob = RNS.Identity()
+bob_in = router.register_delivery_identity(bob, display_name="bob")
+
+direct_kt_to_py = []
+delivery_links = []
+orig_link_cb = bob_in.callbacks.link_established
+def _on_delivery_link(link):
+    delivery_links.append(link)
+    if orig_link_cb:
+        orig_link_cb(link)
+bob_in.set_link_established_callback(_on_delivery_link)
+
+def _on_direct_delivery(message):
+    direct_kt_to_py.append({
+        "title": message.title.decode("utf-8", errors="replace"),
+        "content_len": len(message.content),
+        "content_sha256": hashlib.sha256(message.content).hexdigest(),
+        "sig_valid": bool(message.signature_validated),
+    })
+    RNS.log(f"[NODE] direct delivery received title={message.title!r} len={len(message.content)} sig={message.signature_validated}", RNS.LOG_CRITICAL)
+    if delivery_links and message.signature_validated and len(message.content) >= 16384:
+        link = delivery_links[-1]
+        if link.status == RNS.Link.ACTIVE:
+            py_16k = LXMessage(kd, bob_in, os.urandom(16384), title="py-16k-resource", desired_method=LXMessage.DIRECT)
+            py_16k.pack()
+            RNS.Resource(py_16k.packed, link)
+
+router.register_delivery_callback(_on_direct_delivery)
+
 # Inject a Python -> Kotlin message into the PN via lxmf.delivery
 kd = RNS.Destination(kid, RNS.Destination.OUT, RNS.Destination.SINGLE, "lxmf", "delivery")
 m = LXMessage(kd, src_in, "hello from python lxmf 1.3.0", title="py-title", desired_method=LXMessage.PROPAGATED)
@@ -75,6 +104,8 @@ info = {
     "node_transport_id": RNS.Transport.identity.hash.hex(),
     "alice_pub": alice.get_public_key().hex(),
     "alice_lxmf_dest": src_in.hash.hex(),
+    "bob_pub": bob.get_public_key().hex(),
+    "bob_lxmf_dest": bob_in.hash.hex(),
     "kotlin_identity_hash": kid.hash.hex(),
     "kotlin_lxmf_dest": kd.hash.hex(),
     "py_to_kt_tid": py_to_kt_tid,
@@ -84,6 +115,7 @@ info = {
 with open(os.path.join(work, "info.json"), "w") as f:
     json.dump(info, f)
 router.announce_propagation_node()
+bob_in.announce()
 print("READY", json.dumps(info), flush=True)
 
 # Periodically write propagation_entries + verify any Kotlin->Python deposited message
@@ -110,4 +142,9 @@ while True:
             except Exception as e:
                 verified_kt_msgs.append({"tid": k.hex(), "error": str(e)})
     with open(os.path.join(work, "entries.json"), "w") as f:
-        json.dump({"entries": entries, "kt_to_py": verified_kt_msgs, "announces": announces_seen}, f)
+        json.dump({
+            "entries": entries,
+            "kt_to_py": verified_kt_msgs,
+            "direct_kt_to_py": direct_kt_to_py,
+            "announces": announces_seen,
+        }, f)

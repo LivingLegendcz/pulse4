@@ -136,6 +136,7 @@ android {
 
             // Optimalizace a obfuskace.
             isMinifyEnabled = true
+            isShrinkResources = true
 
             proguardFiles(
                 getDefaultProguardFile(
@@ -178,6 +179,10 @@ kotlin {
             org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
         )
     }
+}
+
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
 }
 
 dependencies {

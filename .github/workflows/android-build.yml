@@ -33,29 +33,50 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Java 17
-        uses: actions/setup-java@v6
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6
         with:
           distribution: temurin
           java-version: '17'
 
       - name: Android SDK
-        uses: android-actions/setup-android@v4
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4
 
       - name: Install Android 36
         run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
 
       - name: Gradle cache and wrapper validation
-        uses: gradle/actions/setup-gradle@v6
+        uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6
         with:
           cache-provider: basic
 
-      - name: Build debug app, run all unit tests and Android Lint
+      - name: Build debug & release app, run all unit tests and Android Lint
         run: |
           chmod +x gradlew
-          ./gradlew test :app:assembleDebug :app:lintDebug --stacktrace
+          ./gradlew test :app:assembleDebug :app:assembleRelease :app:lintDebug --stacktrace
+
+      - name: Verify release security & no personal sample assets (P0-6, ENG-1)
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=app/build/outputs/apk/release/app-release-unsigned.apk
+          test -s "$APK"
+          AAPT2="$(find "$ANDROID_HOME/build-tools" -name aapt2 -type f | sort -V | tail -n1)"
+          test -x "$AAPT2"
+          if "$AAPT2" dump badging "$APK" | grep -q "application-debuggable"; then
+            echo "::error::Release APK is debuggable"
+            exit 1
+          fi
+          if "$AAPT2" dump xmltree "$APK" --file AndroidManifest.xml | grep -q "DebugCommandReceiver"; then
+            echo "::error::DebugCommandReceiver leaked into release manifest"
+            exit 1
+          fi
+          if unzip -l "$APK" | grep -qE "assets/sample_activit"; then
+            echo "::error::Personal sample assets leaked into release APK"
+            exit 1
+          fi
 
   publish:
     name: Publish Android release to internal testing
@@ -68,7 +89,7 @@ jobs:
       id-token: write
     steps:
       - name: Checkout exact release commit
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # Change the checked-out build file only on the runner; do not commit version bumps.
       - name: Set Android version from GitHub release tag
@@ -122,7 +143,7 @@ jobs:
       # Short-lived access token for the version check only.
       - name: Authenticate to Google Cloud for version check
         id: auth_guard
-        uses: google-github-actions/auth@v3
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
           workload_identity_provider: projects/138742660530/locations/global/workloadIdentityPools/github-pulse4/providers/github-actions
           service_account: pulse4-github-publisher@pulse4-publishing.iam.gserviceaccount.com
@@ -171,19 +192,19 @@ jobs:
           echo "- Google Play version guard: ${PULSE4_VERSION_CODE} > ${highest} ✅" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Java 17
-        uses: actions/setup-java@v6
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6
         with:
           distribution: temurin
           java-version: '17'
 
       - name: Android SDK
-        uses: android-actions/setup-android@v4
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4
 
       - name: Install Android 36
         run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
 
       - name: Gradle cache and wrapper validation
-        uses: gradle/actions/setup-gradle@v6
+        uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6
         with:
           cache-provider: basic
 
@@ -217,8 +238,15 @@ jobs:
           jarsigner -verify "$AAB" 2>&1 | tee /tmp/pulse4-signature.txt
           grep -q 'jar verified' /tmp/pulse4-signature.txt
           test -s app/build/outputs/mapping/release/mapping.txt
-          if unzip -p "$AAB" base/manifest/AndroidManifest.xml | strings | grep -qiE 'debuggable'; then
-            echo "Checking release manifest flags..."
+          MERGED_MANIFEST=app/build/intermediates/merged_manifest/release/processReleaseMainManifest/AndroidManifest.xml
+          test -s "$MERGED_MANIFEST"
+          if grep -q 'android:debuggable="true"' "$MERGED_MANIFEST"; then
+            echo "::error::Release manifest is debuggable"
+            exit 1
+          fi
+          if unzip -l "$AAB" | grep -qE 'assets/sample_activit'; then
+            echo "::error::Personal sample assets leaked into release AAB"
+            exit 1
           fi
 
       - name: Prepare Czech Google Play release notes
@@ -231,7 +259,7 @@ jobs:
           test -s play-whatsnew/whatsnew-cs-CZ
 
       - name: Upload signed AAB artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: pulse4-${{ github.event.release.tag_name }}-signed
           path: |
@@ -243,14 +271,14 @@ jobs:
       # Get a FRESH WIF credential after build; GitHub OIDC tokens are short-lived.
       - name: Authenticate to Google Cloud with GitHub OIDC
         id: auth
-        uses: google-github-actions/auth@v3
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
           workload_identity_provider: projects/138742660530/locations/global/workloadIdentityPools/github-pulse4/providers/github-actions
           service_account: pulse4-github-publisher@pulse4-publishing.iam.gserviceaccount.com
           create_credentials_file: true
 
       - name: Publish to Google Play internal testing
-        uses: r0adkll/upload-google-play@v1
+        uses: r0adkll/upload-google-play@e738b9dd8f2476ea806d921b64aacd24f34515a5 # v1
         with:
           serviceAccountJson: ${{ steps.auth.outputs.credentials_file_path }}
           packageName: app.pulse4

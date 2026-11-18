@@ -14,9 +14,9 @@
 ---
 
 [![Android](https://img.shields.io/badge/Plattform-Android%2014%2B-3DDC84.svg?style=flat&logo=android&logoColor=white)](https://android.com)
-[![Kotlin](https://img.shields.io/badge/Kotlin-2.1.0-7F52FF.svg?style=flat&logo=kotlin&logoColor=white)](https://kotlinlang.org)
+[![Kotlin](https://img.shields.io/badge/Kotlin-2.4.21-7F52FF.svg?style=flat&logo=kotlin&logoColor=white)](https://kotlinlang.org)
 [![Compose](https://img.shields.io/badge/UI-Jetpack%20Compose%20M3-4285F4.svg?style=flat&logo=jetpackcompose&logoColor=white)](https://developer.android.com/jetpack/compose)
-[![Tests](https://img.shields.io/badge/Unit--Tests-173%20Bestanden-10B981.svg?style=flat)](app/src/test)
+[![Tests](https://img.shields.io/badge/Unit--Tests-219%2B%20Bestanden-10B981.svg?style=flat)](app/src/test)
 [![Lizenz](https://img.shields.io/badge/Lizenz-Apache%202.0-blue.svg?style=flat)](LICENSE)
 
 </div>
@@ -67,7 +67,7 @@ pulse4/
 ├── sync-protocol/               # Reticulum / LXMF Protokollschicht, Outbox, ACK
 ├── sharing-policy/              # Freigaberegeln, Privatsphärezonen, Projektionen
 ├── ui-logic/                    # Plattformunabhängige Präsentationslogik (JVM-testbar)
-├── app/                         # Android-App (Compose M3, Room SQLCipher, Keystore, Chaquopy)
+├── app/                         # Android-App (Compose M3, Room SQLCipher, Keystore, native RNS)
 └── pulse4-vault/                # Projektdokumentation & Obsidian-Wissensbasis
 ```
 
@@ -77,13 +77,13 @@ pulse4/
 
 - **Android Studio:** Ladybug / Meerkat oder neuer
 - **JDK:** OpenJDK 17
-- **Android SDK:** API 34+ (Target Android 14/15/16)
+- **Android SDK:** minSdk 28 (Android 9+) (Target Android 14/15/16)
 
 ```bash
 export JAVA_HOME=/path/to/jdk-17
 export ANDROID_HOME=/path/to/android-sdk
 
-# 173 Unit-Tests ausführen
+# Unit-Tests ausführen
 ./gradlew testDebugUnitTest
 
 # Debug APK kompilieren

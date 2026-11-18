@@ -13,10 +13,10 @@
 
 ---
 
-[![Android](https://img.shields.io/badge/Platform-Android%2014%2B-3DDC84.svg?style=flat&logo=android&logoColor=white)](https://android.com)
-[![Kotlin](https://img.shields.io/badge/Kotlin-2.1.0-7F52FF.svg?style=flat&logo=kotlin&logoColor=white)](https://kotlinlang.org)
+[![Android](https://img.shields.io/badge/Platform-Android%209%2B%20(minSdk%2028)-3DDC84.svg?style=flat&logo=android&logoColor=white)](https://android.com)
+[![Kotlin](https://img.shields.io/badge/Kotlin-2.4.21-7F52FF.svg?style=flat&logo=kotlin&logoColor=white)](https://kotlinlang.org)
 [![Compose](https://img.shields.io/badge/UI-Jetpack%20Compose%20M3-4285F4.svg?style=flat&logo=jetpackcompose&logoColor=white)](https://developer.android.com/jetpack/compose)
-[![Tests](https://img.shields.io/badge/Unit%20Tests-173%20通过-10B981.svg?style=flat)](app/src/test)
+[![Tests](https://img.shields.io/badge/Unit%20Tests-219%2B%20通过-10B981.svg?style=flat)](app/src/test)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg?style=flat)](LICENSE)
 
 </div>
@@ -67,7 +67,7 @@ pulse4/
 ├── sync-protocol/               # Reticulum / LXMF 加密封包层、发件箱队列、ACK 机制
 ├── sharing-policy/              # 权限控制、隐私区域、共享投影生成
 ├── ui-logic/                    # 独立于 UI 框架的展示逻辑（JVM 可测）
-├── app/                         # Android 主程序（Compose M3、Room SQLCipher、Keystore、Chaquopy）
+├── app/                         # Android 主程序（Compose M3、Room SQLCipher、Keystore、native RNS）
 └── pulse4-vault/                # 开发日志、Obsidian 知识库与架构决策
 ```
 
@@ -79,7 +79,7 @@ pulse4/
 export JAVA_HOME=/path/to/jdk-17
 export ANDROID_HOME=/path/to/android-sdk
 
-# 运行 173 项单元测试
+# 运行 项单元测试
 ./gradlew testDebugUnitTest
 
 # 构建 Debug APK

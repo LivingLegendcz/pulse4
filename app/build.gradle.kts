@@ -191,6 +191,7 @@ dependencies {
     implementation(project(":analytics"))
     implementation(project(":sharing-policy"))
     implementation(project(":sync-protocol"))
+    implementation(project(":rns-core"))
     implementation(project(":provider-router"))
     implementation(project(":connector-garmin-personal"))
     implementation(project(":training"))

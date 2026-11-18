@@ -66,6 +66,8 @@ class OutboxManager(
     private val maxBackoffMs: Long = 6L * 3600 * 1000,
 ) {
     private val open = setOf(DeliveryState.QUEUED, DeliveryState.HANDED_TO_TRANSPORT, DeliveryState.STORED_IN_PROPAGATION)
+    private val pendingSnapshotResets = LinkedHashSet<Pair<String, String>>()
+    private val inFlightLocalFastTrackUntil = HashMap<String, Long>()
 
     fun queuedBytes(): Long = synchronized(this) {
         store.all().filter { it.state in open }.sumOf { it.sizeBytes.toLong() }
@@ -118,14 +120,18 @@ class OutboxManager(
     /** Položky připravené k pokusu, v pořadí vzniku (stabilní pro jednoho příjemce). */
     fun due(nowMs: Long, recipient: String? = null, localPeers: Set<String> = emptySet()): List<OutboxItem> = synchronized(this) {
         store.all().filter {
-            val isLocalFastTrack = it.state == DeliveryState.STORED_IN_PROPAGATION && it.recipient in localPeers
-            (it.state == DeliveryState.QUEUED || it.state == DeliveryState.HANDED_TO_TRANSPORT || isLocalFastTrack) &&
-                it.nextAttemptAtMs <= nowMs &&
+            val isLocalFastTrack = it.state == DeliveryState.STORED_IN_PROPAGATION &&
+                it.recipient in localPeers &&
+                (inFlightLocalFastTrackUntil[it.eventId] ?: 0L) <= nowMs
+            val isStoredRetry = it.state == DeliveryState.STORED_IN_PROPAGATION && it.nextAttemptAtMs <= nowMs
+            (it.state == DeliveryState.QUEUED || it.state == DeliveryState.HANDED_TO_TRANSPORT || isLocalFastTrack || isStoredRetry) &&
+                (isLocalFastTrack || it.nextAttemptAtMs <= nowMs) &&
                 (recipient == null || it.recipient == recipient)
         }.sortedWith(compareBy({ it.createdAtMs }, { it.objectVersion }))
     }
 
     fun onTransportResult(eventId: String, result: TransportResult, nowMs: Long) = synchronized(this) {
+        inFlightLocalFastTrackUntil.remove(eventId)
         val it = store.find(eventId) ?: return@synchronized
         if (it.state == DeliveryState.ACKED) return@synchronized
         when (result) {
@@ -135,8 +141,11 @@ class OutboxManager(
                 val retryAt = nowMs + maxOf(60_000L, backoff(attempts))
                 store.update(it.copy(state = DeliveryState.HANDED_TO_TRANSPORT, attempts = attempts, nextAttemptAtMs = retryAt))
             }
-            TransportResult.StoredInPropagation ->
-                store.update(it.copy(state = DeliveryState.STORED_IN_PROPAGATION, attempts = it.attempts + 1))
+            TransportResult.StoredInPropagation -> {
+                val attempts = it.attempts + 1
+                val retryAt = nowMs + limits.storedPropagationRetryMs
+                store.update(it.copy(state = DeliveryState.STORED_IN_PROPAGATION, attempts = attempts, nextAttemptAtMs = retryAt))
+            }
             is TransportResult.Failed -> {
                 val attempts = it.attempts + 1
                 store.update(it.copy(state = DeliveryState.QUEUED, attempts = attempts, lastError = result.reason,
@@ -152,6 +161,7 @@ class OutboxManager(
     fun markAttempt(eventId: String, nowMs: Long, waitMs: Long) = synchronized(this) {
         val it = store.find(eventId) ?: return@synchronized
         if (it.state != DeliveryState.QUEUED && it.state != DeliveryState.HANDED_TO_TRANSPORT && it.state != DeliveryState.STORED_IN_PROPAGATION) return@synchronized
+        inFlightLocalFastTrackUntil[eventId] = nowMs + waitMs
         store.update(it.copy(nextAttemptAtMs = nowMs + waitMs))
     }
 
@@ -163,8 +173,11 @@ class OutboxManager(
         return@synchronized when (ack.status) {
             Ack.Status.ACCEPTED, Ack.Status.DUPLICATE, Ack.Status.STALE -> { store.update(it.copy(state = DeliveryState.ACKED)); true }
             // Odmítnutí a mezera nejsou doručení: položka se zastaví s chybou, aplikace vygeneruje snapshot.
-            Ack.Status.REJECTED, Ack.Status.NEED_SNAPSHOT ->
-                { store.update(it.copy(state = DeliveryState.EXPIRED_NEEDS_SNAPSHOT, lastError = ack.reason ?: ack.status.name)); true }
+            Ack.Status.REJECTED, Ack.Status.NEED_SNAPSHOT -> {
+                store.update(it.copy(state = DeliveryState.EXPIRED_NEEDS_SNAPSHOT, lastError = ack.reason ?: ack.status.name))
+                pendingSnapshotResets += (it.recipient to it.objectKey)
+                true
+            }
         }
     }
 
@@ -189,11 +202,17 @@ class OutboxManager(
      */
     fun expireStale(nowMs: Long): List<Pair<String, String>> = synchronized(this) {
         val out = mutableListOf<Pair<String, String>>()
-        // Položky už uložené na LXMF propagačním uzlu neexpirujeme, jinak by se při delší offline pauze kontaktu řadily znovu.
+        if (pendingSnapshotResets.isNotEmpty()) {
+            out += pendingSnapshotResets
+            pendingSnapshotResets.clear()
+        }
         store.all().filter {
-            (it.state == DeliveryState.QUEUED || it.state == DeliveryState.HANDED_TO_TRANSPORT) &&
-                it.kind in Kinds.supersedable &&
-                nowMs - it.createdAtMs > limits.unackedSummaryTtlMs
+            val ttl = when (it.state) {
+                DeliveryState.QUEUED, DeliveryState.HANDED_TO_TRANSPORT -> limits.unackedSummaryTtlMs
+                DeliveryState.STORED_IN_PROPAGATION -> limits.storedPropagationTtlMs
+                else -> return@filter false
+            }
+            it.kind in Kinds.supersedable && nowMs - it.createdAtMs > ttl
         }
             .forEach {
                 store.update(it.copy(state = DeliveryState.EXPIRED_NEEDS_SNAPSHOT))

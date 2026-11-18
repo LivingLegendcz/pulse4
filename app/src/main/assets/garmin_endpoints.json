@@ -177,18 +177,18 @@
     {
       "area": "BODY_BATTERY",
       "metric": "BODY_BATTERY",
-      "path": "/wellness-service/wellness/bodyBattery/reports/daily?startDate={from}&endDate={to}",
+      "path": "/usersummary-service/v2/dailysummaries?startDate={from}&endDate={to}",
       "dateFormat": "yyyy-MM-dd",
       "maxRangeDays": 27,
-      "itemsPath": "",
-      "timePath": "startTimestampGMT",
-      "endTimePath": "endTimestampGMT",
-      "valuePath": "endOfDayBodyBatteryDynamicFeedbackEvent.bodyBatteryLevel",
+      "itemsPath": "data",
+      "timePath": "wellnessChronology.startTimestampGmt",
+      "endTimePath": "wellnessChronology.endTimestampGmt",
+      "valuePath": "bodyBattery.latestValue",
       "timeFormat": "ISO_INSTANT",
       "scale": 1.0,
-      "localDatePath": "date",
+      "localDatePath": "calendarDate",
       "verified": true,
-      "sampleRef": "docs/samples/bodybattery.json"
+      "sampleRef": "docs/samples/dailysummaries.json"
     },
     {
       "area": "HEART_RATE",

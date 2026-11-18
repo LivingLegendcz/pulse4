@@ -17,8 +17,8 @@ data class PumpStats(val sent: Int, val received: Int, val rejected: Int, val pe
 /**
  * Spojení outboxu, příjmu a Reticula. Běží v okně, které přidělí systém (WorkManager) nebo uživatel (popředí);
  * gateway sama telefon neprobudí. Stavy doručení hlásí jen to, co lze doložit:
- *  - HANDED: LXMF doručení příjemci prokázáno (stále ne zpracování aplikací),
- *  - STORED: uloženo v propagation uzlu,
+ *  - HANDED: předáno transportu (Wi-Fi / TCP zápis / deposit před PROOF; stále ne potvrzení),
+ *  - STORED: uloženo v propagation uzlu (potvrzeno RNS PROOF paketem),
  *  - ACKED: teprve aplikační ACK od příjemcovy aplikace (viz [OutboxManager.onAck]).
  */
 class ReticulumTransport(

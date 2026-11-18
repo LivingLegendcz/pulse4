@@ -389,6 +389,16 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
         }
     }
 
+    @Deprecated("Moved to app/src/debug/.../DemoSeeder.kt (P0-1)")
+    fun seedDemoData(nowMs: Long = System.currentTimeMillis()) {
+        if (!app.pulse4.android.BuildConfig.DEBUG) return
+        runCatching {
+            Class.forName("app.pulse4.android.debug.DemoSeeder")
+                .getMethod("seed", Context::class.java, ServiceLocator::class.java, Long::class.javaPrimitiveType)
+                .invoke(null, context, sl, nowMs)
+        }
+    }
+
     private fun extractFitFromZipOrRaw(bytes: ByteArray): ByteArray? {
         if (bytes.size < 4) return null
         if (bytes[0] == 0x50.toByte() && bytes[1] == 0x4B.toByte()) {

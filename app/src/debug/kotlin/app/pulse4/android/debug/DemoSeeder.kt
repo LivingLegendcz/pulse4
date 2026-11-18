@@ -246,12 +246,12 @@ object DemoSeeder {
                     val actId = obj["activityId"]?.let { (it as? JsonPrimitive)?.content } ?: return@forEach
                     val actKey = "garmin-$actId"
                     if (sl.db.activities().get(actKey) == null) {
-                        val act = sl.importService.buildActivityFromGarminAndFit(
+                        val act = buildActivityFromSampleJson(
                             id = actKey,
-                            provider = Provider.GARMIN_PERSONAL,
+                            accountId = sl.settings.accountId,
+                            zoneId = sl.settings.zoneId,
                             extId = actId,
                             obj = obj,
-                            parsed = null,
                             nowMs = nowMs
                         )
                         sl.db.activities().upsert(act.toRow(json.encodeToString(Activity.serializer(), act)))
@@ -494,6 +494,49 @@ object DemoSeeder {
             )
             sl.shareService.saveGroup(demoGroup)
         }
+    }
+
+    private fun buildActivityFromSampleJson(
+        id: String,
+        accountId: String,
+        zoneId: String,
+        extId: String,
+        obj: JsonObject,
+        nowMs: Long
+    ): Activity {
+        fun str(k: String): String? = (obj[k] as? JsonPrimitive)?.content
+        fun dbl(k: String): Double? = (obj[k] as? JsonPrimitive)?.content?.toDoubleOrNull()
+        fun lng(k: String): Long? = (obj[k] as? JsonPrimitive)?.content?.toLongOrNull()
+        val typeKey = ((obj["activityType"] as? JsonObject)?.get("typeKey") as? JsonPrimitive)?.content.orEmpty()
+        val sport = when {
+            "run" in typeKey -> Sport.RUNNING
+            "cycl" in typeKey || "bik" in typeKey -> Sport.CYCLING
+            "hik" in typeKey -> Sport.HIKING
+            "swim" in typeKey -> Sport.SWIMMING
+            "strength" in typeKey -> Sport.STRENGTH
+            else -> Sport.WALKING
+        }
+        return Activity(
+            id = id,
+            provider = Provider.GARMIN_PERSONAL,
+            accountId = accountId,
+            externalId = extId,
+            sport = sport,
+            startUtcMs = lng("beginTimestamp") ?: nowMs,
+            zoneId = zoneId,
+            totalTimeS = dbl("duration") ?: 1800.0,
+            movingTimeS = dbl("movingDuration"),
+            distanceM = dbl("distance"),
+            ascentM = dbl("elevationGain"),
+            descentM = dbl("elevationLoss"),
+            avgHeartRate = dbl("averageHR")?.toInt(),
+            maxHeartRate = dbl("maxHR")?.toInt(),
+            title = str("activityName"),
+            locationName = str("locationName"),
+            avgSpeedMps = dbl("averageSpeed"),
+            maxSpeedMps = dbl("maxSpeed"),
+            caloriesKcal = dbl("calories")
+        )
     }
 
     private fun synthesizeTrackFromSummary(act: Activity): List<TrackPoint> {

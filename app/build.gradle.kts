@@ -198,6 +198,9 @@ dependencies {
     implementation(project(":backup"))
     implementation(project(":connector-withings"))
     implementation(project(":ui-logic"))
+    if (findProject(":rns-core") != null) {
+        implementation(project(":rns-core"))
+    }
 
     // Jetpack Compose.
     val compose = platform(

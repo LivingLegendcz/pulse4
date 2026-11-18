@@ -13,4 +13,8 @@ local.properties
 *.zip
 attachments/
 pulse4-vault/
+.env
+metadata.json
+vault
+.aistudio/
 

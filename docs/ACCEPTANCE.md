@@ -19,8 +19,5 @@ Legenda: ✅ ověřeno automatickým testem v tomto repozitáři · 🟡 ověře
 Jak spustit to, co ověřeno je:
 
 ```bash
-gradle test                                   # JVM moduly (domain … fit-import, backup)
-cd bridge-tests && pip install -r requirements.txt
-python test_workout_codec.py                  # překlad tréninků + obal Garmin relace (bez sítě)
-python harness.py                             # skutečný Reticulum/LXMF, ~1 min, 3 procesy na 127.0.0.1
+./gradlew test :app:testDebugUnitTest          # JVM moduly + unit testy aplikace
 ```

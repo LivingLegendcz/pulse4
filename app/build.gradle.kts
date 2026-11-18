@@ -136,6 +136,7 @@ android {
 
             // Optimalizace a obfuskace.
             isMinifyEnabled = true
+            isShrinkResources = true
 
             proguardFiles(
                 getDefaultProguardFile(
@@ -180,6 +181,10 @@ kotlin {
     }
 }
 
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
+}
+
 dependencies {
     // Interni moduly Pulse4.
     implementation(project(":domain"))
@@ -193,6 +198,9 @@ dependencies {
     implementation(project(":backup"))
     implementation(project(":connector-withings"))
     implementation(project(":ui-logic"))
+    if (findProject(":rns-core") != null) {
+        implementation(project(":rns-core"))
+    }
 
     // Jetpack Compose.
     val compose = platform(

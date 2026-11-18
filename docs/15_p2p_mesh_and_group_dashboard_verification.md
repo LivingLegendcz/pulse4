@@ -22,9 +22,9 @@
 
 ## 2. Architektura a řešení zjištěných úskalí
 
-### A. Řešení DNS rozlišení v embedded Pythonu (Chaquopy)
-* **Problém**: Při pokusu o připojení na hostitelská jména (`rns.xali.cz`) vracela knihovna `socket.getaddrinfo` v prostředí Android bionic libc chybu `[Errno 7] No address associated with hostname`.
-* **Řešení**: V [`ReticulumBridge.kt`](file:///home/kocourkovic/projects/pulse4/app/src/main/kotlin/app/pulse4/android/reticulum/ReticulumBridge.kt) jsme doplnili předběžné rozlišení hostu přes standardní Android Java DNS API (`InetAddress.getByName`), které spolehlivě využívá systémové nastavení DNS Androidu. Python tak dostává přímo cílovou IPv4 adresu.
+### A. Řešení DNS rozlišení (historicky Chaquopy, nyní nativní Kotlin RNS)
+* **Poznámka**: Chaquopy (embedded Python) bylo z aplikace odstraněno; RNS/LXMF vrstva běží nativně v Kotlinu (`ReticulumBridge.kt`). Historicky při používání embedded Pythonu: při pokusu o připojení na hostitelská jména (`rns.xali.cz`) vracela knihovna `socket.getaddrinfo` v prostředí Android bionic libc chybu `[Errno 7] No address associated with hostname`.
+* **Řešení**: V [`ReticulumBridge.kt`](file:///home/kocourkovic/projects/pulse4/app/src/main/kotlin/app/pulse4/android/reticulum/ReticulumBridge.kt) jsme doplnili předběžné rozlišení hostu přes standardní Android Java DNS API (`InetAddress.getByName`), které spolehlivě využívá systémové nastavení DNS Androidu.
 
 ### B. Místní transport a směrování přes ADB reverse
 * **Problém**: Na některých Wi-Fi sítích blokuje router odchozí nestandardní TCP porty (4242).

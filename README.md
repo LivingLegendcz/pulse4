@@ -13,10 +13,10 @@
 
 ---
 
-[![Android](https://img.shields.io/badge/Platform-Android%2014%2B-3DDC84.svg?style=flat&logo=android&logoColor=white)](https://android.com)
-[![Kotlin](https://img.shields.io/badge/Kotlin-2.1.0-7F52FF.svg?style=flat&logo=kotlin&logoColor=white)](https://kotlinlang.org)
+[![Android](https://img.shields.io/badge/Platform-Android%209%2B%20(minSdk%2028)-3DDC84.svg?style=flat&logo=android&logoColor=white)](https://android.com)
+[![Kotlin](https://img.shields.io/badge/Kotlin-2.4.21-7F52FF.svg?style=flat&logo=kotlin&logoColor=white)](https://kotlinlang.org)
 [![Compose](https://img.shields.io/badge/UI-Jetpack%20Compose%20M3-4285F4.svg?style=flat&logo=jetpackcompose&logoColor=white)](https://developer.android.com/jetpack/compose)
-[![Tests](https://img.shields.io/badge/Unit%20Tests-173%20Passed-10B981.svg?style=flat)](app/src/test)
+[![Tests](https://img.shields.io/badge/Unit%20Tests-194%20JVM%20%2B%2025%20App-10B981.svg?style=flat)](app/src/test)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg?style=flat)](LICENSE)
 
 </div>
@@ -39,7 +39,7 @@ Voluntary sharing of selected biometrics and workouts between family members or 
 ### 2. Garmin Ecosystem (Activities & Recovery)
 - **Deep Biometric Telemetry:** Overnight Heart Rate Variability (HRV / rMSSD), nocturnal resting heart rate (RHR), Garmin Body Battery (0–100), all-day stress scores, SpO2, and respiration rate.
 - **Advanced Running & Endurance Analytics:** Real-time & potential Stamina metrics, complete Running Dynamics (cadence, vertical oscillation, vertical ratio, ground contact time GCT, ground contact time balance L/R), heart rate zones, and Performance Condition baseline tracking.
-- **Structured Workout Engine:** Visual step & interval workout planner with direct upload to Garmin sports watches.
+- **Structured Workout Engine (Experimental):** Visual step & interval workout planner with experimental export to Garmin Connect.
 
 ### 3. High-Resolution Modern UI (Jetpack Compose Material 3)
 - **High-Granularity Curve Scaling (±100g to 500g):** Multi-series line charts (`MultiSeriesLineChart`) feature independent dynamic scaling with a minimum 0.80 kg window, ensuring small ±200 g fluctuations occupy 25% of the chart canvas rather than flattening into invisible single-pixel ribbons.
@@ -69,7 +69,7 @@ pulse4/
 ├── sync-protocol/               # Reticulum / LXMF encrypted envelope, idempotence, outbox queue, ACK
 ├── sharing-policy/              # Granular permissions engine, privacy zones, sharing projections
 ├── ui-logic/                    # Framework-independent screen logic and viewmodels (JVM testable)
-├── app/                         # Android application (Compose M3, Room SQLCipher, Keystore, Chaquopy)
+├── app/                         # Android application (Compose M3, Room SQLCipher, Keystore, native RNS)
 └── pulse4-vault/                # Developer logs, Obsidian knowledge base, architectural records
 ```
 
@@ -79,7 +79,7 @@ pulse4/
 
 - **Android Studio:** Ladybug / Meerkat or later
 - **JDK:** OpenJDK 17
-- **Android SDK:** API 34+ (Targeting Android 14/15/16)
+- **Android SDK:** minSdk 28 (Android 9+), targetSdk 36, compileSdk 37
 - **Target Device:** 64-bit ARM (`arm64-v8a`) required for native cryptography libraries.
 
 ### Command Line Build:
@@ -89,8 +89,8 @@ pulse4/
 export JAVA_HOME=/path/to/jdk-17
 export ANDROID_HOME=/path/to/android-sdk
 
-# Execute comprehensive test suite (173 unit tests)
-./gradlew testDebugUnitTest
+# Execute comprehensive test suite
+./gradlew test :app:testDebugUnitTest
 
 # Assemble debug APK
 ./gradlew assembleDebug

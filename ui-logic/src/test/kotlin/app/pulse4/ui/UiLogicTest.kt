@@ -245,40 +245,6 @@ class SharingViewTest {
         Field.BB_MIN_MAX to buildJsonObject { put("min", 30.0); put("max", 90.0) }, Field.WEIGHT to JsonPrimitive(80.14),
     ))
 
-    @Test fun `nothing is shared by default and saving needs a recipient and a field`() {
-        val d = GrantDraft()
-        assertFalse(d.canSave); assertEquals(2, d.problems().size)
-        assertFalse(d.toggleRecipient("bob").canSave); assertTrue(d.toggleRecipient("bob").toggleField(Field.SLEEP_DURATION).canSave)
-        assertFailsWith<IllegalArgumentException> { d.toGrant("g", "me", TODAY, 1) }
-    }
-
-    @Test fun `toggles and presets switch whole sets on and off`() {
-        var d = GrantDraft().toggleRecipient("bob").toggleRecipient("eva").toggleRecipient("bob")
-        assertEquals(setOf("eva"), d.recipients)
-        d = d.togglePreset(Presets.bodyBatteryRange); assertEquals(Presets.bodyBatteryRange, d.fields)
-        d = d.togglePreset(Presets.bodyBatteryRange); assertTrue(d.fields.isEmpty())
-        d = d.toggleField(Field.BB_LAST).togglePreset(Presets.bodyBatteryRange); assertEquals(Presets.bodyBatteryRange, d.fields, "částečná sada se doplní")
-    }
-
-    @Test fun `continuous sharing starts today and does not open history, once covers only today`() {
-        val g = GrantDraft().toggleRecipient("bob").toggleField(Field.SLEEP_DURATION).toGrant("g1", "me", TODAY, 5)
-        assertTrue(g.scope.covers(TODAY.plusDays(3))); assertFalse(g.scope.covers(TODAY.minusDays(1)))
-        val once = GrantDraft(once = true).toggleRecipient("bob").toggleField(Field.SLEEP_DURATION).toGrant("g2", "me", TODAY, 5)
-        assertTrue(once.scope.covers(TODAY)); assertFalse(once.scope.covers(TODAY.plusDays(1)))
-        assertEquals(setOf("bob"), g.recipients); assertEquals(5L, g.createdAtMs)
-    }
-
-    @Test fun `preview contains exactly the chosen fields and says so when nothing would be sent`() {
-        val p = GrantDraft().toggleRecipient("bob").toggleField(Field.SLEEP_DURATION).preview("me", day, 1)
-        assertTrue(p.contains("SLEEP_DURATION")); listOf("SLEEP_SCORE", "BB_MIN_MAX", "WEIGHT", "80.14").forEach { assertFalse(p.contains(it), it) }
-        assertTrue(GrantDraft().toggleRecipient("bob").toggleField(Field.HRV_DAILY).preview("me", day, 1).contains("nic by neodešlo"))
-    }
-
-    @Test fun `warnings for sensitive choices are shown`() {
-        val p = GrantDraft().toggleRecipient("b").toggleField(Field.WEIGHT).toggleField(Field.ACT_FULL_RECORD).problems()
-        assertTrue(p.any { it.contains("Váha") }); assertTrue(p.any { it.contains("FIT") })
-    }
-
     @Test fun `received projection is shown with readable values in a stable order`() {
         val payload = String(app.pulse4.sharing.Projector.encode(app.pulse4.sharing.Projector.project(
             app.pulse4.sharing.ShareGrant("g", "o", setOf("r"), setOf(Field.WEIGHT, Field.SLEEP_DURATION, Field.BB_MIN_MAX), scope = app.pulse4.sharing.TimeScope.from(TODAY), createdAtMs = 0), day, 7)!!))

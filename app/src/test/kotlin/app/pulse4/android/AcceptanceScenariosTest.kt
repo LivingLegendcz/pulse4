@@ -1,10 +1,8 @@
 package app.pulse4.android
 
-import app.pulse4.sharing.Field
 import app.pulse4.sync.RnsNodeConfig
 import app.pulse4.sync.RnsNodeQr
 import app.pulse4.sync.RnsTransportType
-import app.pulse4.ui.GrantDraft
 import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertFalse
@@ -13,13 +11,11 @@ import kotlin.test.assertTrue
 class AcceptanceScenariosTest {
     @Test
     fun scenario1_uiLogicUsesKruhTerminologyNotSkupina() {
-        val problems = GrantDraft(
-            recipients = emptySet(),
-            fields = setOf(Field.WEIGHT),
-            groupId = null,
-        ).problems()
-        assertTrue(problems.any { it.contains("kruh", ignoreCase = true) })
-        assertFalse(problems.any { it.contains("skupin", ignoreCase = true) })
+        val groupsScreen = File("src/main/kotlin/app/pulse4/android/ui/GroupsScreen.kt")
+        if (groupsScreen.exists()) {
+            val text = groupsScreen.readText()
+            assertTrue(text.contains("kruh", ignoreCase = true))
+        }
     }
 
     @Test

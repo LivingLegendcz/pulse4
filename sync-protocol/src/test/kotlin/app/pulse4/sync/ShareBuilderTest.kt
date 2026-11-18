@@ -103,4 +103,33 @@ class ShareBuilderTest {
         val second = sb.plan(listOf(g1, g2), emptyMap(), listOf(d), observations, ledger, 200)
         assertEquals(emptyList(), second)
     }
+
+    @Test fun `NEW-2 overlapping grants preserve field-to-source pairing`() {
+        val sb = ShareBuilder("josef", MessageBuilder("josef") { java.util.UUID.randomUUID().toString() })
+        val g1 = grant(setOf(Field.WEIGHT), setOf("bob")).copy(id = "g1", sources = setOf(Provider.WITHINGS_API))
+        val g2 = grant(setOf(Field.HR_DAILY), setOf("bob")).copy(id = "g2", sources = null)
+
+        // Only Garmin weight + Garmin HR: WEIGHT must stay Withings-only (omitted), HR_DAILY is shared from all
+        val garminOnlyObs = listOf(
+            obs(MetricType.WEIGHT, 81.0, 10),
+            obs(MetricType.RESTING_HEART_RATE, 52.0, 11),
+        )
+        val planGarminOnly = sb.plan(listOf(g1, g2), emptyMap(), listOf(d), garminOnlyObs, ledger, 100)
+        assertEquals(1, planGarminOnly.size)
+        val payload1 = planGarminOnly.single().message.payload
+        assertTrue(payload1.contains("HR_DAILY"))
+        assertFalse(payload1.contains("WEIGHT"), "Garmin weight must not leak when weight grant is Withings-only")
+
+        // Adding Withings weight shares Withings weight (79.5) and HR (52.0)
+        val withWithingsObs = garminOnlyObs + MetricObservation(
+            "w1", Provider.WITHINGS_API, "a", "w1", MetricType.WEIGHT, 9, null, 79.5, "Europe/Prague", d.toString()
+        )
+        val planWithWithings = sb.plan(listOf(g1, g2), emptyMap(), listOf(d), withWithingsObs, ledger, 200)
+        assertEquals(1, planWithWithings.size)
+        val payload2 = planWithWithings.single().message.payload
+        assertTrue(payload2.contains("HR_DAILY"))
+        assertTrue(payload2.contains("WEIGHT"))
+        assertTrue(payload2.contains("79.5"))
+        assertFalse(payload2.contains("81.0"))
+    }
 }

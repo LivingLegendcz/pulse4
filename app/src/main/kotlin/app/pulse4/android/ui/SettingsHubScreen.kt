@@ -820,7 +820,11 @@ private fun GlobalSharingSection(
     var enabledCategoryNames by rememberSaveable { mutableStateOf(emptySet<String>()) }
     var selectedRecipients by rememberSaveable { mutableStateOf(emptySet<String>()) }
     var extraActFieldNames by rememberSaveable { mutableStateOf(emptySet<String>()) }
+    var selectedSourceChoiceName by rememberSaveable { mutableStateOf<String?>(GrantEditor.SourceChoice.ALL.name) }
+    var sourceModified by rememberSaveable { mutableStateOf(false) }
     var isDirty by rememberSaveable { mutableStateOf(false) }
+
+    val incompatibleDirectGrants = remember(directGrants) { GrantEditor.hasIncompatibleDirectGrants(directGrants) }
 
     LaunchedEffect(directGrants, isDirty) {
         if (!isDirty) {
@@ -828,6 +832,8 @@ private fun GlobalSharingSection(
             enabledCategoryNames = form.enabledCategories.map { it.name }.toSet()
             selectedRecipients = form.selectedRecipients
             extraActFieldNames = form.extraActivityFields.map { it.name }.toSet()
+            selectedSourceChoiceName = form.sourceChoice?.name
+            sourceModified = false
         }
     }
 
@@ -837,7 +843,17 @@ private fun GlobalSharingSection(
     val extraActivityFields = remember(extraActFieldNames) {
         extraActFieldNames.mapNotNull { runCatching { Field.valueOf(it) }.getOrNull() }.toSet()
     }
+    val selectedSourceChoice = remember(selectedSourceChoiceName) {
+        selectedSourceChoiceName?.let { name -> runCatching { GrantEditor.SourceChoice.valueOf(name) }.getOrNull() }
+    }
+    val resolvedSources = remember(selectedSourceChoice, directGrants, sourceModified) {
+        GrantEditor.resolveSources(selectedSourceChoice, directGrants.firstOrNull()?.sources, sourceModified)
+    }
+    val currentDiff = remember(directGrants, enabledCategories, selectedRecipients, extraActivityFields, resolvedSources) {
+        GrantEditor.computeGlobalDiff(directGrants, enabledCategories, selectedRecipients, extraActivityFields, resolvedSources)
+    }
     var showConfirmSaveDialog by remember { mutableStateOf(false) }
+    var pendingRevokeGrant by remember { mutableStateOf<ShareGrant?>(null) }
     var notice by remember { mutableStateOf<String?>(null) }
 
     val sectionDefs = listOf(
@@ -1005,6 +1021,25 @@ private fun GlobalSharingSection(
                 }
 
                 Spacer(Modifier.height(12.dp))
+                Text("Zdroj zdravotních dat:", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.padding(vertical = 4.dp)
+                ) {
+                    GrantEditor.SourceChoice.entries.forEach { choice ->
+                        FilterChip(
+                            selected = selectedSourceChoice == choice,
+                            onClick = {
+                                selectedSourceChoiceName = choice.name
+                                sourceModified = true
+                                isDirty = true
+                            },
+                            label = { Text(choice.label) }
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(8.dp))
                 Text("Příjemci globálního sdílení:", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
                 if (contacts.isEmpty()) {
                     Text(
@@ -1039,9 +1074,27 @@ private fun GlobalSharingSection(
                     }
                 }
 
+                if (incompatibleDirectGrants) {
+                    Spacer(Modifier.height(8.dp))
+                    Card(
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, Color(0xFFF59E0B).copy(alpha = 0.55f)),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF1F1607)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(
+                                "Máte více samostatných přímých oprávnění s různými příjemci, poli nebo zdroji. Globální profil je nemůže sloučit, aby nedošlo k nechtěnému rozšíření sdílení. Upravte je jednotlivě v Přehledu sdílení.",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFFFDE68A)
+                            )
+                        }
+                    }
+                }
+
                 Spacer(Modifier.height(10.dp))
                 Button(
-                    enabled = contacts.isNotEmpty() && selectedRecipients.isNotEmpty(),
+                    enabled = contacts.isNotEmpty() && selectedRecipients.isNotEmpty() && !incompatibleDirectGrants && currentDiff.hasChanges,
                     onClick = { showConfirmSaveDialog = true },
                     modifier = Modifier.fillMaxWidth()
                 ) {
@@ -1049,10 +1102,9 @@ private fun GlobalSharingSection(
                 }
 
                 if (showConfirmSaveDialog) {
-                    val diff = GrantEditor.computeGlobalDiff(directGrants, enabledCategories, selectedRecipients)
-                    fun contactNames(ids: Set<String>) = ids.joinToString(", ") { id ->
-                        contacts.firstOrNull { it.identity == id }?.displayName ?: id.take(10)
-                    }
+                    val diff = currentDiff
+                    fun contactName(id: String) = contacts.firstOrNull { it.identity == id }?.displayName ?: id.take(10)
+                    fun categoryLabel(cat: Category) = sectionDefs.firstOrNull { it.first == cat }?.second?.first ?: cat.name
                     AlertDialog(
                         onDismissRequest = { showConfirmSaveDialog = false },
                         containerColor = Color(0xFF0A101B),
@@ -1061,17 +1113,33 @@ private fun GlobalSharingSection(
                         title = { Text("Potvrdit změny přímého sdílení", fontWeight = FontWeight.ExtraBold) },
                         text = {
                             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                if (diff.newlySharedRecipients.isNotEmpty()) {
-                                    Text("Nově uvidí: ${contactNames(diff.newlySharedRecipients)}", style = MaterialTheme.typography.bodySmall, color = Color(0xFF34D399))
+                                diff.addedByRecipient.forEach { (recipientId, cats) ->
+                                    Text(
+                                        "Nově uvidí ${contactName(recipientId)}: ${cats.joinToString(", ") { categoryLabel(it) }}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = Color(0xFF34D399)
+                                    )
                                 }
-                                if (diff.removedRecipients.isNotEmpty()) {
-                                    Text("Přestane vidět: ${contactNames(diff.removedRecipients)}", style = MaterialTheme.typography.bodySmall, color = Color(0xFFF59E0B))
+                                diff.removedByRecipient.forEach { (recipientId, cats) ->
+                                    Text(
+                                        "Přestane vidět ${contactName(recipientId)}: ${cats.joinToString(", ") { categoryLabel(it) }}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = Color(0xFFF59E0B)
+                                    )
                                 }
-                                if (diff.newlyAddedCategories.isNotEmpty()) {
-                                    Text("Přidané sekce: ${diff.newlyAddedCategories.joinToString(", ") { it.name }}", style = MaterialTheme.typography.bodySmall)
+                                if (diff.sourcesChanged) {
+                                    Text(
+                                        "Zdroj dat: ${selectedSourceChoice?.label ?: "Vlastní výběr"}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = Color(0xFF38BDF8)
+                                    )
                                 }
-                                if (diff.removedCategories.isNotEmpty()) {
-                                    Text("Odebrané sekce: ${diff.removedCategories.joinToString(", ") { it.name }}", style = MaterialTheme.typography.bodySmall, color = Color(0xFFF59E0B))
+                                if (diff.activityFieldsChanged) {
+                                    Text(
+                                        "Změna sdílených detailů aktivit.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = Color(0xFF38BDF8)
+                                    )
                                 }
                                 Text(
                                     "Sdílení v kruzích a rodinných vazbách zůstane beze změny. Při zapnutí se odešle i posledních 7 dní historie.",
@@ -1083,12 +1151,12 @@ private fun GlobalSharingSection(
                         confirmButton = {
                             Button(onClick = {
                                 showConfirmSaveDialog = false
+                                if (incompatibleDirectGrants || !diff.hasChanges) return@Button
                                 scope.launch {
                                     val resultMsg = withContext(Dispatchers.IO) {
                                         val now = System.currentTimeMillis()
                                         val self = sl.bridge.ensureStarted().deliveryHash
                                         val today = LocalDate.now(ZoneId.of(sl.settings.zoneId))
-                                        directGrants.forEach { old -> sl.shareService.revoke(old.id, now) }
                                         val newGrant = GrantEditor.buildGlobalGrant(
                                             id = UUID.randomUUID().toString(),
                                             ownerId = self,
@@ -1098,7 +1166,9 @@ private fun GlobalSharingSection(
                                             extraActivityFields = extraActivityFields,
                                             today = today,
                                             nowMs = now,
+                                            sources = resolvedSources,
                                         )
+                                        directGrants.forEach { old -> sl.shareService.revoke(old.id, now) }
                                         if (newGrant != null) {
                                             sl.shareService.saveGrantWithPolicy(newGrant, null).fold(
                                                 onSuccess = {
@@ -1167,18 +1237,44 @@ private fun GlobalSharingSection(
                             fontWeight = FontWeight.ExtraBold,
                             color = Color.White
                         )
-                        TextButton(onClick = {
-                            scope.launch(Dispatchers.IO) {
-                                sl.shareService.revoke(g.id, System.currentTimeMillis())
-                                notice = "Sdílení odvoláno."
-                            }
-                        }) {
+                        TextButton(onClick = { pendingRevokeGrant = g }) {
                             Text("Odvolat", color = MaterialTheme.colorScheme.error)
                         }
                     }
                     Text(g.fields.joinToString { app.pulse4.ui.Labels.field(it) }, style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8))
                 }
             }
+        }
+
+        pendingRevokeGrant?.let { g ->
+            AlertDialog(
+                onDismissRequest = { pendingRevokeGrant = null },
+                containerColor = Color(0xFF0A101B),
+                titleContentColor = Color.White,
+                textContentColor = Color(0xFFCBD5E1),
+                title = { Text("Odvolat oprávnění?", fontWeight = FontWeight.ExtraBold) },
+                text = {
+                    Text(
+                        "Sdílení pro ${g.recipients.size} příjemců (${g.fields.size} polí) se okamžitě zastaví a příjemcům odejde požadavek na smazání.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                },
+                confirmButton = {
+                    Button(onClick = {
+                        val targetId = g.id
+                        pendingRevokeGrant = null
+                        scope.launch {
+                            withContext(Dispatchers.IO) {
+                                sl.shareService.revoke(targetId, System.currentTimeMillis())
+                            }
+                            notice = "Sdílení odvoláno."
+                        }
+                    }) { Text("Odvolat") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { pendingRevokeGrant = null }) { Text("Zrušit", color = Color(0xFF94A3B8)) }
+                }
+            )
         }
     }
 }

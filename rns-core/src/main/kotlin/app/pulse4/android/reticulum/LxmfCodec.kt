@@ -138,9 +138,17 @@ object LxmfCodec {
         val transferKb = (list[3] as? Number)?.toLong() ?: 0L
         val syncKb = (list[4] as? Number)?.toLong() ?: 0L
         val costs = list[5] as? List<*> ?: emptyList<Any?>()
-        val stampCost = (costs.getOrNull(0) as? Number)?.toInt() ?: 0
-        val stampFlex = (costs.getOrNull(1) as? Number)?.toInt() ?: 0
-        val peeringCost = (costs.getOrNull(2) as? Number)?.toInt() ?: 0
+        val extCosts = list.getOrNull(7) as? List<*> ?: emptyList<Any?>()
+        val rawStampCost = (extCosts.getOrNull(0) as? Number)?.toDouble()
+            ?: (costs.getOrNull(0) as? Number)?.toDouble()
+            ?: 0.0
+        val stampCost = kotlin.math.ceil(rawStampCost).toInt()
+        val stampFlex = (extCosts.getOrNull(1) as? Number)?.toInt()
+            ?: (costs.getOrNull(1) as? Number)?.toInt()
+            ?: 0
+        val peeringCost = (extCosts.getOrNull(2) as? Number)?.toInt()
+            ?: (costs.getOrNull(2) as? Number)?.toInt()
+            ?: 0
         @Suppress("UNCHECKED_CAST")
         val metadata = (list.getOrNull(6) as? Map<Any?, Any?>) ?: emptyMap()
 

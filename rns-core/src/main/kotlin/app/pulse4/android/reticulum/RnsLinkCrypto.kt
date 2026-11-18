@@ -40,6 +40,13 @@ object RnsPacketType {
 
 object RnsContext {
     const val NONE = 0x00.toByte()
+    const val RESOURCE = 0x01.toByte()
+    const val RESOURCE_ADV = 0x02.toByte()
+    const val RESOURCE_REQ = 0x03.toByte()
+    const val RESOURCE_HMU = 0x04.toByte()
+    const val RESOURCE_PRF = 0x05.toByte()
+    const val RESOURCE_ICL = 0x06.toByte()
+    const val RESOURCE_RCL = 0x07.toByte()
     const val REQUEST = 0x09.toByte()
     const val RESPONSE = 0x0A.toByte()
     const val KEEPALIVE = 0xFA.toByte()
@@ -341,6 +348,10 @@ class RnsLinkSession(
         private set
     var negotiatedMtu: Int = 500
         private set
+    val sdu: Int
+        get() = (negotiatedMtu - 36).coerceAtLeast(464)
+    val mdu: Int
+        get() = (((negotiatedMtu - 1 - 19 - 48) / 16) * 16 - 1).coerceAtLeast(431)
     var identified: Boolean = false
         private set
     var rttSec: Double = 0.05
@@ -348,6 +359,8 @@ class RnsLinkSession(
     var keepaliveIntervalMs: Long = 30_000L
         private set
     var lastActivityMs: Long = System.currentTimeMillis()
+        private set
+    var lastInboundMs: Long = System.currentTimeMillis()
         private set
 
     private val ephSeed = ByteArray(32).also { SecureRandom().nextBytes(it) }
@@ -419,7 +432,9 @@ class RnsLinkSession(
         val derived = RnsCrypto.hkdfSha256(shared, salt = linkIdBytes, length = 64)
         fernet = RnsCrypto.RnsFernet(derived)
         state = State.ACTIVE
-        lastActivityMs = System.currentTimeMillis()
+        val now = System.currentTimeMillis()
+        lastActivityMs = now
+        lastInboundMs = now
 
         rttSec = ((lastActivityMs - createdAtMs).coerceAtLeast(1L)) / 1000.0
         keepaliveIntervalMs = (rttSec * (KEEPALIVE_MAX_SEC / KEEPALIVE_MAX_RTT_SEC))
@@ -494,15 +509,39 @@ class RnsLinkSession(
         val verifier = Ed25519Signer()
         verifier.init(false, Ed25519PublicKeyParameters(peerEdPub32, 0))
         verifier.update(packetHash32, 0, packetHash32.size)
-        return verifier.verifySignature(sig64)
+        val ok = verifier.verifySignature(sig64)
+        if (ok) touchInbound()
+        return ok
+    }
+
+    fun encryptLinkPayload(plaintext: ByteArray): ByteArray? = fernet?.encrypt(plaintext)?.also {
+        lastActivityMs = System.currentTimeMillis()
+    }
+
+    fun buildUnencryptedLinkPacket(packetType: Int, context: Byte, payload: ByteArray): ByteArray? {
+        if (state != State.ACTIVE) return null
+        val flags = RnsCrypto.packetFlags(
+            RnsHeaderType.HEADER_1,
+            RnsTransportType.BROADCAST,
+            RnsDestType.LINK,
+            packetType,
+        )
+        val pkt = byteArrayOf(flags, 0x00) + linkIdBytes + byteArrayOf(context) + payload
+        if (pkt.size > negotiatedMtu) {
+            return null
+        }
+        lastActivityMs = System.currentTimeMillis()
+        return pkt
     }
 
     fun decryptLinkPayload(ciphertext: ByteArray): ByteArray? = fernet?.decrypt(ciphertext)?.also {
-        lastActivityMs = System.currentTimeMillis()
+        touchInbound()
     }
 
     fun touchInbound() {
-        lastActivityMs = System.currentTimeMillis()
+        val now = System.currentTimeMillis()
+        lastActivityMs = now
+        lastInboundMs = now
     }
 
     fun buildIdentifyPacket(pubKey64: ByteArray, edPriv: Ed25519PrivateKeyParameters): ByteArray? {

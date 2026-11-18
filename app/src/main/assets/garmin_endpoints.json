@@ -183,7 +183,7 @@
       "itemsPath": "",
       "timePath": "startTimestampGMT",
       "endTimePath": "endTimestampGMT",
-      "valuePath": "charged",
+      "valuePath": "endOfDayBodyBatteryDynamicFeedbackEvent.bodyBatteryLevel",
       "timeFormat": "ISO_INSTANT",
       "scale": 1.0,
       "localDatePath": "date",

@@ -113,6 +113,74 @@ class GrantEditorTest {
         assertEquals(setOf("bob"), diff.removedRecipients)
         assertEquals(setOf(Category.HRV), diff.newlyAddedCategories)
         assertTrue(diff.removedCategories.isEmpty())
+        assertEquals(setOf(Category.SLEEP, Category.HRV), diff.addedByRecipient["eva"])
+        assertEquals(setOf(Category.SLEEP), diff.removedByRecipient["bob"])
+        assertTrue(diff.hasChanges)
+    }
+
+    @Test
+    fun `NEW-3 global profile preserves sources, refuses incompatible direct grants, and detects no-op saves`() {
+        val withingsOnly = grant(
+            id = "d1",
+            recipients = setOf("bob"),
+            fields = setOf(Field.WEIGHT),
+            sources = setOf(Provider.WITHINGS_API),
+        )
+        val form = GrantEditor.initialGlobalForm(listOf(withingsOnly))
+        assertFalse(form.incompatibleDirectGrants)
+        assertEquals(setOf(Provider.WITHINGS_API), form.sources)
+        assertEquals(GrantEditor.SourceChoice.WITHINGS_ONLY, form.sourceChoice)
+
+        // No-op diff has hasChanges == false
+        val noopDiff = GrantEditor.computeGlobalDiff(
+            existingDirectGrants = listOf(withingsOnly),
+            targetCategories = setOf(Category.BODY_COMPOSITION),
+            targetRecipients = setOf("bob"),
+            targetSources = setOf(Provider.WITHINGS_API),
+        )
+        assertFalse(noopDiff.hasChanges)
+        assertTrue(noopDiff.addedByRecipient.isEmpty())
+        assertTrue(noopDiff.removedByRecipient.isEmpty())
+
+        // Changing sources is detected as a change and preserved in buildGlobalGrant
+        val sourceChangedDiff = GrantEditor.computeGlobalDiff(
+            existingDirectGrants = listOf(withingsOnly),
+            targetCategories = setOf(Category.BODY_COMPOSITION),
+            targetRecipients = setOf("bob"),
+            targetSources = null,
+        )
+        assertTrue(sourceChangedDiff.hasChanges)
+        assertTrue(sourceChangedDiff.sourcesChanged)
+
+        val rebuilt = assertNotNull(
+            GrantEditor.buildGlobalGrant(
+                id = "d2",
+                ownerId = "alice",
+                existingDirectGrants = listOf(withingsOnly),
+                selectedCategories = setOf(Category.BODY_COMPOSITION),
+                selectedRecipients = setOf("bob"),
+                today = today,
+                nowMs = 2000L,
+            )
+        )
+        assertEquals(setOf(Provider.WITHINGS_API), rebuilt.sources)
+
+        // Incompatible direct grants (sleep->{A}, weight->{A,B}) must NOT be silently merged
+        val gSleepA = grant("d-sleep", recipients = setOf("A"), fields = setOf(Field.SLEEP_DURATION))
+        val gWeightAB = grant("d-weight", recipients = setOf("A", "B"), fields = setOf(Field.WEIGHT))
+        assertTrue(GrantEditor.hasIncompatibleDirectGrants(listOf(gSleepA, gWeightAB)))
+        assertTrue(GrantEditor.initialGlobalForm(listOf(gSleepA, gWeightAB)).incompatibleDirectGrants)
+        assertNull(
+            GrantEditor.buildGlobalGrant(
+                id = "d-merged",
+                ownerId = "alice",
+                existingDirectGrants = listOf(gSleepA, gWeightAB),
+                selectedCategories = setOf(Category.SLEEP, Category.BODY_COMPOSITION),
+                selectedRecipients = setOf("A", "B"),
+                today = today,
+                nowMs = 3000L,
+            )
+        )
     }
 
     @Test

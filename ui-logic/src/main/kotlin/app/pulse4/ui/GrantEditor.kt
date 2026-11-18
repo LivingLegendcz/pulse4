@@ -142,6 +142,9 @@ object GrantEditor {
         val enabledCategories: Set<Category>,
         val selectedRecipients: Set<String>,
         val extraActivityFields: Set<Field> = emptySet(),
+        val sources: Set<Provider>? = null,
+        val sourceChoice: SourceChoice? = SourceChoice.ALL,
+        val incompatibleDirectGrants: Boolean = false,
     )
 
     data class GlobalSaveDiff(
@@ -149,6 +152,11 @@ object GrantEditor {
         val removedRecipients: Set<String>,
         val newlyAddedCategories: Set<Category>,
         val removedCategories: Set<Category>,
+        val addedByRecipient: Map<String, Set<Category>> = emptyMap(),
+        val removedByRecipient: Map<String, Set<Category>> = emptyMap(),
+        val sourcesChanged: Boolean = false,
+        val activityFieldsChanged: Boolean = false,
+        val hasChanges: Boolean = false,
     )
 
     /** S2: Pracuje výhradně s přímými granty (`groupId == null`). */
@@ -157,17 +165,36 @@ object GrantEditor {
             g.active && g.groupId == null && (ownerId == null || g.ownerId == ownerId)
         }
 
+    /**
+     * NEW-3: Vrací `true`, pokud existuje více přímých grantů s různými příjemci, poli nebo zdroji.
+     * Takové granty nelze tiše sloučit do jednoho globálního profilu bez rizika rozšíření sdílení (kartézský součin).
+     */
+    fun hasIncompatibleDirectGrants(directGrants: List<ShareGrant>): Boolean {
+        if (directGrants.size <= 1) return false
+        val first = directGrants.first()
+        return directGrants.any { g ->
+            g.recipients != first.recipients ||
+                g.fields != first.fields ||
+                g.sources != first.sources
+        }
+    }
+
     /** S2: Výchozí příjemci jsou prázdná množina (nikdy ne všechny kontakty). */
     fun initialGlobalForm(activeGrants: List<ShareGrant>, ownerId: String? = null): GlobalFormState {
         val direct = directGrants(activeGrants, ownerId)
+        val incompatible = hasIncompatibleDirectGrants(direct)
         val allFields = direct.flatMap { it.fields }.toSet()
         val cats = allFields.map { it.category }.toSet()
         val recipients = if (direct.isEmpty()) emptySet() else direct.flatMap { it.recipients }.toSet()
         val extraAct = allFields.intersect(fieldsOf(Category.ACTIVITY) - Field.ACT_SUMMARY)
+        val sources = if (incompatible) null else direct.firstOrNull()?.sources
         return GlobalFormState(
             enabledCategories = cats,
             selectedRecipients = recipients,
             extraActivityFields = extraAct,
+            sources = sources,
+            sourceChoice = sourceChoiceFrom(sources),
+            incompatibleDirectGrants = incompatible,
         )
     }
 
@@ -175,16 +202,60 @@ object GrantEditor {
         existingDirectGrants: List<ShareGrant>,
         targetCategories: Set<Category>,
         targetRecipients: Set<String>,
+        targetExtraActivityFields: Set<Field> = emptySet(),
+        targetSources: Set<Provider>? = existingDirectGrants.firstOrNull()?.sources,
     ): GlobalSaveDiff {
         val oldRecipients = existingDirectGrants.flatMap { it.recipients }.toSet()
         val oldCategories = existingDirectGrants.flatMap { it.fields }.map { it.category }.toSet()
         val effectiveNewRecipients = if (targetCategories.isEmpty()) emptySet() else targetRecipients
         val effectiveNewCategories = if (targetRecipients.isEmpty()) emptySet() else targetCategories
+
+        val addedByRecipient = LinkedHashMap<String, Set<Category>>()
+        val removedByRecipient = LinkedHashMap<String, Set<Category>>()
+        for (r in (oldRecipients + effectiveNewRecipients).sorted()) {
+            val oldCatsForR = existingDirectGrants
+                .filter { r in it.recipients }
+                .flatMap { it.fields }
+                .map { it.category }
+                .toSet()
+            val newCatsForR = if (r in effectiveNewRecipients) effectiveNewCategories else emptySet()
+            val added = newCatsForR - oldCatsForR
+            val removed = oldCatsForR - newCatsForR
+            if (added.isNotEmpty()) addedByRecipient[r] = added
+            if (removed.isNotEmpty()) removedByRecipient[r] = removed
+        }
+
+        val incompatible = hasIncompatibleDirectGrants(existingDirectGrants)
+        val oldSources = if (existingDirectGrants.isEmpty()) null else existingDirectGrants.first().sources
+        val sourcesChanged = existingDirectGrants.isNotEmpty() && !incompatible && targetSources != oldSources
+
+        val actExtraMask = fieldsOf(Category.ACTIVITY) - Field.ACT_SUMMARY
+        val oldExtraAct = existingDirectGrants.flatMap { it.fields }.toSet().intersect(actExtraMask)
+        val newExtraAct = if (Category.ACTIVITY in effectiveNewCategories) {
+            targetExtraActivityFields.intersect(actExtraMask)
+        } else {
+            emptySet()
+        }
+        val activityFieldsChanged = existingDirectGrants.isNotEmpty() &&
+            (Category.ACTIVITY in effectiveNewCategories) &&
+            newExtraAct != oldExtraAct
+
+        val hasChanges = if (existingDirectGrants.isEmpty()) {
+            effectiveNewRecipients.isNotEmpty() && effectiveNewCategories.isNotEmpty()
+        } else {
+            addedByRecipient.isNotEmpty() || removedByRecipient.isNotEmpty() || sourcesChanged || activityFieldsChanged
+        }
+
         return GlobalSaveDiff(
             newlySharedRecipients = effectiveNewRecipients - oldRecipients,
             removedRecipients = oldRecipients - effectiveNewRecipients,
             newlyAddedCategories = effectiveNewCategories - oldCategories,
             removedCategories = oldCategories - effectiveNewCategories,
+            addedByRecipient = addedByRecipient,
+            removedByRecipient = removedByRecipient,
+            sourcesChanged = sourcesChanged,
+            activityFieldsChanged = activityFieldsChanged,
+            hasChanges = hasChanges,
         )
     }
 
@@ -197,7 +268,9 @@ object GrantEditor {
         extraActivityFields: Set<Field> = emptySet(),
         today: LocalDate,
         nowMs: Long,
+        sources: Set<Provider>? = existingDirectGrants.firstOrNull()?.sources,
     ): ShareGrant? {
+        if (hasIncompatibleDirectGrants(existingDirectGrants)) return null
         if (selectedRecipients.isEmpty() || selectedCategories.isEmpty()) return null
         val existingFields = existingDirectGrants.flatMap { it.fields }.toSet()
         val existingCategories = existingFields.map { it.category }.toSet()
@@ -222,6 +295,7 @@ object GrantEditor {
             scope = TimeScope.continuousFrom(today.minusDays(7)),
             groupId = null,
             createdAtMs = nowMs,
+            sources = sources,
         )
     }
 

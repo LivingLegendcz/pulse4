@@ -255,6 +255,7 @@ fun GroupsScreen(
             onBackToTree = { openedGroupId = null },
             onOpenPairing = { showPairingDialog = true },
             onOpenAddFamily = { showAddFamilyDialog = true },
+            onOpenSharingOverview = onOpenSharingOverview,
             onOpenActivity = onOpenActivity,
             onCompareActivities = onCompareActivities
         )
@@ -1018,6 +1019,7 @@ private fun GroupDetailBranchView(
     onBackToTree: () -> Unit,
     onOpenPairing: () -> Unit,
     onOpenAddFamily: () -> Unit,
+    onOpenSharingOverview: () -> Unit = {},
     onOpenActivity: (String) -> Unit,
     onCompareActivities: (List<String>) -> Unit,
 ) {
@@ -1205,6 +1207,7 @@ private fun GroupDetailBranchView(
                 activeGrants = activeGrants,
                 onOpenPairing = onOpenPairing,
                 onOpenAddFamily = onOpenAddFamily,
+                onOpenSharingOverview = onOpenSharingOverview,
                 onBackToTree = onBackToTree
             )
         }
@@ -1727,6 +1730,7 @@ private fun GroupBranchMembersAndSharingSection(
     activeGrants: List<ShareGrant>,
     onOpenPairing: () -> Unit,
     onOpenAddFamily: () -> Unit = {},
+    onOpenSharingOverview: () -> Unit = {},
     onBackToTree: () -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
@@ -1976,7 +1980,39 @@ private fun GroupBranchMembersAndSharingSection(
             }
         }
 
-        // 1. Přepínače kategorií sdílených do tohoto kruhu (atmosférická matice)
+        // 1. Přepínače kategorií sdílených do tohoto kruhu (pouze pro skutečné kruhy; virtuální 'Všichni přátelé' odkazuje na globální profil)
+        if (currentGroup == null) {
+            Card(
+                shape = RoundedCornerShape(20.dp),
+                border = BorderStroke(1.dp, Color(0xFF232A3B)),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF0A101B)),
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+            ) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Outlined.Share, contentDescription = null, tint = Color(0xFF2DD4BF), modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "Přehled všech spárovaných přátel",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color.White
+                        )
+                    }
+                    Text(
+                        "„Všichni přátelé“ je souhrnný pohled na všechny spárované kontakty. Přímé sdílení bez kruhu nastavíte v globálním profilu sdílení nebo v Přehledu sdílení a oprávnění.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFF94A3B8)
+                    )
+                    Button(
+                        onClick = onOpenSharingOverview,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Otevřít přehled a globální profil sdílení")
+                    }
+                }
+            }
+        } else {
         Card(
             shape = RoundedCornerShape(20.dp),
             border = BorderStroke(1.dp, Color(0xFF232A3B)),
@@ -1988,7 +2024,7 @@ private fun GroupBranchMembersAndSharingSection(
                     Icon(Icons.Outlined.Share, contentDescription = null, tint = Color(0xFF2DD4BF), modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(8.dp))
                     Text(
-                        "Co sdílím do kruhu '${currentGroup?.name ?: "Všichni přátelé"}'",
+                        "Co sdílím do kruhu '${currentGroup.name}'",
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.ExtraBold,
                         color = Color.White
@@ -2272,6 +2308,7 @@ private fun GroupBranchMembersAndSharingSection(
                     }
                 }
             }
+        }
         }
 
         Spacer(Modifier.height(12.dp))

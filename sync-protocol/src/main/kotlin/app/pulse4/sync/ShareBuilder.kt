@@ -1,13 +1,17 @@
 package app.pulse4.sync
 
 import app.pulse4.domain.MetricObservation
+import app.pulse4.domain.Provider
+import app.pulse4.sharing.Field
 import app.pulse4.sharing.Group
 import app.pulse4.sharing.MembershipPolicy
 import app.pulse4.sharing.OwnerDay
 import app.pulse4.sharing.OwnerDayAssembler
 import app.pulse4.sharing.Projector
 import app.pulse4.sharing.ShareGrant
+import app.pulse4.sharing.SharedProjection
 import java.time.LocalDate
+import kotlinx.serialization.json.JsonElement
 
 data class SentRecord(val version: Long, val contentHash: String)
 
@@ -71,12 +75,63 @@ class ShareBuilder(private val selfId: String, private val builder: MessageBuild
                     .filter { r in recipientsByGrant.getValue(it) && it.scope.covers(date) }
                     .sortedBy { it.id }
                 if (matching.isEmpty()) continue
-                val merged = mergeGrantsForRecipient(matching)
-                val day = OwnerDayAssembler.assembleForGrant(date, observations, merged)
-                planDayForRecipient(merged, r, day, ledger, nowMs, out)
+                val primaryGrant = matching.first()
+                val fieldsBySources = groupFieldsByEffectiveSources(matching)
+                if (fieldsBySources.size == 1) {
+                    val (sourcesGroup, fieldsGroup) = fieldsBySources.entries.single()
+                    val merged = primaryGrant.copy(fields = fieldsGroup, sources = sourcesGroup)
+                    val day = OwnerDayAssembler.assembleForGrant(date, observations, merged)
+                    planDayForRecipient(merged, r, day, ledger, nowMs, out)
+                } else {
+                    val combinedFields = LinkedHashMap<Field, JsonElement>()
+                    var maxMeasuredAt: Long? = null
+                    for ((sourcesGroup, fieldsGroup) in fieldsBySources) {
+                        val subGrant = primaryGrant.copy(fields = fieldsGroup, sources = sourcesGroup)
+                        val subDay = OwnerDayAssembler.assembleForGrant(date, observations, subGrant)
+                        val subProj = Projector.project(subGrant, subDay, nowMs) ?: continue
+                        combinedFields.putAll(subProj.fields)
+                        val ts = subProj.measuredAtUtcMs
+                        if (ts != null && (maxMeasuredAt == null || ts > maxMeasuredAt)) {
+                            maxMeasuredAt = ts
+                        }
+                    }
+                    if (combinedFields.isEmpty()) continue
+                    val orderedFields = LinkedHashMap<Field, JsonElement>()
+                    for (f in Field.entries) {
+                        combinedFields[f]?.let { orderedFields[f] = it }
+                    }
+                    val projection = SharedProjection(
+                        ownerId = primaryGrant.ownerId,
+                        grantId = primaryGrant.id,
+                        date = date.toString(),
+                        fields = orderedFields,
+                        measuredAtUtcMs = maxMeasuredAt,
+                        producedAtMs = nowMs,
+                    )
+                    enqueueProjectionIfChanged(projection, primaryGrant.id, r, date, ledger, nowMs, out)
+                }
             }
         }
         return out
+    }
+
+    private fun groupFieldsByEffectiveSources(matching: List<ShareGrant>): Map<Set<Provider>?, Set<Field>> {
+        val sourcesByField = LinkedHashMap<Field, Set<Provider>?>()
+        for (g in matching) {
+            for (f in g.fields) {
+                if (f !in sourcesByField) {
+                    sourcesByField[f] = g.sources
+                } else {
+                    val existing = sourcesByField[f]
+                    sourcesByField[f] = if (existing == null || g.sources == null) null else existing + g.sources!!
+                }
+            }
+        }
+        val fieldsBySources = LinkedHashMap<Set<Provider>?, MutableSet<Field>>()
+        for ((field, sources) in sourcesByField) {
+            fieldsBySources.getOrPut(sources) { LinkedHashSet() }.add(field)
+        }
+        return fieldsBySources
     }
 
     private fun mergeGrantsForRecipient(matching: List<ShareGrant>): ShareGrant {
@@ -97,18 +152,30 @@ class ShareBuilder(private val selfId: String, private val builder: MessageBuild
         out: MutableList<PlannedSend>,
     ) {
         val projection = Projector.project(g, day, nowMs) ?: return
+        enqueueProjectionIfChanged(projection, g.id, recipient, day.date, ledger, nowMs, out)
+    }
+
+    private fun enqueueProjectionIfChanged(
+        projection: SharedProjection,
+        grantId: String,
+        recipient: String,
+        date: LocalDate,
+        ledger: SentLedger,
+        nowMs: Long,
+        out: MutableList<PlannedSend>,
+    ) {
         // Hash bez času vzniku: stejná data = stejný obsah, nic se neposílá znovu.
         val hash = Wire.sha256Hex(Projector.encode(projection.copy(producedAtMs = 0)))
-        val key = "daily/${day.date}"
+        val key = "daily/$date"
         val payload = String(Projector.encode(projection), Charsets.UTF_8)
         val last = ledger.last(recipient, key)
         if (last != null && last.contentHash == hash) return
         out += PlannedSend(
             builder.build(
-                recipient = recipient, kind = Kinds.PROJECTION_UPSERT, objectType = "daily", objectId = day.date.toString(),
-                objectVersion = (last?.version ?: 0) + 1, payload = payload, nowMs = nowMs, grantRef = g.id,
+                recipient = recipient, kind = Kinds.PROJECTION_UPSERT, objectType = "daily", objectId = date.toString(),
+                objectVersion = (last?.version ?: 0) + 1, payload = payload, nowMs = nowMs, grantRef = grantId,
             ),
-            g.id, key, hash,
+            grantId, key, hash,
         )
     }
 }

@@ -11,12 +11,15 @@ import app.pulse4.android.security.KeyVault
 import app.pulse4.android.security.SecretStore
 import app.pulse4.domain.Activity
 import app.pulse4.domain.MetricType
+import app.pulse4.domain.PLog
 import app.pulse4.domain.Provider
 import app.pulse4.domain.Quality
 import app.pulse4.domain.Sport
+import app.pulse4.domain.TrackPoint
 import app.pulse4.domain.czechName
 import app.pulse4.fit.FitImporter
 import app.pulse4.fit.FitResult
+import app.pulse4.fit.ParsedFit
 import app.pulse4.garmin.ApiKeyProvider
 import app.pulse4.garmin.GarminEndpointsConfig
 import app.pulse4.garmin.GarminPersonalFetcher
@@ -68,12 +71,10 @@ class ServiceLocator(internal val context: Context) {
     val planService by lazy { PlanService(RoomPlanStore(db)) }
     val planHandlers by lazy { PlanSyncHandlers(planService) }
     val transport by lazy {
+        ServiceMigrations.runOnce(this)
         ReticulumTransport(bridge, settings, db, outbox) {
             planHandlers.handlers() + mapOf(
                 WithingsService.FAMILY_WEIGHT_PUSH_KIND to KindHandler { env, payload, _, nowMs ->
-                    if (!settings.acceptWeightFromParent) {
-                        return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
-                    }
                     val isVerifiedParent = db.familyLinks().allNow().any { row ->
                         row.status == FamilyLinkStatus.VERIFIED.name &&
                             row.parentId == env.author &&
@@ -82,22 +83,31 @@ class ServiceLocator(internal val context: Context) {
                     if (!isVerifiedParent) {
                         return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
                     }
+                    // Migrace výchozí hodnoty pro existující ověřené dětské účty (RE-5).
+                    if (settings.getRaw("acceptWeightFromParent") == null) {
+                        settings.acceptWeightFromParent = true
+                    }
+                    if (!settings.acceptWeightFromParent) {
+                        return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
+                    }
                     val obs = runCatching {
                         Wire.json.decodeFromString(app.pulse4.domain.MetricObservation.serializer(), payload)
                     }.getOrNull() ?: return@KindHandler HandlerResult.Rejected(RejectReason.INVALID_PAYLOAD)
-                    if (obs.type != MetricType.WEIGHT || obs.value.isNaN() || obs.value !in 1.0..400.0) {
+                    if (!isValidChildBodyComposition(obs.type, obs.value)) {
                         return@KindHandler HandlerResult.Rejected(RejectReason.INVALID_PAYLOAD)
                     }
+                    val idPrefix = if (obs.type == MetricType.WEIGHT) "parent-weight" else "parent-${obs.type.name.lowercase()}"
                     val savedObs = obs.copy(
-                        id = "parent-weight:${env.author.take(16)}:${obs.startUtcMs}",
+                        id = "$idPrefix:${env.author.take(16)}:${obs.startUtcMs}",
                         provider = Provider.WITHINGS_API,
                         accountId = "withings-family:${env.author.take(8)}",
                         quality = Quality.OK,
                         deleted = false
                     )
                     db.observations().upsert(listOf(savedObs.toRow()))
-                    val prevW = db.areaStates().get("withings.WEIGHT")
-                    db.areaStates().put(AreaStateRow("withings.WEIGHT", prevW?.cursorMs, nowMs, nowMs, null, null))
+                    val areaKey = "withings.${obs.type.name}"
+                    val prevW = db.areaStates().get(areaKey)
+                    db.areaStates().put(AreaStateRow(areaKey, prevW?.cursorMs, nowMs, nowMs, null, null))
                     HandlerResult.Applied
                 },
                 Kinds.FAMILY_LINK_REQUEST to KindHandler { env, payload, _, nowMs ->
@@ -967,7 +977,7 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
             sl.db.areaStates().put(AreaStateRow(SyncArea.ACTIVITIES.name, cursor, nowMs, nowMs, null, null))
             imported
         }.getOrElse { e ->
-            android.util.Log.e("ImportService", "syncGarminActivities failed", e)
+            PLog.e("ImportService", e) { "syncGarminActivities failed" }
             val prev = sl.db.areaStates().get(SyncArea.ACTIVITIES.name)
             sl.db.areaStates().put(
                 AreaStateRow(
@@ -1116,41 +1126,39 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
         return when (val r = FitImporter.parse(bytes)) {
             is FitResult.Invalid -> FitImportResult.Rejected(r.reason)
             is FitResult.Ok -> {
-                val p = r.parsed
                 val actId = garminObj?.get("activityId")?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }
-                val id = targetId ?: if (actId != null) "garmin-$actId" else "fit-$hash"
-                val existing = sl.db.activities().get(id)
-                if (existing != null && targetId != null) {
-                    if (p.points.isNotEmpty()) {
-                        sl.db.activities().upsertTrack(
-                            TrackRow(
-                                id,
-                                json.encodeToString(
-                                    kotlinx.serialization.builtins.ListSerializer(app.pulse4.domain.TrackPoint.serializer()),
-                                    p.points
-                                )
-                            )
-                        )
-                    }
-                    return FitImportResult.Imported(id)
-                }
+                val baseId = targetId ?: if (actId != null) "garmin-$actId" else "fit-$hash"
+                val baseExtId = actId ?: baseId.removePrefix("garmin-").takeIf { baseId.startsWith("garmin-") } ?: hash
                 val prov = if (garminObj != null) Provider.GARMIN_PERSONAL else Provider.MANUAL
-                val a = buildActivityFromGarminAndFit(
-                    id = id,
-                    provider = prov,
-                    extId = actId ?: id.removePrefix("garmin-").takeIf { id.startsWith("garmin-") } ?: hash,
-                    obj = garminObj,
-                    parsed = p,
-                    nowMs = nowMs
-                )
+                val isMultisport = r.sessions.size > 1
+                val sessionIds = multisportSessionIds(baseId, baseExtId, r.sessions.size)
+                val trackSerializer = kotlinx.serialization.builtins.ListSerializer(TrackPoint.serializer())
                 sl.db.runInTransaction {
-                    sl.db.activities().upsert(a.toRow(json.encodeToString(Activity.serializer(), a)))
-                    if (p.points.isNotEmpty()) {
-                        sl.db.activities().upsertTrack(TrackRow(id, json.encodeToString(
-                            kotlinx.serialization.builtins.ListSerializer(app.pulse4.domain.TrackPoint.serializer()), p.points)))
+                    for ((idx, session) in r.sessions.withIndex()) {
+                        val (sessionId, sessionExtId) = sessionIds[idx]
+                        val existing = sl.db.activities().get(sessionId)
+                        if (existing != null && targetId != null && idx == 0) {
+                            if (session.points.isNotEmpty()) {
+                                sl.db.activities().upsertTrack(TrackRow(sessionId, json.encodeToString(trackSerializer, session.points)))
+                            }
+                            continue
+                        }
+                        val objForSession = if (!isMultisport && idx == 0) garminObj else null
+                        val a = buildActivityFromGarminAndFit(
+                            id = sessionId,
+                            provider = prov,
+                            extId = sessionExtId,
+                            obj = objForSession,
+                            parsed = session,
+                            nowMs = nowMs
+                        )
+                        sl.db.activities().upsert(a.toRow(json.encodeToString(Activity.serializer(), a)))
+                        if (session.points.isNotEmpty()) {
+                            sl.db.activities().upsertTrack(TrackRow(sessionId, json.encodeToString(trackSerializer, session.points)))
+                        }
                     }
                 }
-                FitImportResult.Imported(id)
+                FitImportResult.Imported(baseId)
             }
         }
     }
@@ -1436,7 +1444,8 @@ class ShareService(private val sl: ServiceLocator) {
         }
         for (g in groupGrants) {
             if (g.ownerId == self && memberId in g.recipients) {
-                saveGrant(g.copy(recipients = g.recipients - memberId))
+                // Zúžení příjemců (odebrání člena) nesmí selhat na politice spolupodpisu nezletilého (RE-7).
+                saveGrantDirect(g.copy(recipients = g.recipients - memberId))
             }
         }
         saveGroup(updated)
@@ -1481,6 +1490,7 @@ class ShareService(private val sl: ServiceLocator) {
 
     /** Vytvoří projekce změněných dat pro každého skutečného příjemce a zařadí je do outboxu. Vrací počet zařazených. */
     fun planAndEnqueue(nowMs: Long): Int = synchronized(planLock) {
+        ServiceMigrations.runOnce(sl)
         val self = sl.bridge.ensureStarted().deliveryHash
         val zone = ZoneId.of(sl.settings.zoneId)
         val today = LocalDate.now(zone)
@@ -1540,49 +1550,58 @@ class ShareService(private val sl: ServiceLocator) {
         var queued = 0
         val acts = sl.db.activities().since(from.atStartOfDay(zone).toInstant().toEpochMilli())
             .sortedByDescending { it.startUtcMs }
-        android.util.Log.i("Pulse4Sync", "enqueueActivities: from=$from, acts=${acts.size}, activeGrants=${grants().filter { it.active }.size}")
+        val allGroups = groups()
+        val activeActivityGrants = grants().filter {
+            it.active && it.ownerId == self && it.fields.any { f -> f.category == app.pulse4.sharing.Category.ACTIVITY }
+        }
+        val recipientsByGrant = activeActivityGrants.associateWith {
+            app.pulse4.sharing.MembershipPolicy.effectiveRecipients(it, it.groupId?.let(allGroups::get))
+        }
+        val allRecipients = recipientsByGrant.values.flatten().toSortedSet()
+        PLog.i("Pulse4Sync") { "enqueueActivities: from=$from, acts=${acts.size}, activeGrants=${activeActivityGrants.size}" }
         for (row in acts) {
             val act = json.decodeFromString(Activity.serializer(), row.json)
             val track = sl.db.activities().track(row.id)?.let {
-                json.decodeFromString(kotlinx.serialization.builtins.ListSerializer(app.pulse4.domain.TrackPoint.serializer()), it.json)
+                json.decodeFromString(kotlinx.serialization.builtins.ListSerializer(TrackPoint.serializer()), it.json)
             }.orEmpty()
+            val actDate = java.time.Instant.ofEpochMilli(act.startUtcMs).atZone(zone).toLocalDate()
             val isHistorical = act.startUtcMs < recentActCutoffMs
-            for (g in grants().filter { it.active && it.ownerId == self && it.fields.any { f -> f.category == app.pulse4.sharing.Category.ACTIVITY } }) {
-                if (!g.allowsProvider(act.provider)) continue
-                val proj = ActivityProjector.project(g, act, track, emptyList<LapIn>(), zones)
-                android.util.Log.i("Pulse4Sync", "act=${act.id}, grant=${g.id}, scope=${g.scope}, projIsNull=${proj == null}")
+            // Slučování grantů aktivit per příjemce stejně jako S4 v ShareBuilderu (RE-6).
+            for (r in allRecipients) {
+                val matching = activeActivityGrants
+                    .filter { r in recipientsByGrant.getValue(it) && it.allowsProvider(act.provider) && it.scope.covers(actDate) }
+                    .sortedBy { it.id }
+                if (matching.isEmpty()) continue
+                val mergedGrant = mergeActivityGrantsForRecipient(matching)
+                val proj = ActivityProjector.project(mergedGrant, act, track, emptyList<LapIn>(), zones)
                 if (proj == null) continue
                 val payload = json.encodeToString(app.pulse4.sharing.ActivityProjection.serializer(), proj)
-                val hash = Wire.sha256Hex("${g.id}:$payload".toByteArray())
-                val recipients = app.pulse4.sharing.MembershipPolicy.effectiveRecipients(g, g.groupId?.let(groups()::get))
-                android.util.Log.i("Pulse4Sync", "act=${act.id}, payloadLen=${payload.length}, recipients=$recipients")
-                for (r in recipients) {
-                    val curPending = pendingByRecipient.getOrPut(r) { sl.outbox.pendingCountFor(r) }
-                    if (isHistorical && curPending >= MAX_PENDING_PER_RECIPIENT) {
-                        continue
+                val hash = Wire.sha256Hex(payload.toByteArray())
+                val curPending = pendingByRecipient.getOrPut(r) { sl.outbox.pendingCountFor(r) }
+                if (isHistorical && curPending >= MAX_PENDING_PER_RECIPIENT) {
+                    continue
+                }
+                val key = "activity/${act.id}"
+                val last = sl.sentLedger.last(r, key)
+                if (last?.contentHash == hash) {
+                    PLog.i("Pulse4Sync") { "act=${act.id} skipped, same hash as last sent" }
+                    continue
+                }
+                val msg = MessageBuilder(self).build(r, Kinds.PROJECTION_UPSERT, "activity", act.id, (last?.version ?: 0) + 1, payload, nowMs, grantRef = mergedGrant.id)
+                val e = msg.envelope
+                val item = OutboxItem(e.eventId, r, e.kind, e.objectType, e.objectId, e.objectVersion, mergedGrant.id, Wire.encode(msg), nowMs)
+                val res = sl.outbox.enqueue(item)
+                PLog.i("Pulse4Sync") { "act=${act.id} enqueue result: $res" }
+                when (res) {
+                    is EnqueueResult.Queued -> {
+                        sl.sentLedger.record(r, key, e.objectVersion, hash)
+                        matching.forEach { recordDeliveredKey(it.id, r, key) }
+                        pendingByRecipient[r] = curPending + 1
+                        queued++
                     }
-                    val key = "activity/${act.id}"
-                    val last = sl.sentLedger.last(r, key)
-                    if (last?.contentHash == hash) {
-                        android.util.Log.i("Pulse4Sync", "act=${act.id} skipped, same hash as last sent")
-                        continue
-                    }
-                    val msg = MessageBuilder(self).build(r, Kinds.PROJECTION_UPSERT, "activity", act.id, (last?.version ?: 0) + 1, payload, nowMs, grantRef = g.id)
-                    val e = msg.envelope
-                    val item = OutboxItem(e.eventId, r, e.kind, e.objectType, e.objectId, e.objectVersion, g.id, Wire.encode(msg), nowMs)
-                    val res = sl.outbox.enqueue(item)
-                    android.util.Log.i("Pulse4Sync", "act=${act.id} enqueue result: $res")
-                    when (res) {
-                        is EnqueueResult.Queued -> {
-                            sl.sentLedger.record(r, key, e.objectVersion, hash)
-                            recordDeliveredKey(g.id, r, key)
-                            pendingByRecipient[r] = curPending + 1
-                            queued++
-                        }
-                        EnqueueResult.OverQuota -> {
-                            if (item.sizeBytes > app.pulse4.sync.ProtocolLimits().maxEventBytes) continue
-                            return queued
-                        }
+                    EnqueueResult.OverQuota -> {
+                        if (item.sizeBytes > app.pulse4.sync.ProtocolLimits().maxEventBytes) continue
+                        return queued
                     }
                 }
             }
@@ -1677,11 +1696,6 @@ class ShareService(private val sl: ServiceLocator) {
         val plan = Revocation.plan(g, nowMs, delivered, inNode)
         saveGrantDirect(plan.revokedGrant)
         sl.outbox.cancelForGrant(plan.cancelQueuedForGrantId)
-        for ((recipient, keys) in delivered) {
-            for (key in keys) {
-                sl.db.inbox().deleteSent(recipient, key)
-            }
-        }
         sl.settings.put("delivered_keys.$grantId", "{}")
         val allGroups = groups()
         val otherActiveGrants = grants().filter { it.id != grantId && it.active && it.ownerId == self }
@@ -1697,12 +1711,31 @@ class ShareService(private val sl: ServiceLocator) {
                     }
                     objectKey.startsWith("activity/") -> {
                         if (other.fields.none { it.category == app.pulse4.sharing.Category.ACTIVITY }) return@any false
-                        val actDate = sl.db.activities().get(objectKey.removePrefix("activity/"))?.let {
+                        val actRow = sl.db.activities().get(objectKey.removePrefix("activity/"))
+                        val actDate = actRow?.let {
                             java.time.Instant.ofEpochMilli(it.startUtcMs).atZone(zone).toLocalDate()
                         }
-                        actDate == null || other.scope.covers(actDate)
+                        val provOk = actRow?.let {
+                            runCatching { json.decodeFromString(Activity.serializer(), it.json).provider }.getOrNull()?.let(other::allowsProvider) ?: true
+                        } ?: true
+                        provOk && (actDate == null || other.scope.covers(actDate))
                     }
                     else -> false
+                }
+            }
+        }
+        // NEW-1: ledger maž pouze pro klíče, kam se skutečně posílá PROJECTION_REMOVE;
+        // u klíčů krytých jiným grantem smaž jen contentHash a zachovej monotonní verzi N+1.
+        for ((recipient, keys) in delivered) {
+            for (key in keys) {
+                val updatedSent = updateSentRowOnRevoke(
+                    existing = sl.db.inbox().sent(recipient, key),
+                    isCoveredByOtherGrant = isCoveredByOtherGrant(recipient, key),
+                )
+                if (updatedSent != null) {
+                    sl.db.inbox().putSent(updatedSent)
+                } else if (!isCoveredByOtherGrant(recipient, key)) {
+                    sl.db.inbox().deleteSent(recipient, key)
                 }
             }
         }
@@ -1714,5 +1747,332 @@ class ShareService(private val sl: ServiceLocator) {
             sl.outbox.enqueue(OutboxItem(e.eventId, rq.recipient, e.kind, e.objectType, e.objectId, e.objectVersion, null, Wire.encode(msg), nowMs))
         }
         return plan
+    }
+}
+
+internal fun isValidChildBodyComposition(type: MetricType, value: Double): Boolean {
+    if (!value.isFinite()) return false
+    return when (type) {
+        MetricType.WEIGHT -> value in 1.0..400.0
+        MetricType.BODY_FAT -> value in 0.5..90.0
+        MetricType.MUSCLE_MASS, MetricType.FAT_FREE_MASS, MetricType.BONE_MASS -> value in 0.1..250.0
+        MetricType.BODY_WATER -> value in 0.5..90.0
+        MetricType.VISCERAL_FAT -> value in 0.0..60.0
+        MetricType.VASCULAR_AGE, MetricType.METABOLIC_AGE -> value in 1.0..120.0
+        MetricType.PULSE_WAVE_VELOCITY -> value in 1.0..30.0
+        MetricType.BMR -> value in 200.0..10000.0
+        MetricType.ECG_HR -> value in 20.0..300.0
+        MetricType.ECG_QTC, MetricType.ECG_QRS -> value in 10.0..1000.0
+        MetricType.ECG_AFIB, MetricType.ECG -> value in 0.0..1000.0
+        else -> false
+    }
+}
+
+internal fun multisportSessionIds(baseId: String, baseExtId: String, sessionCount: Int): List<Pair<String, String>> =
+    (0 until sessionCount).map { idx ->
+        if (idx == 0) baseId to baseExtId else "$baseId-s$idx" to "$baseExtId-s$idx"
+    }
+
+internal fun mergeActivityGrantsForRecipient(matching: List<ShareGrant>): ShareGrant {
+    val sorted = matching.sortedBy { it.id }
+    if (sorted.size == 1) return sorted.first()
+    val mergedFields = sorted.flatMap { it.fields }.toSet()
+    val mergedSources = if (sorted.any { it.sources == null }) null else sorted.flatMap { it.sources.orEmpty() }.toSet()
+    return sorted.first().copy(fields = mergedFields, sources = mergedSources)
+}
+
+internal fun updateSentRowOnRevoke(existing: SentRow?, isCoveredByOtherGrant: Boolean): SentRow? =
+    if (isCoveredByOtherGrant) existing?.copy(contentHash = "") else null
+
+/**
+ * Jednorázové datové migrace při startu služeb:
+ * - RE-1: přepis uložených `pulse.delivery` hashů na `lxmf.delivery` z uložených veřejných klíčů
+ * - RE-5: zachování `acceptWeightFromParent = true` pro existující ověřené dětské účty
+ * - NEW-12: vyčištění dříve uložených vymyšlených hodnot (`staminaPct`, `performanceCondition`, prázdný výkon apod.)
+ */
+object ServiceMigrations {
+    private const val KEY_IDENTITY_V1 = "migration.lxmf_identity_v1"
+    private const val KEY_ACCEPT_WEIGHT_V1 = "migration.accept_weight_default_v1"
+    private const val KEY_FABRICATED_CLEANUP_V1 = "migration.fabricated_activity_cleanup_v1"
+
+    fun deriveDeliveryHashes(publicKeyB64: String): Pair<String, String> {
+        val pubBytes = runCatching { java.util.Base64.getDecoder().decode(publicKeyB64) }.getOrNull()
+            ?: publicKeyB64.toByteArray(Charsets.UTF_8)
+        val pub64 = if (pubBytes.size >= 64) pubBytes.copyOf(64) else ByteArray(64).also {
+            System.arraycopy(pubBytes, 0, it, 0, minOf(pubBytes.size, 64))
+        }
+        val sha256 = MessageDigest.getInstance("SHA-256")
+        val identHash = sha256.digest(pub64).copyOf(16)
+        val lxmfNameHash = sha256.digest("lxmf.delivery".toByteArray(Charsets.UTF_8)).copyOf(10)
+        val legacyNameHash = sha256.digest("pulse.delivery".toByteArray(Charsets.UTF_8)).copyOf(10)
+        val lxmfHex = sha256.digest(lxmfNameHash + identHash).copyOf(16).joinToString("") { "%02x".format(it) }
+        val legacyHex = sha256.digest(legacyNameHash + identHash).copyOf(16).joinToString("") { "%02x".format(it) }
+        return lxmfHex to legacyHex
+    }
+
+    fun migrateLegacyPulseIdentities(
+        db: AppDatabase,
+        settings: Settings,
+        selfPublicKeyB64: String,
+        json: kotlinx.serialization.json.Json = Wire.json,
+    ): Int {
+        val hashMap = LinkedHashMap<String, String>()
+        if (selfPublicKeyB64.isNotBlank()) {
+            val (lxmf, legacy) = deriveDeliveryHashes(selfPublicKeyB64)
+            if (legacy != lxmf) hashMap[legacy] = lxmf
+        }
+        val contacts = db.contacts().allNow()
+        for (c in contacts) {
+            if (c.publicKeyB64.isBlank()) continue
+            val (lxmf, legacy) = deriveDeliveryHashes(c.publicKeyB64)
+            if (legacy != lxmf && (c.identity == legacy || c.identity == lxmf)) {
+                hashMap[legacy] = lxmf
+            }
+        }
+        if (hashMap.isEmpty()) {
+            settings.put(KEY_IDENTITY_V1, "1")
+            return 0
+        }
+        fun mapId(id: String): String = hashMap[id] ?: id
+        fun mapJsonHashes(raw: String): String {
+            var out = raw
+            for ((oldH, newH) in hashMap) {
+                if (oldH in out) out = out.replace("\"$oldH\"", "\"$newH\"")
+            }
+            return out
+        }
+
+        var migrated = 0
+        db.runInTransaction {
+            for (c in contacts) {
+                val newId = mapId(c.identity)
+                if (newId != c.identity) {
+                    db.contacts().delete(c.identity)
+                    db.contacts().upsert(c.copy(identity = newId))
+                    migrated++
+                }
+            }
+            for (row in db.grants().allNow()) {
+                val g = runCatching { json.decodeFromString(ShareGrant.serializer(), row.json) }.getOrNull() ?: continue
+                val newOwner = mapId(g.ownerId)
+                val newRecipients = g.recipients.mapTo(LinkedHashSet()) { mapId(it) }
+                if (newOwner != g.ownerId || newRecipients != g.recipients) {
+                    val updated = g.copy(ownerId = newOwner, recipients = newRecipients)
+                    db.grants().upsert(row.copy(json = json.encodeToString(ShareGrant.serializer(), updated)))
+                    migrated++
+                }
+            }
+            for (row in db.grants().groupsNow()) {
+                val g = runCatching { json.decodeFromString(Group.serializer(), row.json) }.getOrNull() ?: continue
+                val newMembers = g.members.mapTo(LinkedHashSet()) { mapId(it) }
+                val newAdmins = g.admins.mapTo(LinkedHashSet()) { mapId(it) }
+                if (newMembers != g.members || newAdmins != g.admins) {
+                    val updated = g.copy(members = newMembers, admins = newAdmins)
+                    db.grants().upsertGroup(row.copy(json = json.encodeToString(Group.serializer(), updated)))
+                    migrated++
+                }
+            }
+            for (row in db.familyLinks().allNow()) {
+                val newP = mapId(row.parentId)
+                val newC = mapId(row.childId)
+                val newJson = mapJsonHashes(row.json)
+                if (newP != row.parentId || newC != row.childId || newJson != row.json) {
+                    db.familyLinks().upsert(row.copy(parentId = newP, childId = newC, json = newJson))
+                    migrated++
+                }
+            }
+            for (row in db.pendingRequests().allNow()) {
+                val newFrom = mapId(row.fromId)
+                val newTo = mapId(row.toId)
+                val newJson = mapJsonHashes(row.json)
+                if (newFrom != row.fromId || newTo != row.toId || newJson != row.json) {
+                    db.pendingRequests().upsert(row.copy(fromId = newFrom, toId = newTo, json = newJson))
+                    migrated++
+                }
+            }
+            for (row in db.outbox().all()) {
+                val newRec = mapId(row.recipient)
+                val decoded = runCatching { Wire.decode(row.wire) }.getOrNull()
+                val newWire = if (decoded != null) {
+                    val e = decoded.envelope
+                    val mappedAuthor = mapId(e.author)
+                    val mappedRecipient = mapId(e.recipient)
+                    if (mappedAuthor != e.author || mappedRecipient != e.recipient) {
+                        Wire.encode(decoded.copy(envelope = e.copy(author = mappedAuthor, recipient = mappedRecipient)))
+                    } else row.wire
+                } else row.wire
+                if (newRec != row.recipient || !newWire.contentEquals(row.wire)) {
+                    db.outbox().update(row.copy(recipient = newRec, wire = newWire))
+                    migrated++
+                }
+            }
+            for (row in db.inbox().allSentNow()) {
+                val newRec = mapId(row.recipient)
+                if (newRec != row.recipient) {
+                    db.inbox().deleteSent(row.recipient, row.objectKey)
+                    db.inbox().putSent(row.copy(recipient = newRec))
+                    migrated++
+                }
+            }
+            for (row in db.inbox().allReceivedNow()) {
+                val newAuthor = mapId(row.author)
+                if (newAuthor != row.author) {
+                    db.inbox().removeObject(row.author, row.objectType, row.objectId)
+                    db.inbox().putObject(row.copy(author = newAuthor))
+                    migrated++
+                }
+            }
+            for ((oldH, newH) in hashMap) {
+                db.inbox().updateReceiptAuthor(oldH, newH)
+            }
+            for (row in db.plans().allRevisions()) {
+                val newJson = mapJsonHashes(row.json)
+                if (newJson != row.json) {
+                    db.plans().restoreRevision(row.copy(json = newJson))
+                    migrated++
+                }
+            }
+            for (row in db.plans().allProposalsNow()) {
+                val newJson = mapJsonHashes(row.json)
+                if (newJson != row.json) {
+                    db.plans().putProposal(row.copy(json = newJson))
+                    migrated++
+                }
+            }
+            val childRec = settings.getRaw("childRecipientIdentity")
+            if (!childRec.isNullOrBlank()) {
+                val mapped = mapId(childRec)
+                if (mapped != childRec) {
+                    settings.put("childRecipientIdentity", mapped)
+                    migrated++
+                }
+            }
+            for (s in db.settings().allNow()) {
+                if (s.key.startsWith("delivered_keys.")) {
+                    val newVal = mapJsonHashes(s.value)
+                    if (newVal != s.value) {
+                        db.settings().put(s.copy(value = newVal))
+                        migrated++
+                    }
+                }
+            }
+            settings.put(KEY_IDENTITY_V1, "1")
+        }
+        return migrated
+    }
+
+    fun migrateAcceptWeightDefaultIfVerified(db: AppDatabase, settings: Settings, selfId: String) {
+        if (settings.getRaw(KEY_ACCEPT_WEIGHT_V1) != null) return
+        if (settings.getRaw("acceptWeightFromParent") == null) {
+            val hasVerifiedChildLink = db.familyLinks().allNow().any {
+                it.status == FamilyLinkStatus.VERIFIED.name && it.childId == selfId
+            }
+            if (hasVerifiedChildLink) {
+                settings.acceptWeightFromParent = true
+            }
+        }
+        settings.put(KEY_ACCEPT_WEIGHT_V1, "1")
+    }
+
+    fun cleanLegacyFabricatedActivity(
+        act: Activity,
+        track: List<TrackPoint>,
+        reparsedFit: ParsedFit? = null,
+    ): Pair<Activity, List<TrackPoint>> {
+        val cleanedTrack = if (reparsedFit != null && reparsedFit.points.isNotEmpty()) {
+            reparsedFit.points
+        } else {
+            track.map { pt ->
+                if (pt.staminaPct != null || pt.staminaPotentialPct != null || pt.performanceCondition != null) {
+                    pt.copy(staminaPct = null, staminaPotentialPct = null, performanceCondition = null)
+                } else pt
+            }
+        }
+        val cleanedAct = if (reparsedFit != null) {
+            val mappedLaps = reparsedFit.laps.mapIndexed { idx, l ->
+                val lDur = ((l.endMs - l.startMs) / 1000.0).coerceAtLeast(1.0)
+                app.pulse4.domain.ActivityLap(
+                    index = idx + 1,
+                    startUtcMs = l.startMs,
+                    endUtcMs = l.endMs,
+                    durationS = lDur,
+                    distanceM = l.distanceM,
+                    avgHeartRate = l.avgHeartRate,
+                    maxHeartRate = l.maxHeartRate,
+                    avgSpeedMps = l.avgSpeedMps ?: l.distanceM?.let { it / lDur },
+                    maxSpeedMps = l.maxSpeedMps,
+                    ascentM = l.ascentM,
+                    descentM = l.descentM,
+                    avgCadence = l.avgCadence,
+                    avgPowerW = l.avgPowerW,
+                    caloriesKcal = l.caloriesKcal,
+                )
+            }
+            act.copy(
+                laps = mappedLaps,
+                avgCadence = reparsedFit.avgCadence ?: act.avgCadence,
+                powerZoneTimesS = if (act.avgPowerW == null) emptyList() else act.powerZoneTimesS,
+            )
+        } else {
+            act.copy(
+                powerZoneTimesS = if (act.avgPowerW == null) emptyList() else act.powerZoneTimesS,
+            )
+        }
+        return cleanedAct to cleanedTrack
+    }
+
+    fun migrateLegacyFabricatedActivities(sl: ServiceLocator): Int {
+        if (sl.settings.getRaw(KEY_FABRICATED_CLEANUP_V1) != null) return 0
+        val trackSerializer = kotlinx.serialization.builtins.ListSerializer(TrackPoint.serializer())
+        val fitDir = File(sl.context.noBackupFilesDir, "fit")
+        var cleanedCount = 0
+        sl.db.runInTransaction {
+            for (row in sl.db.activities().allNow()) {
+                val act = runCatching { Wire.json.decodeFromString(Activity.serializer(), row.json) }.getOrNull() ?: continue
+                val trackRow = sl.db.activities().track(row.id)
+                val track = trackRow?.let {
+                    runCatching { Wire.json.decodeFromString(trackSerializer, it.json) }.getOrNull()
+                }.orEmpty()
+                val fitHash = row.id.removePrefix("fit-").substringBefore("-s").takeIf { row.id.startsWith("fit-") }
+                val reparsed = fitHash?.let { h ->
+                    val f = File(fitDir, "$h.fit.enc")
+                    if (f.exists()) {
+                        val sessionIdx = row.id.substringAfter("-s", "").toIntOrNull() ?: 0
+                        runCatching {
+                            val bytes = sl.vault.open(f.readBytes())
+                            (FitImporter.parse(bytes) as? FitResult.Ok)?.sessions?.getOrNull(sessionIdx)
+                        }.getOrNull()
+                    } else null
+                }
+                val (newAct, newTrack) = cleanLegacyFabricatedActivity(act, track, reparsed)
+                if (newAct != act) {
+                    sl.db.activities().upsert(newAct.toRow(Wire.json.encodeToString(Activity.serializer(), newAct)))
+                    cleanedCount++
+                }
+                if (trackRow != null && newTrack != track) {
+                    sl.db.activities().upsertTrack(TrackRow(row.id, Wire.json.encodeToString(trackSerializer, newTrack)))
+                    cleanedCount++
+                }
+            }
+            sl.settings.put(KEY_FABRICATED_CLEANUP_V1, "1")
+        }
+        return cleanedCount
+    }
+
+    fun runOnce(sl: ServiceLocator) {
+        runCatching {
+            val info = sl.bridge.ensureStarted()
+            if (sl.settings.getRaw(KEY_IDENTITY_V1) == null) {
+                migrateLegacyPulseIdentities(sl.db, sl.settings, info.publicKeyB64)
+            }
+            migrateAcceptWeightDefaultIfVerified(sl.db, sl.settings, info.deliveryHash)
+        }.onFailure { e ->
+            PLog.w("ServiceMigrations", e) { "Identity/weight migration skipped or failed" }
+        }
+        runCatching {
+            migrateLegacyFabricatedActivities(sl)
+        }.onFailure { e ->
+            PLog.w("ServiceMigrations", e) { "Fabricated activity cleanup failed" }
+        }
     }
 }

@@ -172,7 +172,12 @@ class OutboxManager(
         if (it.state == DeliveryState.ACKED) return@synchronized true
         return@synchronized when (ack.status) {
             Ack.Status.ACCEPTED, Ack.Status.DUPLICATE, Ack.Status.STALE -> { store.update(it.copy(state = DeliveryState.ACKED)); true }
-            // Odmítnutí a mezera nejsou doručení: položka se zastaví s chybou, aplikace vygeneruje snapshot.
+            Ack.Status.REJECTED if ack.reason == RejectReason.NOT_PERMITTED.name -> {
+                // Oprávnění bylo odepřeno (např. příjemce vypnul příjem): neresetovat snapshot, jinak vznikne nekonečná smyčka.
+                store.update(it.copy(state = DeliveryState.CANCELLED, lastError = ack.reason))
+                true
+            }
+            // Odmítnutí (jiný důvod) a mezera nejsou doručení: položka se zastaví s chybou, aplikace vygeneruje snapshot.
             Ack.Status.REJECTED, Ack.Status.NEED_SNAPSHOT -> {
                 store.update(it.copy(state = DeliveryState.EXPIRED_NEEDS_SNAPSHOT, lastError = ack.reason ?: ack.status.name))
                 pendingSnapshotResets += (it.recipient to it.objectKey)

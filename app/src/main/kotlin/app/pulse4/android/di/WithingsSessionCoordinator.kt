@@ -135,16 +135,19 @@ class WithingsSessionCoordinator(
             }
         }
 
-        val email = store.getString(KEY_EMAIL)
-        val pass = store.getString(KEY_PASSWORD)
-        val hasCreds = !email.isNullOrBlank() && !pass.isNullOrBlank()
-        if (hasUsableCookies() || hasCreds) {
+        if (store.getString(KEY_PASSWORD) != null) {
+            store.delete(KEY_PASSWORD)
+        }
+        if (hasUsableCookies()) {
             return tryAutoReLogin()
         }
         return false
     }
 
     fun tryAutoReLogin(): Boolean {
+        if (store.getString(KEY_PASSWORD) != null) {
+            store.delete(KEY_PASSWORD)
+        }
         if (isAutoReloginPaused()) {
             onLog("tryAutoReLogin skipped: paused (${pausedReason()})")
             return false
@@ -157,79 +160,44 @@ class WithingsSessionCoordinator(
         }
 
         val email = store.getString(KEY_EMAIL)
-        val pass = store.getString(KEY_PASSWORD)
 
-        if (hasUsableCookies()) {
-            val ssoRes = try {
-                trySilentSsoRefresh()
-            } catch (e: Exception) {
-                WithingsLoginResult.Error(e.message ?: "Network error", WithingsAuthFailureKind.NETWORK)
-            }
-            onLog("tryAutoReLogin SSO result: ${ssoRes::class.simpleName}")
-            when (ssoRes) {
-                is WithingsLoginResult.Ok -> {
-                    clearAuthPauseAndBackoff()
-                    onSilentRefreshOk(ssoRes, email)
-                    return true
-                }
-                is WithingsLoginResult.NeedsMfa -> {
-                    pauseAutoRelogin(REASON_MFA_REQUIRED, ssoRes.message)
-                    return false
-                }
-                is WithingsLoginResult.Error -> when (ssoRes.kind) {
-                    WithingsAuthFailureKind.NETWORK -> {
-                        recordNetworkFailure(now)
-                        return false
-                    }
-                    WithingsAuthFailureKind.RATE_LIMITED -> {
-                        pauseAutoRelogin(REASON_RATE_LIMITED, ssoRes.message)
-                        return false
-                    }
-                    WithingsAuthFailureKind.INVALID_CREDENTIALS,
-                    WithingsAuthFailureKind.OTHER -> Unit
-                }
-            }
-        }
-
-        val hasEmail = !email.isNullOrBlank()
-        val hasPass = !pass.isNullOrBlank()
-        onLog("tryAutoReLogin password fallback: hasEmail=$hasEmail, hasPassword=$hasPass")
-        if (!hasEmail || !hasPass) {
+        if (!hasUsableCookies()) {
             return false
         }
 
-        val r = try {
-            loginPassword(email!!, pass!!)
+        val ssoRes = try {
+            trySilentSsoRefresh()
         } catch (e: Exception) {
             WithingsLoginResult.Error(e.message ?: "Network error", WithingsAuthFailureKind.NETWORK)
         }
-        onLog("tryAutoReLogin password result: ${r::class.simpleName}")
-        return when (r) {
+        onLog("tryAutoReLogin SSO result: ${ssoRes::class.simpleName}")
+        return when (ssoRes) {
             is WithingsLoginResult.Ok -> {
                 clearAuthPauseAndBackoff()
-                onSilentRefreshOk(r, email)
+                onSilentRefreshOk(ssoRes, email)
                 true
             }
             is WithingsLoginResult.NeedsMfa -> {
-                pauseAutoRelogin(REASON_MFA_REQUIRED, r.message)
+                pauseAutoRelogin(REASON_MFA_REQUIRED, ssoRes.message)
                 false
             }
-            is WithingsLoginResult.Error -> {
-                when (r.kind) {
-                    WithingsAuthFailureKind.NETWORK -> recordNetworkFailure(now)
-                    WithingsAuthFailureKind.INVALID_CREDENTIALS -> {
-                        // Smažeme neplatné heslo, aby se už nikdy neodeslalo a nezamklo účet.
-                        store.delete(KEY_PASSWORD)
-                        pauseAutoRelogin(REASON_INVALID_CREDENTIALS, r.message)
-                    }
-                    WithingsAuthFailureKind.RATE_LIMITED -> {
-                        pauseAutoRelogin(REASON_RATE_LIMITED, r.message)
-                    }
-                    WithingsAuthFailureKind.OTHER -> {
-                        pauseAutoRelogin(REASON_AUTH_ERROR, r.message)
-                    }
+            is WithingsLoginResult.Error -> when (ssoRes.kind) {
+                WithingsAuthFailureKind.NETWORK -> {
+                    recordNetworkFailure(now)
+                    false
                 }
-                false
+                WithingsAuthFailureKind.RATE_LIMITED -> {
+                    pauseAutoRelogin(REASON_RATE_LIMITED, ssoRes.message)
+                    false
+                }
+                WithingsAuthFailureKind.INVALID_CREDENTIALS -> {
+                    pauseAutoRelogin(REASON_INVALID_CREDENTIALS, ssoRes.message)
+                    false
+                }
+                WithingsAuthFailureKind.OTHER -> {
+                    pauseAutoRelogin(REASON_AUTH_ERROR, ssoRes.message)
+                    false
+                }
             }
         }
     }

@@ -248,7 +248,7 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
                 ?: r.profiles.first()
             val child = existing?.childUserId?.let { cid -> r.profiles.firstOrNull { it.id == cid } }
             sl.secrets.putString("withings.web.email", em)
-            sl.secrets.putString("withings.web.password", password)
+            sl.secrets.delete("withings.web.password")
             completeWebLogin(
                 cookies = r.session.cookies,
                 primary = primary,

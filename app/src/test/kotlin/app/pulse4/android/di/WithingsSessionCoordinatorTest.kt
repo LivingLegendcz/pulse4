@@ -38,15 +38,14 @@ class WithingsSessionCoordinatorTest {
     )
 
     @Test
-    fun `invalid password pauses auto-relogin, deletes stored password, and blocks future background loginPassword`() {
+    fun `background renewSession and tryAutoReLogin never call loginPassword and purge stored password`() {
         val store = InMemoryAuthStore()
         store.putString(WithingsSessionCoordinator.KEY_EMAIL, "user@example.com")
-        store.putString(WithingsSessionCoordinator.KEY_PASSWORD, "wrong-pass")
+        store.putString(WithingsSessionCoordinator.KEY_PASSWORD, "stored-pass")
 
         var now = 10_000_000L
         var loginCalls = 0
         var session: WithingsWebSession? = sampleSession(lastExtendedMs = 1_000L)
-        var pausedCallbackReason: String? = null
 
         val coord = WithingsSessionCoordinator(
             store = store,
@@ -62,30 +61,26 @@ class WithingsSessionCoordinatorTest {
                 WithingsLoginResult.Error("Wrong password", WithingsAuthFailureKind.INVALID_CREDENTIALS)
             },
             onSilentRefreshOk = { _, _ -> },
-            onAuthPaused = { reason, _ -> pausedCallbackReason = reason },
         )
 
         assertFalse(coord.renewSession())
-        assertEquals(1, loginCalls)
+        assertEquals(0, loginCalls)
         assertNull(store.getString(WithingsSessionCoordinator.KEY_PASSWORD))
-        assertTrue(coord.isAutoReloginPaused())
-        assertEquals(WithingsSessionCoordinator.REASON_INVALID_CREDENTIALS, coord.pausedReason())
-        assertEquals(WithingsSessionCoordinator.REASON_INVALID_CREDENTIALS, pausedCallbackReason)
 
-        // Subsequent calls (even much later) must NEVER invoke loginPassword again
         now += 60 * 60_000L
         assertFalse(coord.renewSession(forceExtend = true))
         assertFalse(coord.tryAutoReLogin())
-        assertEquals(1, loginCalls)
+        assertEquals(0, loginCalls)
     }
 
     @Test
-    fun `rate limit pauses auto-relogin and blocks future background loginPassword`() {
+    fun `rate limit on silent SSO pauses auto-relogin and never calls loginPassword`() {
         val store = InMemoryAuthStore()
         store.putString(WithingsSessionCoordinator.KEY_EMAIL, "user@example.com")
         store.putString(WithingsSessionCoordinator.KEY_PASSWORD, "some-pass")
 
         var loginCalls = 0
+        var pausedCallbackReason: String? = null
         val coord = WithingsSessionCoordinator(
             store = store,
             nowMs = { 10_000_000L },
@@ -93,26 +88,29 @@ class WithingsSessionCoordinatorTest {
             loadSession = { null },
             saveSession = {},
             extendSession = { _, _ -> WithingsExtendResult.Unauthorized },
-            hasUsableCookies = { false },
-            trySilentSsoRefresh = { WithingsLoginResult.Error("no") },
+            hasUsableCookies = { true },
+            trySilentSsoRefresh = { WithingsLoginResult.Error("Too many attempts", WithingsAuthFailureKind.RATE_LIMITED) },
             loginPassword = { _, _ ->
                 loginCalls++
-                WithingsLoginResult.Error("Too many attempts", WithingsAuthFailureKind.RATE_LIMITED)
+                sampleOk()
             },
             onSilentRefreshOk = { _, _ -> },
+            onAuthPaused = { reason, _ -> pausedCallbackReason = reason },
         )
 
         assertFalse(coord.tryAutoReLogin())
-        assertEquals(1, loginCalls)
+        assertEquals(0, loginCalls)
+        assertNull(store.getString(WithingsSessionCoordinator.KEY_PASSWORD))
         assertEquals(WithingsSessionCoordinator.REASON_RATE_LIMITED, coord.pausedReason())
+        assertEquals(WithingsSessionCoordinator.REASON_RATE_LIMITED, pausedCallbackReason)
 
         assertFalse(coord.renewSession())
         assertFalse(coord.tryAutoReLogin())
-        assertEquals(1, loginCalls)
+        assertEquals(0, loginCalls)
     }
 
     @Test
-    fun `mfa required pauses auto-relogin and blocks future background loginPassword`() {
+    fun `mfa required on silent SSO pauses auto-relogin and never calls loginPassword`() {
         val store = InMemoryAuthStore()
         store.putString(WithingsSessionCoordinator.KEY_EMAIL, "user@example.com")
         store.putString(WithingsSessionCoordinator.KEY_PASSWORD, "valid-pass")
@@ -125,29 +123,28 @@ class WithingsSessionCoordinatorTest {
             loadSession = { null },
             saveSession = {},
             extendSession = { _, _ -> WithingsExtendResult.Unauthorized },
-            hasUsableCookies = { false },
-            trySilentSsoRefresh = { WithingsLoginResult.Error("no") },
+            hasUsableCookies = { true },
+            trySilentSsoRefresh = { WithingsLoginResult.NeedsMfa("user@example.com", "Enter code") },
             loginPassword = { _, _ ->
                 loginCalls++
-                WithingsLoginResult.NeedsMfa("user@example.com", "Enter code")
+                sampleOk()
             },
             onSilentRefreshOk = { _, _ -> },
         )
 
         assertFalse(coord.tryAutoReLogin())
-        assertEquals(1, loginCalls)
+        assertEquals(0, loginCalls)
         assertEquals(WithingsSessionCoordinator.REASON_MFA_REQUIRED, coord.pausedReason())
 
         assertFalse(coord.renewSession())
         assertFalse(coord.tryAutoReLogin())
-        assertEquals(1, loginCalls)
+        assertEquals(0, loginCalls)
     }
 
     @Test
     fun `manual login success resets circuit breaker and allows renewal again`() {
         val store = InMemoryAuthStore()
         store.putString(WithingsSessionCoordinator.KEY_EMAIL, "user@example.com")
-        store.putString(WithingsSessionCoordinator.KEY_PASSWORD, "bad-pass")
 
         var loginCalls = 0
         var session: WithingsWebSession? = null
@@ -158,8 +155,8 @@ class WithingsSessionCoordinatorTest {
             loadSession = { session },
             saveSession = { session = it },
             extendSession = { c, t -> WithingsExtendResult.Success(WithingsExtendedSession(t, c)) },
-            hasUsableCookies = { false },
-            trySilentSsoRefresh = { WithingsLoginResult.Error("no") },
+            hasUsableCookies = { true },
+            trySilentSsoRefresh = { WithingsLoginResult.Error("Expired", WithingsAuthFailureKind.OTHER) },
             loginPassword = { _, _ ->
                 loginCalls++
                 WithingsLoginResult.Error("Wrong", WithingsAuthFailureKind.INVALID_CREDENTIALS)
@@ -168,6 +165,7 @@ class WithingsSessionCoordinatorTest {
         )
 
         assertFalse(coord.tryAutoReLogin())
+        assertEquals(0, loginCalls)
         assertTrue(coord.isAutoReloginPaused())
 
         // User logs in manually
@@ -214,7 +212,6 @@ class WithingsSessionCoordinatorTest {
         assertEquals(1, extendCalls)
         assertEquals(0, loginCalls)
         assertFalse(coord.isAutoReloginPaused())
-        assertEquals("pass", store.getString(WithingsSessionCoordinator.KEY_PASSWORD))
 
         // Within 60s backoff -> skipped
         now += 30_000L

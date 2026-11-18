@@ -162,6 +162,14 @@ class GarminTest {
         assertEquals(0, r.skipped)
     }
 
+    @Test fun `root JsonArray with itemsPath dollar unpacks elements`() {
+        val spec = cfg.endpoints[0].copy(itemsPath = "$")
+        val body = """[{"id":"a1","start":1000,"end":30000,"seconds":27000,"day":"2026-10-20"}]"""
+        val r = ResponseMapper.map(spec, body, "acc", "Europe/Prague")
+        assertEquals(1, r.items.size)
+        assertEquals(27000.0, r.items[0].value)
+    }
+
     @Test fun `multiple sleep metrics from same dailySleep endpoint share one HTTP call and produce distinct ids`() {
         val multiSpec = """
         {

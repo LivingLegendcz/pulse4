@@ -732,6 +732,11 @@ class ReticulumBridge(
                             tcpWriter = null
                         }
                     }
+                    synchronized(propagationLinkLock) {
+                        propagationLink?.close()
+                        propagationLink = null
+                        propagationLinkConnecting = false
+                    }
                     runCatching { currentSocket?.close() }
                 }
                 val backoffMs = if (failures > 0) {
@@ -865,7 +870,7 @@ class ReticulumBridge(
                 val msg = LxmfCodec.unpack(lxmfWire) ?: continue
                 val senderPub = registeredContacts[msg.sourceHash]?.let { decodeContactPubKey64(it) }
                 val verified = senderPub?.let { LxmfCodec.unpack(lxmfWire, it.second.encoded)?.signatureValid } ?: false
-                if (senderPub == null || verified) {
+                if (senderPub != null && verified) {
                     val body = String(msg.content, Charsets.UTF_8)
                     processIncomingEncryptedEnvelope(body, selfInfo.deliveryHash)
                 }
@@ -1353,22 +1358,6 @@ class ReticulumBridge(
 
                 val iv = Base64.getDecoder().decode(env.iv)
                 val cipherBytes = Base64.getDecoder().decode(env.ciphertext)
-                val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-                cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, iv))
-                String(cipher.doFinal(cipherBytes), Charsets.UTF_8)
-            }
-            1 -> {
-                val secretBytes = MessageDigest.getInstance("SHA-256")
-                    .digest(("pulse-shared-key:${env.sender}:${env.recipient}").toByteArray(Charsets.UTF_8))
-                val iv = Base64.getDecoder().decode(env.iv)
-                val cipherBytes = Base64.getDecoder().decode(env.ciphertext)
-                val macEngine = Mac.getInstance("HmacSHA256")
-                macEngine.init(SecretKeySpec(secretBytes, "HmacSHA256"))
-                val expectedMac = macEngine.doFinal(cipherBytes)
-                val actualMac = hexToBytes(env.mac)
-                if (!MessageDigest.isEqual(expectedMac, actualMac)) return null
-
-                val key = SecretKeySpec(secretBytes, "AES")
                 val cipher = Cipher.getInstance("AES/GCM/NoPadding")
                 cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, iv))
                 String(cipher.doFinal(cipherBytes), Charsets.UTF_8)

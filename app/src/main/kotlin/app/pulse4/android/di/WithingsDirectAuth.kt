@@ -370,11 +370,32 @@ class WithingsDirectAuth(
                 .post(bodyEmailBuilder.build())
                 .build()
 
-            val res2 = client.newCall(req2).execute()
-            val html2 = res2.body?.string().orEmpty()
-            val finalHttpUrl2 = res2.request.url
+            val (status2, html2, finalHttpUrl2) = client.newCall(req2).execute().use { res2 ->
+                Triple(res2.code, res2.body?.string().orEmpty(), res2.request.url)
+            }
             val finalUrl2 = finalHttpUrl2.toString()
-            res2.close()
+
+            if (isLoggedInUrl(finalHttpUrl2)) {
+                return finishLogin()
+            }
+            if (status2 == 429 || RATE_LIMIT_PATTERNS.any { html2.lowercase().contains(it) }) {
+                return WithingsLoginResult.Error(
+                    "Withings dočasně omezil požadavky (příliš mnoho pokusů). Počkejte prosím několik minut.",
+                    WithingsAuthFailureKind.RATE_LIMITED
+                )
+            }
+            if (status2 >= 500) {
+                return WithingsLoginResult.Error(
+                    "Server Withings je dočasně nedostupný (HTTP $status2).",
+                    WithingsAuthFailureKind.NETWORK
+                )
+            }
+            if (hasVisibleAlertError(html2) && !finalUrl2.contains("check") && !finalUrl2.contains("totp")) {
+                return WithingsLoginResult.Error(
+                    "Withings odmítl odeslání přihlašovacího kódu. Zkontrolujte e-mail nebo zkuste později.",
+                    WithingsAuthFailureKind.OTHER
+                )
+            }
 
             lastMfaUrl = if (finalUrl2.contains("check") || finalUrl2.contains("totp")) {
                 finalUrl2
@@ -382,10 +403,6 @@ class WithingsDirectAuth(
                 "https://account.withings.com/new_workflow/email_check?r=https%3A%2F%2Fapp.withings.com%2F"
             }
             lastHiddenFields = parseHiddenInputs(html2)
-
-            if (isLoggedInUrl(finalHttpUrl2)) {
-                return finishLogin()
-            }
 
             isAwaitingCode = true
             WithingsLoginResult.NeedsMfa(
@@ -426,7 +443,15 @@ class WithingsDirectAuth(
                 .header("Referer", "https://account.withings.com/")
                 .post(form)
                 .build()
-            client.newCall(req).execute().close()
+            val (code, body) = client.newCall(req).execute().use { res ->
+                res.code to res.body?.string().orEmpty()
+            }
+            if (code == 429) {
+                return WithingsLoginResult.Error("Withings dočasně omezil odesílání kódů (HTTP 429).", WithingsAuthFailureKind.RATE_LIMITED)
+            }
+            if (code !in 200..299 || body.contains("\"status\":") && !body.contains("\"status\":0")) {
+                return WithingsLoginResult.Error("Nepodařilo se znovu odeslat kód (HTTP $code).", WithingsAuthFailureKind.OTHER)
+            }
             isAwaitingCode = true
             WithingsLoginResult.NeedsMfa(em, "Nový 8místný kód byl odeslán na $em. Zadejte ho do pole níže.")
         } catch (e: Exception) {

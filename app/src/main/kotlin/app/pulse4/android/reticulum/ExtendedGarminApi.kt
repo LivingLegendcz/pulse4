@@ -529,14 +529,20 @@ class ExtendedGarminApi(
             .header("Accept", "application/json")
             .build()
 
-        val res = http.newCall(req).execute()
-        if (!res.isSuccessful) {
-            val errBody = res.body?.string().orEmpty()
-            Log.w(TAG, "DI token refresh HTTP ${res.code}: $errBody")
-            throw ProviderError.Unauthorized()
+        val jsonText = http.newCall(req).execute().use { res ->
+            if (res.code == 429) {
+                throw ProviderError.RateLimited(res.header("Retry-After")?.toLongOrNull())
+            }
+            if (res.code >= 500) {
+                throw ProviderError.Server(res.code)
+            }
+            if (!res.isSuccessful) {
+                val errBody = res.body?.string().orEmpty()
+                Log.w(TAG, "DI token refresh HTTP ${res.code}: $errBody")
+                throw ProviderError.Unauthorized()
+            }
+            res.body?.string().orEmpty()
         }
-
-        val jsonText = res.body?.string().orEmpty()
         val elem = json.parseToJsonElement(jsonText).jsonObject
         val newAccessToken = elem["access_token"]?.jsonPrimitive?.contentOrNull ?: throw ProviderError.Unauthorized()
         val newRefreshToken = elem["refresh_token"]?.jsonPrimitive?.contentOrNull ?: refreshToken
@@ -755,6 +761,7 @@ class ExtendedGarminApi(
                 }
                 return@call null
             }
+            if (res.code == 429) throw ProviderError.RateLimited(res.header("Retry-After")?.toLongOrNull())
             if (!res.isSuccessful) return@call null
             res.body?.bytes()
         }

@@ -50,6 +50,7 @@ object ResponseMapper {
         val root = json.parseToJsonElement(body)
         val itemsNode = if (spec.itemsPath == "$") null else JsonPath.get(root, spec.itemsPath)
         val items: List<JsonElement> = when {
+            spec.itemsPath == "$" && root is JsonArray -> root.toList()
             spec.itemsPath == "$" -> listOf(root)
             itemsNode is JsonArray -> itemsNode.toList()
             itemsNode == null -> emptyList()

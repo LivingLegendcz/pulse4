@@ -261,7 +261,7 @@
       "timePath": "latestWeight.timestampGMT",
       "valuePath": "latestWeight.weight",
       "timeFormat": "ISO_INSTANT",
-      "scale": 1.0,
+      "scale": 0.001,
       "localDatePath": "summaryDate",
       "verified": true,
       "sampleRef": "docs/samples/weight.json"

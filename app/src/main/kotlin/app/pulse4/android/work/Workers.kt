@@ -28,6 +28,11 @@ private val Context.services get() = (applicationContext as Pulse4App).services
 class ImportWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val sl = applicationContext.services
+        val isManual = inputData.getBoolean(ShareWorker.KEY_MANUAL, false)
+        // Pokud běží nepřetržitá služba na pozadí (PulseSyncService), periodický WorkManager import neduplikujeme.
+        if (sl.settings.backgroundServiceEnabled && !isManual) {
+            return@withContext Result.success()
+        }
         val now = System.currentTimeMillis()
         // 1. Garmin proaktivní keepalive a import
         runCatching { sl.garminExt.ensureSession() }
@@ -89,6 +94,7 @@ object Scheduler {
     fun importNow(ctx: Context) = WorkManager.getInstance(ctx).enqueueUniqueWork(
         "$IMPORT-now", ExistingWorkPolicy.KEEP,
         OneTimeWorkRequestBuilder<ImportWorker>()
+            .setInputData(androidx.work.workDataOf(ShareWorker.KEY_MANUAL to true))
             .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()).build(),
     )
 

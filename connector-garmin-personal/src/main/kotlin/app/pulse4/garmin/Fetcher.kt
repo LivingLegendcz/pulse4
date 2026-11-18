@@ -85,7 +85,8 @@ class GarminPersonalFetcher(
     }
 
     private fun call(spec: EndpointSpec, fromMs: Long, toMs: Long, cache: MutableMap<String, HttpResponse>): HttpResponse {
-        val fmt = DateTimeFormatter.ofPattern(spec.dateFormat).withZone(ZoneOffset.UTC)
+        val zone = runCatching { java.time.ZoneId.of(zoneId) }.getOrDefault(ZoneOffset.UTC)
+        val fmt = DateTimeFormatter.ofPattern(spec.dateFormat).withZone(zone)
         val url = config.baseUrl.trimEnd('/') + spec.path
             .replace("{from}", fmt.format(Instant.ofEpochMilli(fromMs)))
             .replace("{to}", fmt.format(Instant.ofEpochMilli(toMs)))

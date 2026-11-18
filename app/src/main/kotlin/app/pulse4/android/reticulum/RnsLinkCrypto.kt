@@ -131,7 +131,8 @@ object RnsCrypto {
         val destBytes = ReticulumBridge.hexToBytes(PATH_REQUEST_DEST)
         val tag = ByteArray(16).also { SecureRandom().nextBytes(it) }
         val payload = if (transportId16 != null) targetDest16 + transportId16 + tag else targetDest16 + tag
-        return byteArrayOf(0x00, 0x00) + destBytes + byteArrayOf(0x00) + payload
+        // HEADER_1 (0x00), PLAIN dest_type (0x02 << 2 = 0x08), DATA (0x00)
+        return byteArrayOf(0x08, 0x00) + destBytes + byteArrayOf(0x00) + payload
     }
 }
 

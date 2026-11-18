@@ -19,6 +19,7 @@ interface ObservationDao {
     @Query("SELECT * FROM observation WHERE deleted = 0 AND type = :type AND localDate BETWEEN :from AND :to ORDER BY startUtcMs") fun series(type: String, from: String, to: String): Flow<List<ObservationRow>>
     @Query("UPDATE observation SET deleted = 1 WHERE id IN (:ids)") fun markDeleted(ids: List<String>)
     @Query("SELECT id FROM observation WHERE provider = :provider AND deleted = 0 AND startUtcMs BETWEEN :from AND :to") fun idsIn(provider: String, from: Long, to: Long): List<String>
+    @Query("SELECT id FROM observation WHERE provider = :provider AND accountId = :accountId AND (origin IS NULL OR origin != 'csv') AND id NOT LIKE 'family-%' AND deleted = 0 AND startUtcMs BETWEEN :from AND :to") fun idsInForAccount(provider: String, accountId: String, from: Long, to: Long): List<String>
     @Query("SELECT * FROM observation WHERE type IN (:types) AND localDate BETWEEN :from AND :to ORDER BY startUtcMs DESC") fun ofTypesIncludingDeleted(types: List<String>, from: String, to: String): List<ObservationRow>
     @Query("UPDATE observation SET quality = 'OK' WHERE id = :id") fun confirm(id: String)
     @Query("SELECT DISTINCT localDate FROM observation WHERE deleted = 0 AND localDate IS NOT NULL AND localDate BETWEEN :from AND :to") fun datesWithData(from: String, to: String): List<String>

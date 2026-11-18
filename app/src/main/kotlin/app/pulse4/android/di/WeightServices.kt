@@ -273,12 +273,7 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
             val child = existing?.childUserId?.let { cid -> r.profiles.firstOrNull { it.id == cid } }
             val em = emailFallback?.trim() ?: directAuth.pendingEmail ?: existing?.email
             if (em != null) sl.secrets.putString("withings.web.email", em)
-            val pass = directAuth.pendingPassword
-            if (!pass.isNullOrBlank()) {
-                sl.secrets.putString("withings.web.password", pass)
-            } else {
-                sl.secrets.delete("withings.web.password")
-            }
+            sl.secrets.delete("withings.web.password")
             completeWebLogin(
                 cookies = r.session.cookies,
                 primary = primary,
@@ -287,7 +282,7 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
                 allProfiles = r.profiles,
                 email = em
             )
-        } else if (r is WithingsLoginResult.Error && r.kind == WithingsAuthFailureKind.RATE_LIMITED) {
+        } else if (r is WithingsLoginResult.Error) {
             sessionCoordinator.recordManualAuthResult(r)
         }
         r
@@ -475,22 +470,29 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
 
         val db = sl.db
         val stateStore = RoomAreaStateStore(db, "withings.")
-        // Pokud v DB chybí složení těla (viscerální tuk), ECG nebo segmentální rozložení svalů/tuku (|segm:), vynulujeme kurzor pro plný 730denní import:
-        val latestEcg = db.observations().latest(MetricType.ECG.name)
-        val latestMuscle = db.observations().latest(MetricType.MUSCLE_MASS.name)
-        if (db.observations().latest(MetricType.VISCERAL_FAT.name) == null ||
-            latestEcg == null ||
-            latestEcg.value < 30.0 ||
-            latestMuscle?.origin?.contains("|segm:") != true
-        ) {
-            stateStore.put(SyncArea.WEIGHT, app.pulse4.provider.AreaState())
+        // Jednorázová migrace pro dotažení nových metrik (viscerální tuk, ECG, segmenty) – nikdy neopakovat při každém syncu:
+        if (sl.secrets.getString("withings.full_backfill_v2") == null) {
+            val latestEcg = db.observations().latest(MetricType.ECG.name)
+            val latestMuscle = db.observations().latest(MetricType.MUSCLE_MASS.name)
+            if (db.observations().latest(MetricType.VISCERAL_FAT.name) == null ||
+                latestEcg == null ||
+                latestEcg.value < 30.0 ||
+                latestMuscle?.origin?.contains("|segm:") != true
+            ) {
+                stateStore.put(SyncArea.WEIGHT, app.pulse4.provider.AreaState())
+            }
+            sl.secrets.putString("withings.full_backfill_v2", "1")
         }
+        val activeUserId = loadWebSession()?.primaryUserId?.toString()
         val fetcher = WithingsWebFetcher(
             client = webClient,
             sessionProvider = ::loadWebSession,
             onSessionExtended = ::saveWebSession,
             defaultZone = sl.settings.zoneId,
-            existingIds = { f, t -> db.observations().idsIn(Provider.WITHINGS_API.name, f, t).toSet() },
+            existingIds = { f, t ->
+                if (activeUserId != null) db.observations().idsInForAccount(Provider.WITHINGS_API.name, activeUserId, f, t).toSet()
+                else db.observations().idsIn(Provider.WITHINGS_API.name, f, t).toSet()
+            },
             exclusions = MeasurementExclusions { db.exclusions().count(it) > 0 },
             nowMs = { nowMs },
             config = WithingsWebConfig(),

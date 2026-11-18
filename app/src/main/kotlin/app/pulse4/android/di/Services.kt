@@ -304,15 +304,15 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
                     }
                 }
                 val res = baseHttp.get(url, headers)
-                if (res.code !in 200..299 && sl.secrets.getString(SecretStore.GARMIN_EXT_TOKENS) != null) {
+                if (res.code == 404 || res.code == 204) {
+                    return app.pulse4.provider.HttpResponse(200, emptyMap(), "")
+                }
+                if (res.code != 429 && res.code !in 200..299 && sl.secrets.getString(SecretStore.GARMIN_EXT_TOKENS) != null) {
                     val pathAndQuery = url.removePrefix(cfg.baseUrl.trimEnd('/'))
                     val fallbackBody = runCatching { sl.garminExt.connectApiJson(pathAndQuery) }.getOrNull()
                     if (!fallbackBody.isNullOrBlank()) {
                         return app.pulse4.provider.HttpResponse(200, emptyMap(), fallbackBody)
                     }
-                }
-                if (res.code == 404 || res.code == 204) {
-                    return app.pulse4.provider.HttpResponse(200, emptyMap(), "")
                 }
                 return res
             }
@@ -1307,7 +1307,7 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
                             ?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }
                         if (actId != null) {
                             val actKey = "garmin-$actId"
-                            if (sl.db.activities().get(actKey) != null && sl.db.activities().track(actKey) != null) {
+                            if (sl.db.activities().get(actKey) != null) {
                                 consecutiveExisting++
                             } else {
                                 consecutiveExisting = 0
@@ -1368,6 +1368,12 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
                 }
             }
 
+            val alreadyExistedIds = allActivityElements.mapNotNull { elem ->
+                val actId = (elem as? kotlinx.serialization.json.JsonObject)?.get("activityId")
+                    ?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }
+                actId?.let { "garmin-$it" }?.takeIf { sl.db.activities().get(it) != null }
+            }.toHashSet()
+
             if (activitiesToSave.isNotEmpty()) {
                 sl.db.runInTransaction {
                     for (row in activitiesToSave) {
@@ -1388,7 +1394,7 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
                 val obj = (elem as? kotlinx.serialization.json.JsonObject) ?: continue
                 val actId = obj["activityId"]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content } ?: continue
                 val actKey = "garmin-$actId"
-                if (sl.db.activities().track(actKey) != null) continue
+                if (sl.db.activities().track(actKey) != null || (!isInitialSync && actKey in alreadyExistedIds)) continue
 
                 var fitImported = false
                 // 3a. Stažení FIT z gateway (pokud je dostupný authHeader)
@@ -1941,6 +1947,9 @@ class ShareService(private val sl: ServiceLocator) {
 
         var queued = 0
         val plan = ShareBuilder(self, MessageBuilder(self)).plan(grants(), groups(), dates, allObservations, sl.sentLedger, nowMs)
+            .associateBy { it.message.envelope.recipient to it.objectKey }
+            .values
+        val maxEventBytes = app.pulse4.sync.ProtocolLimits().maxEventBytes
         for (p in plan) {
             val e = p.message.envelope
             val datePart = p.objectKey.removePrefix("daily/")
@@ -1955,7 +1964,10 @@ class ShareService(private val sl: ServiceLocator) {
                     pendingByRecipient[e.recipient] = pendingFor(e.recipient) + 1
                     queued++
                 }
-                EnqueueResult.OverQuota -> return@synchronized queued // fronta plná: vlastní archiv zůstává, uživatel uvidí stav
+                EnqueueResult.OverQuota -> {
+                    if (item.sizeBytes > maxEventBytes) continue
+                    return@synchronized queued // fronta plná: vlastní archiv zůstává, uživatel uvidí stav
+                }
             }
         }
         queued + enqueueActivities(self, nowMs, from, pendingByRecipient)
@@ -2002,7 +2014,8 @@ class ShareService(private val sl: ServiceLocator) {
                     }
                     val msg = MessageBuilder(self).build(r, Kinds.PROJECTION_UPSERT, "activity", act.id, (last?.version ?: 0) + 1, payload, nowMs, grantRef = g.id)
                     val e = msg.envelope
-                    val res = sl.outbox.enqueue(OutboxItem(e.eventId, r, e.kind, e.objectType, e.objectId, e.objectVersion, g.id, Wire.encode(msg), nowMs))
+                    val item = OutboxItem(e.eventId, r, e.kind, e.objectType, e.objectId, e.objectVersion, g.id, Wire.encode(msg), nowMs)
+                    val res = sl.outbox.enqueue(item)
                     android.util.Log.i("Pulse4Sync", "act=${act.id} enqueue result: $res")
                     when (res) {
                         is EnqueueResult.Queued -> {
@@ -2010,7 +2023,10 @@ class ShareService(private val sl: ServiceLocator) {
                             pendingByRecipient[r] = curPending + 1
                             queued++
                         }
-                        EnqueueResult.OverQuota -> return queued
+                        EnqueueResult.OverQuota -> {
+                            if (item.sizeBytes > app.pulse4.sync.ProtocolLimits().maxEventBytes) continue
+                            return queued
+                        }
                     }
                 }
             }

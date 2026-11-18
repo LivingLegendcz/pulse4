@@ -226,4 +226,54 @@ class PolicyExtensionsTest {
         assertTrue(dissolvedByLeave.members.isEmpty())
         assertTrue(dissolvedByLeave.effectiveAdmins.isEmpty())
     }
+
+    @Test
+    fun `S5 Projector measuredAtUtcMs uses only permitted fields`() {
+        val d = LocalDate.of(2026, 11, 18)
+        val sleepObs = app.pulse4.domain.MetricObservation("s1", Provider.GARMIN_PERSONAL, "a", "s1", app.pulse4.domain.MetricType.SLEEP_DURATION, 1_000L, 7_000L, 25_000.0, "Europe/Prague", d.toString())
+        val weightObs = app.pulse4.domain.MetricObservation("w1", Provider.WITHINGS_API, "a", "w1", app.pulse4.domain.MetricType.WEIGHT, 99_000L, null, 78.5, "Europe/Prague", d.toString())
+        val day = OwnerDayAssembler.assemble(d, listOf(sleepObs, weightObs))
+        val sleepOnlyGrant = ShareGrant("g1", "alice", setOf("bob"), setOf(Field.SLEEP_DURATION), scope = TimeScope.continuousFrom(d), createdAtMs = 1L)
+        val proj = assertNotNull(Projector.project(sleepOnlyGrant, day, 100_000L))
+        assertEquals(7_000L, proj.measuredAtUtcMs)
+    }
+
+    @Test
+    fun `S6 handover invalidated when initiator demoted or leaves`() {
+        val g = Group("grp", "T", "alice", "alice", setOf("alice", "bob", "eva"), 1L, admins = setOf("alice", "bob"))
+        val handed = assertNotNull(CircleAdminPolicy.initiateHandover(g, "bob", "eva", nowMs = 1000L))
+        val demoted = assertNotNull(CircleAdminPolicy.demoteAdmin(handed, "alice", "bob"))
+        assertNull(demoted.pendingAdminHandover)
+        // Even if pendingAdminHandover were somehow still present with demoted initiator, acceptHandover rejects it
+        val staleHandover = demoted.copy(pendingAdminHandover = handed.pendingAdminHandover)
+        assertNull(CircleAdminPolicy.acceptHandover(staleHandover, "eva", nowMs = 2000L))
+    }
+
+    @Test
+    fun `S7 effectiveRecipients is fail-closed when group is missing or dissolved`() {
+        val gGrant = ShareGrant("g1", "alice", setOf("bob"), setOf(Field.SLEEP_DURATION), scope = TimeScope.continuousFrom(LocalDate.of(2026, 11, 18)), groupId = "grp-1", createdAtMs = 1L)
+        assertEquals(emptySet(), MembershipPolicy.effectiveRecipients(gGrant, null))
+        val dissolved = Group("grp-1", "T", "alice", "alice", setOf("alice", "bob"), 2L, dissolved = true)
+        assertEquals(emptySet(), MembershipPolicy.effectiveRecipients(gGrant, dissolved))
+    }
+
+    @Test
+    fun `S8 canActivateShareGrant validates positive co-consent and bound guardian`() {
+        val d = LocalDate.of(2026, 11, 18)
+        val g = ShareGrant("g1", "child", setOf("bob"), setOf(Field.SLEEP_DURATION), scope = TimeScope.continuousFrom(d), createdAtMs = 1L)
+        val link = FamilyLink("fl1", "parent1", "child", FamilyLinkStatus.VERIFIED, AgeProfile.MINOR, createdAtMs = 1L, verifiedAtMs = 2L)
+        assertFalse(FamilyLinkPolicy.canActivateShareGrant("child", AgeProfile.MINOR, g, listOf(link), 0L))
+        assertFalse(FamilyLinkPolicy.canActivateShareGrant("child", AgeProfile.MINOR, g, listOf(link), 500L, coConsentGuardianId = "stranger"))
+        assertTrue(FamilyLinkPolicy.canActivateShareGrant("child", AgeProfile.MINOR, g, listOf(link), 500L, coConsentGuardianId = "parent1"))
+    }
+
+    @Test
+    fun `D6 OwnerDayAssembler deduplicates SLEEP_DURATION across providers per day`() {
+        val d = LocalDate.of(2026, 11, 18)
+        val g1 = app.pulse4.domain.MetricObservation("g1", Provider.GARMIN_PERSONAL, "a", "g1", app.pulse4.domain.MetricType.SLEEP_DURATION, 100L, null, 20_000.0, "Europe/Prague", d.toString())
+        val g2 = app.pulse4.domain.MetricObservation("g2", Provider.GARMIN_PERSONAL, "a", "g2", app.pulse4.domain.MetricType.SLEEP_DURATION, 200L, null, 3_000.0, "Europe/Prague", d.toString())
+        val w1 = app.pulse4.domain.MetricObservation("w1", Provider.WITHINGS_API, "a", "w1", app.pulse4.domain.MetricType.SLEEP_DURATION, 150L, null, 24_000.0, "Europe/Prague", d.toString())
+        val day = OwnerDayAssembler.assemble(d, listOf(g1, g2, w1))
+        assertEquals("23000.0", day.values.getValue(Field.SLEEP_DURATION).toString())
+    }
 }

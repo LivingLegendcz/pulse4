@@ -73,12 +73,17 @@ object FamilyLinkPolicy {
         grant: ShareGrant,
         verifiedLinks: List<FamilyLink>,
         guardianCoConsentAtMs: Long?,
+        coConsentGuardianId: String? = null,
     ): Boolean {
         if (!grant.active || grant.ownerId != ownerId) return false
         if (ownerAgeProfile == AgeProfile.ADULT) return true
+        val consentTs = guardianCoConsentAtMs ?: return false
+        if (consentTs <= 0L) return false
         val hasVerifiedLink = verifiedLinks.any {
-            it.status == FamilyLinkStatus.VERIFIED && it.childId == ownerId
+            it.status == FamilyLinkStatus.VERIFIED &&
+                it.childId == ownerId &&
+                (coConsentGuardianId == null || it.parentId == coConsentGuardianId)
         }
-        return hasVerifiedLink && guardianCoConsentAtMs != null
+        return hasVerifiedLink
     }
 }

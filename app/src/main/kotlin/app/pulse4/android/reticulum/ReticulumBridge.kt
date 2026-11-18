@@ -124,9 +124,7 @@ class ReticulumBridge(
     private val registeredContacts = ConcurrentHashMap<String, String>() // deliveryHash -> publicKeyB64
     private val legacyToPrimaryContact = ConcurrentHashMap<String, String>() // legacy pulse.delivery -> lxmf.delivery
     private val localPeerMap = ConcurrentHashMap<String, String>() // deliveryHash -> "http://ip:port"
-    private val discoveredDestinations = object : LinkedHashMap<String, ByteArray>(64, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ByteArray>?): Boolean = size > 512
-    }
+    internal val routingState = GatewayRoutingState()
 
     private data class PendingDeposit(val eventId: String, val packetHash32: ByteArray, val sentAtMs: Long)
     private val pendingLinkProofs = ConcurrentHashMap<String, PendingDeposit>()
@@ -169,9 +167,11 @@ class ReticulumBridge(
     @Volatile
     var isGatewayOnline = false
         private set
+    val gatewayTransportId: ByteArray?
+        get() = routingState.gatewayTransportId
+
     @Volatile
-    var gatewayTransportId: ByteArray? = null
-        private set
+    internal var rawPacketSenderOverride: ((ByteArray) -> Boolean)? = null
 
     private var ed25519PrivKey: Ed25519PrivateKeyParameters? = null
     private var x25519PrivKey: X25519PrivateKeyParameters? = null
@@ -326,7 +326,7 @@ class ReticulumBridge(
             propagationLink = null
             propagationLinkConnecting = false
         }
-        gatewayTransportId = null
+        routingState.onConnectionChanged(clearEndpoint = true)
 
         localServerJob?.cancel()
         localServerJob = null
@@ -366,7 +366,11 @@ class ReticulumBridge(
         val cm = context.applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
         val cb = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
+                routingState.onConnectionChanged()
                 networkWakeSignal.trySend(Unit)
+            }
+            override fun onLost(network: Network) {
+                routingState.onConnectionChanged()
             }
         }
         defaultNetworkCallback = cb
@@ -626,13 +630,19 @@ class ReticulumBridge(
             tcpSocket = null
             tcpWriter = null
             isGatewayOnline = false
+            routingState.onConnectionChanged(clearEndpoint = true)
             _gatewayHealth.value = GatewayHealth(state = GatewayHealthState.UNCONFIGURED)
             runCatching { oldSocket?.close() }
             return
         }
         val port = settings.gatewayPort.takeIf { it > 0 } ?: 4242
 
-        if (tcpJob?.isActive == true && isGatewayOnline && tcpSocket?.isConnected == true && tcpSocket?.isClosed == false) {
+        if (tcpJob?.isActive == true &&
+            isGatewayOnline &&
+            tcpSocket?.isConnected == true &&
+            tcpSocket?.isClosed == false &&
+            routingState.isSameGatewayEndpoint(host, port)
+        ) {
             return
         }
 
@@ -641,6 +651,8 @@ class ReticulumBridge(
         tcpSocket = null
         tcpWriter = null
         isGatewayOnline = false
+        routingState.onGatewayEndpointSelected(host, port)
+        routingState.onConnectionChanged()
         _gatewayHealth.value = GatewayHealth(host = host, port = port, state = GatewayHealthState.CONNECTING)
         runCatching { oldSocket?.close() }
 
@@ -678,12 +690,15 @@ class ReticulumBridge(
                     _gatewayHealth.value = GatewayHealth(host = host, port = port, state = GatewayHealthState.ONLINE)
                     android.util.Log.i("PulseSync", "Úspěšně připojeno k Reticulum gateway $host:$port")
 
-                    // Odešli úvodní Announce paket a případně Path Request pro propagation uzel
+                    // Odešli úvodní Announce paket a Path Request pro propagation uzel i registrované kontakty
                     sendRnsAnnounce()
                     val propHash = settings.propagationNode.trim()
                     if (propHash.length == 32) {
-                        runCatching {
-                            sendRawRnsPacket(RnsCrypto.buildPathRequestPacket(hexToBytes(propHash), gatewayTransportId))
+                        requestPathIfNeeded(propHash, force = true)
+                    }
+                    for (contactDest in registeredContacts.keys) {
+                        if (!legacyToPrimaryContact.containsKey(contactDest)) {
+                            requestPathIfNeeded(contactDest, force = true)
                         }
                     }
 
@@ -744,7 +759,7 @@ class ReticulumBridge(
                         propagationLink = null
                         propagationLinkConnecting = false
                     }
-                    gatewayTransportId = null
+                    routingState.onConnectionChanged(clearEndpoint = true)
                     runCatching { currentSocket?.close() }
                 }
                 val backoffMs = if (failures > 0) {
@@ -777,8 +792,7 @@ class ReticulumBridge(
         // Dynamicky zachytíme transport ID internetové brány z jakéhokoliv transport paketu
         if (headerType == 1 && packet.size >= 18) {
             val tId = packet.copyOfRange(2, 18)
-            if (gatewayTransportId == null || !gatewayTransportId.contentEquals(tId)) {
-                gatewayTransportId = tId
+            if (routingState.updateGatewayTransportId(tId)) {
                 android.util.Log.i("PulseSync", "Zjištěno Transport ID internetové brány: ${bytesToHex(tId)}")
             }
         } else if (headerType == 0 && packet.size >= 51) {
@@ -788,8 +802,7 @@ class ReticulumBridge(
             // Payload začíná na indexu 19, transport ID brány je na offsetu 16..32 v payloadu (bajty 35..51 paketu)
             if (destHex.equals("6b9f66014d9853faab220fba47d02761", ignoreCase = true)) {
                 val tId = packet.copyOfRange(35, 51)
-                if (gatewayTransportId == null || !gatewayTransportId.contentEquals(tId)) {
-                    gatewayTransportId = tId
+                if (routingState.updateGatewayTransportId(tId)) {
                     android.util.Log.i("PulseSync", "Zjištěno Transport ID internetové brány z path request: ${bytesToHex(tId)}")
                 }
             }
@@ -800,9 +813,7 @@ class ReticulumBridge(
             val parsed = RnsAnnounceParser.parse(packet)
             if (parsed != null && parsed.verified) {
                 val destLower = parsed.destinationHash.lowercase()
-                synchronized(discoveredDestinations) {
-                    discoveredDestinations[destLower] = parsed.publicKey64
-                }
+                routingState.recordDiscoveredDestination(destLower, parsed.publicKey64)
                 if (destLower == settings.propagationNode.trim().lowercase()) {
                     LxmfCodec.parsePropagationAnnounceAppData(parsed.appData)?.let { info ->
                         propagationNodeInfo = info
@@ -921,7 +932,24 @@ class ReticulumBridge(
         }
     }
 
+    internal fun requestPathIfNeeded(
+        destHashHex: String,
+        force: Boolean = false,
+        nowMs: Long = System.currentTimeMillis(),
+    ): Boolean {
+        val pkt = routingState.buildPathRequestIfNeeded(
+            destHashHex = destHashHex,
+            isGatewayOnline = isGatewayOnline,
+            force = force,
+            nowMs = nowMs,
+        ) ?: return false
+        return sendRawRnsPacket(pkt).also { sent ->
+            if (sent) routingState.markPathRequested(destHashHex, nowMs)
+        }
+    }
+
     private fun sendRawRnsPacket(rawPacket: ByteArray): Boolean {
+        rawPacketSenderOverride?.let { return it(rawPacket) }
         val writer = tcpWriter ?: return false
         val s = tcpSocket ?: return false
         if (!s.isConnected || s.isClosed) return false
@@ -962,14 +990,12 @@ class ReticulumBridge(
         val propHash = settings.propagationNode.trim().lowercase()
         if (propHash.length != 32 || !isGatewayOnline) return null
 
-        var propPubKey = synchronized(discoveredDestinations) { discoveredDestinations[propHash] }
+        var propPubKey = routingState.getDiscoveredPublicKey(propHash)
         if (propPubKey == null) {
-            runCatching {
-                sendRawRnsPacket(RnsCrypto.buildPathRequestPacket(hexToBytes(propHash), gatewayTransportId))
-            }
+            requestPathIfNeeded(propHash, force = true)
             val pathDeadline = System.currentTimeMillis() + 2000L
             while (System.currentTimeMillis() < pathDeadline) {
-                propPubKey = synchronized(discoveredDestinations) { discoveredDestinations[propHash] }
+                propPubKey = routingState.getDiscoveredPublicKey(propHash)
                 if (propPubKey != null) break
                 Thread.sleep(50)
             }
@@ -1039,6 +1065,7 @@ class ReticulumBridge(
         if (!s.isConnected || s.isClosed) return false
 
         return try {
+            requestPathIfNeeded(destHashHex)
             val destBytes = hexToBytes(destHashHex)
             if (destBytes.size != 16) return false
             val tId = gatewayTransportId
@@ -1140,6 +1167,7 @@ class ReticulumBridge(
             tcpSocket = null
             tcpWriter = null
             isGatewayOnline = false
+            routingState.onConnectionChanged(clearEndpoint = true)
             _gatewayHealth.value = GatewayHealth(state = GatewayHealthState.UNCONFIGURED)
             return
         }
@@ -1151,6 +1179,7 @@ class ReticulumBridge(
             tcpSocket = null
             tcpWriter = null
             isGatewayOnline = false
+            routingState.onConnectionChanged(clearEndpoint = true)
             _gatewayHealth.value = GatewayHealth(state = GatewayHealthState.UNCONFIGURED)
         }
     }
@@ -1204,6 +1233,9 @@ class ReticulumBridge(
         val legacyDestHex = bytesToHex(sha256.digest(legacyNameHash + identHash).copyOf(16))
         registeredContacts[legacyDestHex] = publicKeyB64
         legacyToPrimaryContact[legacyDestHex] = destHex
+        if (isGatewayOnline && settings.networkMode != NetworkMode.LOCAL_ONLY) {
+            requestPathIfNeeded(destHex)
+        }
         return destHex
     }
 
@@ -1231,6 +1263,9 @@ class ReticulumBridge(
             localPeerMap.remove(destHash, localEndpoint)
         }
         if (settings.networkMode == NetworkMode.LOCAL_ONLY) return false
+        if (isGatewayOnline) {
+            requestPathIfNeeded(destHash)
+        }
         val propReady = usePropagation && settings.propagationNode.trim().length == 32
         return isGatewayOnline && (propReady || registeredContacts.containsKey(destHash))
     }

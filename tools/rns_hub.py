@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-Pulse4 Local Reticulum TCP Mesh Hub
-Broadcasts HDLC-framed Reticulum packets between connected clients (POCO Phone & Emulator).
+SMOKE-ONLY: Pulse4 Local TCP Broadcast Relay (Kotlin <-> Kotlin).
+WARNING: This is a raw HDLC TCP broadcast relay and does NOT parse or verify
+the Reticulum/LXMF protocol. It MUST NOT be used as an interop test.
+For real RNS/LXMF 1.6.0/1.3.0 interop testing, use tools/rns-interop/.
 """
 import socket
 import select

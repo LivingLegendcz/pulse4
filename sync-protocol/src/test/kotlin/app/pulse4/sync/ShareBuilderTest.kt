@@ -88,4 +88,19 @@ class ShareBuilderTest {
         assertEquals(listOf("bob"), sb.plan(listOf(g), mapOf("grp" to group), days, ledger, 1).map { it.message.envelope.recipient })
         assertNull(sb.plan(listOf(g.copy(scope = TimeScope.continuousFrom(LocalDate.of(2026, 10, 21)))), mapOf("grp" to group), days, ledger, 1).firstOrNull())
     }
+
+    @Test fun `S4 two grants for same recipient merge into one projection and do not resend`() {
+        val sb = ShareBuilder("josef", MessageBuilder("josef") { java.util.UUID.randomUUID().toString() })
+        val g1 = grant(setOf(Field.SLEEP_DURATION), setOf("bob")).copy(id = "g1")
+        val g2 = grant(setOf(Field.HR_DAILY), setOf("bob")).copy(id = "g2")
+        val first = sb.plan(listOf(g1, g2), emptyMap(), listOf(d), observations, ledger, 100)
+        assertEquals(1, first.size)
+        val sent = first.single()
+        assertTrue(sent.message.payload.contains("SLEEP_DURATION"))
+        assertTrue(sent.message.payload.contains("HR_DAILY"))
+
+        ledger.m["bob|${sent.objectKey}"] = SentRecord(sent.message.envelope.objectVersion, sent.contentHash)
+        val second = sb.plan(listOf(g1, g2), emptyMap(), listOf(d), observations, ledger, 200)
+        assertEquals(emptyList(), second)
+    }
 }

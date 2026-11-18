@@ -31,17 +31,26 @@ class ShareBuilder(private val selfId: String, private val builder: MessageBuild
         ledger: SentLedger,
         nowMs: Long,
     ): List<PlannedSend> {
+        val activeGrants = grants.filter { it.active && it.ownerId == selfId }
+        val recipientsByGrant = activeGrants.associateWith {
+            MembershipPolicy.effectiveRecipients(it, it.groupId?.let(groups::get))
+        }
+        val allRecipients = recipientsByGrant.values.flatten().toSortedSet()
         val out = mutableListOf<PlannedSend>()
-        for (g in grants.filter { it.active && it.ownerId == selfId }) {
-            val recipients = MembershipPolicy.effectiveRecipients(g, g.groupId?.let(groups::get)).sorted()
+        for (r in allRecipients) {
             for (day in days) {
-                planDayForGrant(g, recipients, day, ledger, nowMs, out)
+                val matching = activeGrants
+                    .filter { r in recipientsByGrant.getValue(it) && it.scope.covers(day.date) }
+                    .sortedBy { it.id }
+                if (matching.isEmpty()) continue
+                val merged = mergeGrantsForRecipient(matching)
+                planDayForRecipient(merged, r, day, ledger, nowMs, out)
             }
         }
         return out
     }
 
-    /** Plánovač respektující zdrojový filtr `ShareGrant.sources` tím, že den sestaví přímo z pozorování pro každý grant. */
+    /** Plánovač respektující zdrojový filtr `ShareGrant.sources` tím, že den sestaví přímo z pozorování pro každého příjemce. */
     fun plan(
         grants: List<ShareGrant>,
         groups: Map<String, Group>,
@@ -50,20 +59,38 @@ class ShareBuilder(private val selfId: String, private val builder: MessageBuild
         ledger: SentLedger,
         nowMs: Long,
     ): List<PlannedSend> {
+        val activeGrants = grants.filter { it.active && it.ownerId == selfId }
+        val recipientsByGrant = activeGrants.associateWith {
+            MembershipPolicy.effectiveRecipients(it, it.groupId?.let(groups::get))
+        }
+        val allRecipients = recipientsByGrant.values.flatten().toSortedSet()
         val out = mutableListOf<PlannedSend>()
-        for (g in grants.filter { it.active && it.ownerId == selfId }) {
-            val recipients = MembershipPolicy.effectiveRecipients(g, g.groupId?.let(groups::get)).sorted()
+        for (r in allRecipients) {
             for (date in dates) {
-                val day = OwnerDayAssembler.assembleForGrant(date, observations, g)
-                planDayForGrant(g, recipients, day, ledger, nowMs, out)
+                val matching = activeGrants
+                    .filter { r in recipientsByGrant.getValue(it) && it.scope.covers(date) }
+                    .sortedBy { it.id }
+                if (matching.isEmpty()) continue
+                val merged = mergeGrantsForRecipient(matching)
+                val day = OwnerDayAssembler.assembleForGrant(date, observations, merged)
+                planDayForRecipient(merged, r, day, ledger, nowMs, out)
             }
         }
         return out
     }
 
-    private fun planDayForGrant(
+    private fun mergeGrantsForRecipient(matching: List<ShareGrant>): ShareGrant {
+        if (matching.size == 1) return matching.first()
+        val mergedFields = matching.flatMap { it.fields }.toSet()
+        val mergedSources = if (matching.any { it.sources == null }) null else {
+            matching.flatMap { it.sources.orEmpty() }.toSet()
+        }
+        return matching.first().copy(fields = mergedFields, sources = mergedSources)
+    }
+
+    private fun planDayForRecipient(
         g: ShareGrant,
-        recipients: List<String>,
+        recipient: String,
         day: OwnerDay,
         ledger: SentLedger,
         nowMs: Long,
@@ -74,16 +101,14 @@ class ShareBuilder(private val selfId: String, private val builder: MessageBuild
         val hash = Wire.sha256Hex(Projector.encode(projection.copy(producedAtMs = 0)))
         val key = "daily/${day.date}"
         val payload = String(Projector.encode(projection), Charsets.UTF_8)
-        for (r in recipients) {
-            val last = ledger.last(r, key)
-            if (last != null && last.contentHash == hash) continue
-            out += PlannedSend(
-                builder.build(
-                    recipient = r, kind = Kinds.PROJECTION_UPSERT, objectType = "daily", objectId = day.date.toString(),
-                    objectVersion = (last?.version ?: 0) + 1, payload = payload, nowMs = nowMs, grantRef = g.id,
-                ),
-                g.id, key, hash,
-            )
-        }
+        val last = ledger.last(recipient, key)
+        if (last != null && last.contentHash == hash) return
+        out += PlannedSend(
+            builder.build(
+                recipient = recipient, kind = Kinds.PROJECTION_UPSERT, objectType = "daily", objectId = day.date.toString(),
+                objectVersion = (last?.version ?: 0) + 1, payload = payload, nowMs = nowMs, grantRef = g.id,
+            ),
+            g.id, key, hash,
+        )
     }
 }

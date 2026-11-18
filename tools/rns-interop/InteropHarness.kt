@@ -9,6 +9,9 @@ import app.pulse4.android.reticulum.RnsCrypto
 import app.pulse4.android.reticulum.RnsHeaderType
 import app.pulse4.android.reticulum.RnsLinkSession
 import app.pulse4.android.reticulum.RnsPacketType
+import app.pulse4.android.reticulum.RnsResourceReceiver
+import app.pulse4.android.reticulum.RnsResourceSender
+import app.pulse4.android.reticulum.RnsResourceStatus
 import java.io.ByteArrayOutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -26,6 +29,8 @@ fun main(args: Array<String>) {
     val stampCost = args[6].toDouble().toInt()
     val stampFlex = args[7].toDouble().toInt()
     val keepaliveSecs = args.getOrNull(8)?.toIntOrNull() ?: 50
+    val bobPubHex = args[9]
+    val bobDestHex = args[10]
 
     val seed = RnsCrypto.hexToBytes(seedHex)
     val edPriv = Ed25519PrivateKeyParameters(seed, 0)
@@ -59,27 +64,32 @@ fun main(args: Array<String>) {
 
     val frameBuf = ByteArrayOutputStream()
     val readBuf = ByteArray(4096)
+    var readPos = 0
+    var readLen = 0
     var inFrame = false
     fun pollPacket(timeoutMs: Long): ByteArray? {
         val deadline = System.currentTimeMillis() + timeoutMs
-        while (System.currentTimeMillis() < deadline) {
-            try {
-                val n = inp.read(readBuf)
-                if (n > 0) {
-                    for (i in 0 until n) {
-                        val b = readBuf[i]
-                        if (b == RnsCrypto.HDLC_FLAG) {
-                            if (inFrame && frameBuf.size() > 0) {
-                                val pkt = RnsCrypto.hdlcUnescape(frameBuf.toByteArray())
-                                frameBuf.reset()
-                                return pkt
-                            }
-                            inFrame = true
-                            frameBuf.reset()
-                        } else if (inFrame) {
-                            frameBuf.write(b.toInt())
-                        }
+        while (true) {
+            while (readPos < readLen) {
+                val b = readBuf[readPos++]
+                if (b == RnsCrypto.HDLC_FLAG) {
+                    if (inFrame && frameBuf.size() > 0) {
+                        val pkt = RnsCrypto.hdlcUnescape(frameBuf.toByteArray())
+                        frameBuf.reset()
+                        return pkt
                     }
+                    inFrame = true
+                    frameBuf.reset()
+                } else if (inFrame) {
+                    frameBuf.write(b.toInt())
+                }
+            }
+            if (System.currentTimeMillis() >= deadline) break
+            try {
+                readPos = 0
+                readLen = inp.read(readBuf)
+                if (readLen <= 0) {
+                    readLen = 0
                 }
             } catch (_: java.net.SocketTimeoutException) {
             }
@@ -241,5 +251,114 @@ fun main(args: Array<String>) {
     check(!closedByPeer) { "Peer sent LINKCLOSE during keepalive window!" }
     println("[4] PASS: Link survived ${keepaliveSecs}s idle with keepalive")
     sendPkt(link.buildLinkClosePacket()!!)
+
+    // 5. >MDU 16KB LXMF message end-to-end via RNS Resource on lxmf.delivery
+    val bobPub = RnsCrypto.hexToBytes(bobPubHex)
+    val bobEdPub = bobPub.copyOfRange(32, 64)
+    sendPkt(RnsCrypto.buildPathRequestPacket(RnsCrypto.hexToBytes(bobDestHex)))
+    var bobTid: ByteArray? = null
+    var bobFound = false
+    val bobAnnDeadline = System.currentTimeMillis() + 5000
+    while (System.currentTimeMillis() < bobAnnDeadline && !bobFound) {
+        val pkt = pollPacket(200) ?: continue
+        val parsed = RnsAnnounceParser.parse(pkt)
+        if (parsed != null && parsed.verified && parsed.destinationHash == bobDestHex) {
+            bobFound = true
+            if (((pkt[0].toInt() and 0xFF) and 0x40) != 0) {
+                bobTid = pkt.copyOfRange(2, 18)
+            }
+        }
+    }
+    check(bobFound) { "Did not receive Bob lxmf.delivery announce" }
+
+    val bobLink = RnsLinkSession(bobDestHex, bobPub)
+    sendPkt(bobLink.buildLinkRequestPacket(bobTid))
+    val bobLrDeadline = System.currentTimeMillis() + 5000
+    while (System.currentTimeMillis() < bobLrDeadline && bobLink.state != RnsLinkSession.State.ACTIVE) {
+        val pkt = pollPacket(200) ?: continue
+        val flags = pkt[0].toInt() and 0xFF
+        val pt = flags and 0x03
+        val h2 = ((flags and 0x40) shr 6) == RnsHeaderType.HEADER_2
+        val destOff = if (h2) 18 else 2
+        val ctxOff = if (h2) 34 else 18
+        val payOff = if (h2) 35 else 19
+        if (pt == RnsPacketType.PROOF && pkt.size > payOff && pkt[ctxOff] == RnsContext.LRPROOF) {
+            if (RnsCrypto.bytesToHex(pkt.copyOfRange(destOff, destOff + 16)) == bobLink.linkIdHex) {
+                bobLink.handleLinkProof(pkt.copyOfRange(payOff, pkt.size))?.let { sendPkt(it) }
+            }
+        }
+    }
+    check(bobLink.state == RnsLinkSession.State.ACTIVE) { "Bob lxmf.delivery link did not become ACTIVE" }
+    sendPkt(bobLink.buildIdentifyPacket(pub64, edPriv)!!)
+
+    // 5a. Kotlin -> Python 16KB incompressible LXMF message via RnsResourceSender (>16KB SDU => multi-part)
+    val kt16kPayload = kotlin.random.Random(12345).nextBytes(16384)
+    val kt16kWire = LxmfCodec.pack(
+        destinationHash = bobDestHex,
+        sourceHash = selfDestHex,
+        edPriv = edPriv,
+        content = kt16kPayload,
+        title = "kt-16k-resource",
+    )
+    val resSender = RnsResourceSender(bobLink, kt16kWire, autoCompress = true)
+    sendPkt(resSender.buildAdvertisementPacket()!!)
+
+    // 5b. Drive Resource sender AND receive Python -> Kotlin 16KB LXMF via RnsResourceReceiver
+    var resReceiver: RnsResourceReceiver? = null
+    val resDeadline = System.currentTimeMillis() + 15000
+    while (System.currentTimeMillis() < resDeadline &&
+        (resSender.status != RnsResourceStatus.COMPLETE || resReceiver?.status != RnsResourceStatus.COMPLETE)
+    ) {
+        val pkt = pollPacket(200) ?: continue
+        val flags = pkt[0].toInt() and 0xFF
+        val pt = flags and 0x03
+        val h2 = ((flags and 0x40) shr 6) == RnsHeaderType.HEADER_2
+        val destOff = if (h2) 18 else 2
+        val ctxOff = if (h2) 34 else 18
+        val payOff = if (h2) 35 else 19
+        if (pkt.size <= payOff) continue
+        if (RnsCrypto.bytesToHex(pkt.copyOfRange(destOff, destOff + 16)) != bobLink.linkIdHex) continue
+
+        val ctx = pkt[ctxOff]
+        val body = pkt.copyOfRange(payOff, pkt.size)
+        when (ctx) {
+            RnsContext.RESOURCE_REQ -> {
+                val dec = bobLink.decryptLinkPayload(body) ?: continue
+                resSender.handleRequest(dec).forEach { sendPkt(it) }
+            }
+            RnsContext.RESOURCE_PRF -> {
+                if (pt == RnsPacketType.PROOF) {
+                    resSender.handleProof(body)
+                }
+            }
+            RnsContext.RESOURCE_ADV -> {
+                val dec = bobLink.decryptLinkPayload(body) ?: continue
+                val accepted = RnsResourceReceiver.accept(bobLink, dec)
+                if (accepted != null) {
+                    resReceiver = accepted.first
+                    sendPkt(accepted.second)
+                }
+            }
+            RnsContext.RESOURCE_HMU -> {
+                val dec = bobLink.decryptLinkPayload(body) ?: continue
+                resReceiver?.handleHashmapUpdate(dec)?.forEach { sendPkt(it) }
+            }
+            RnsContext.RESOURCE -> {
+                resReceiver?.handlePart(body)?.forEach { sendPkt(it) }
+            }
+        }
+    }
+    check(resSender.status == RnsResourceStatus.COMPLETE) { "Kotlin -> Python 16KB Resource did not complete (status=${resSender.status})" }
+    check(resReceiver?.status == RnsResourceStatus.COMPLETE) { "Python -> Kotlin 16KB Resource did not complete (status=${resReceiver?.status})" }
+    val py16kWire = resReceiver.assembledData!!
+    val py16kMsg = LxmfCodec.unpack(py16kWire, bobEdPub)
+    checkNotNull(py16kMsg) { "Failed to unpack Python 16KB LXMF message" }
+    check(py16kMsg.signatureValid) { "Invalid Ed25519 signature on Python 16KB LXMF message" }
+    check(py16kMsg.content.size == 16384 && py16kMsg.title == "py-16k-resource") {
+        "Unexpected Python 16KB LXMF content: title=${py16kMsg.title} len=${py16kMsg.content.size}"
+    }
+    println("[5b] PASS: Python -> Kotlin 16KB LXMF via RNS.Resource verified (len=${py16kMsg.content.size}, sigValid=true)")
+
+    sendPkt(bobLink.buildLinkClosePacket()!!)
     sock.close()
 }

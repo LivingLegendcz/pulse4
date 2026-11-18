@@ -189,4 +189,34 @@ class RnsResourceTest {
         sender.handleReject()
         assertEquals(RnsResourceStatus.REJECTED, sender.status)
     }
+
+    @Test
+    fun `propagation announce appData prefers ceil of list_7_0 fractional stamp cost and link tracks lastInboundMs`() {
+        val appData = MsgPack.encode(
+            listOf(
+                false,
+                1700000000L,
+                true,
+                256L,
+                1024L,
+                listOf(16, 3, 18),
+                emptyMap<Any?, Any?>(),
+                listOf(18.2, 2, 16),
+            ),
+        )
+        val info = LxmfCodec.parsePropagationAnnounceAppData(appData)
+        assertNotNull(info)
+        assertEquals(19, info.stampCost)
+        assertEquals(2, info.stampCostFlexibility)
+        assertEquals(16, info.peeringCost)
+
+        val link = createActiveLink(mtu = 500)
+        val initialInbound = link.lastInboundMs
+        Thread.sleep(5)
+        assertNotNull(link.buildKeepalivePacket())
+        assertEquals(initialInbound, link.lastInboundMs)
+        Thread.sleep(5)
+        link.touchInbound()
+        assertTrue(link.lastInboundMs > initialInbound)
+    }
 }

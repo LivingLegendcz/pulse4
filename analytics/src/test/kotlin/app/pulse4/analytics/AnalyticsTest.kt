@@ -69,4 +69,47 @@ class AnalyticsTest {
         val r = assertNotNull(Baseline.usualRange((1..9).map { it.toDouble() }))
         assertEquals(3.0, r.low); assertEquals(5.0, r.median); assertEquals(7.0, r.high)
     }
+
+    @Test fun `D1 enrichTrack never fabricates dynamics or cycling metrics`() {
+        val pts = listOf(
+            TrackPoint(0L, speedMps = 3.0, cadence = 170),
+            TrackPoint(10_000L, speedMps = 3.1, cadence = 172),
+        )
+        val out = RunningDynamicsModel.enrichTrack(pts, app.pulse4.domain.Sport.RUNNING, maxHr = 175)
+        assertNull(out[0].groundContactBalancePct)
+        assertNull(out[0].groundContactTimeMs)
+        assertNull(out[0].verticalOscillationCm)
+        assertNull(out[0].staminaPct)
+        assertNull(out[0].performanceCondition)
+    }
+
+    @Test fun `HLT-5 relative effort returns null without HR zones`() {
+        assertNull(RunningDynamicsModel.computeStravaRelativeEffort(emptyList(), 3600.0))
+        assertNull(RunningDynamicsModel.computeStravaRelativeEffort(listOf(0.0, 0.0, 0.0, 0.0, 0.0), 3600.0))
+        assertNotNull(RunningDynamicsModel.computeStravaRelativeEffort(listOf(600.0, 600.0, 0.0, 0.0, 0.0), 1200.0))
+    }
+
+    @Test fun `D2 GAP uses real grade from elevation`() {
+        val uphill = listOf(
+            TrackPoint(0L, speedMps = 3.0, distanceM = 0.0, elevationM = 100.0),
+            TrackPoint(100_000L, speedMps = 3.0, distanceM = 300.0, elevationM = 130.0), // 10% grade
+        )
+        val flat = listOf(
+            TrackPoint(0L, speedMps = 3.0, distanceM = 0.0, elevationM = 100.0),
+            TrackPoint(100_000L, speedMps = 3.0, distanceM = 300.0, elevationM = 100.0),
+        )
+        val gapUphill = assertNotNull(RunningDynamicsModel.computeAverageGapPaceSPerKm(uphill))
+        val gapFlat = assertNotNull(RunningDynamicsModel.computeAverageGapPaceSPerKm(flat))
+        assertTrue(gapUphill < gapFlat, "Uphill GAP pace ($gapUphill) should be faster than flat ($gapFlat)")
+    }
+
+    @Test fun `D4 findBestEfforts keeps missing elevation as null`() {
+        val pts = listOf(
+            TrackPoint(0L, distanceM = 0.0, elevationM = null),
+            TrackPoint(100_000L, distanceM = 450.0, elevationM = 250.0),
+        )
+        val efforts = RunningDynamicsModel.findBestEfforts(pts)
+        assertEquals(1, efforts.size)
+        assertNull(efforts.single().elevationChangeM)
+    }
 }

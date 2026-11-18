@@ -13,6 +13,8 @@ data class ProtocolLimits(
     val maxAttachmentBytes: Long = 25L * 1024 * 1024,
     val maxQueueBytes: Long = 100L * 1024 * 1024,
     val unackedSummaryTtlMs: Long = 7L * 24 * 3600 * 1000,
+    val storedPropagationRetryMs: Long = 6L * 3600 * 1000,
+    val storedPropagationTtlMs: Long = 14L * 24 * 3600 * 1000,
 )
 
 object Kinds {

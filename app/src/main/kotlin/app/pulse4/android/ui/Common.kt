@@ -70,9 +70,20 @@ import app.pulse4.ui.Fmt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-/** Načtení z databáze mimo hlavní vlákno; `key` vyvolá nové načtení. */
+/** Načtení z databáze mimo hlavní vlákno; `key` vyvolá nové načtení. Centrální ošetření chyb (R7). */
 @Composable
-fun <T> io(key: Any?, block: () -> T): State<T?> = produceState<T?>(null, key) { value = withContext(Dispatchers.IO) { block() } }
+fun <T> io(key: Any?, block: () -> T): State<T?> = produceState<T?>(null, key) {
+    value = withContext(Dispatchers.IO) {
+        try {
+            block()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            android.util.Log.e("Pulse4", "io() failed: ${e.javaClass.simpleName}", e)
+            null
+        }
+    }
+}
 
 /** Formátování reagující na zvolenou soustavu jednotek (Metrické / Imperiální). */
 @Volatile
@@ -109,7 +120,7 @@ fun SinglestatCard(
     modifier: Modifier = Modifier,
     onClick: () -> Unit = {},
 ) {
-    val finite = remember(historyValues) { historyValues.filterNotNull() }
+    val finite = remember(historyValues) { historyValues.filterNotNull().filter { it.isFinite() } }
     val cardBg = heroTopColor ?: MineralSurfaceDark
 
     Card(
@@ -202,7 +213,7 @@ fun SinglestatCard(
                     fun y(v: Double) = topPad + (usableH * (1.0 - (v - lo) / span)).toFloat()
 
                     val pts = mutableListOf<Pair<Int, Double>>()
-                    historyValues.forEachIndexed { idx, v -> if (v != null) pts.add(idx to v) }
+                    historyValues.forEachIndexed { idx, v -> if (v != null && v.isFinite()) pts.add(idx to v) }
                     if (pts.size >= 2) {
                         val strokePath = Path()
                         val fillPath = Path()

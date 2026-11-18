@@ -593,6 +593,11 @@ fun MapLibreRoute(
     }
 
     val validPoints = remember(track) { track.filter { it.hasPosition } }
+    val routeGeoJson = remember(validPoints, metricMode, maxHeartRate, defaultLineColor) {
+        if (validPoints.size >= 2) MapTrackAnalytics.buildColoredSegments(validPoints, metricMode, maxHeartRate, defaultLineColor) else null
+    }
+    val lastStyleKey = remember { mutableStateOf<Pair<MapProvider, String?>?>(null) }
+    val lastRouteGeoJson = remember { mutableStateOf<FeatureCollection?>(null) }
 
     Box(modifier = modifier.fillMaxWidth().height(290.dp).clip(RoundedCornerShape(16.dp))) {
         AndroidView(
@@ -606,7 +611,10 @@ fun MapLibreRoute(
                 map.uiSettings.isLogoEnabled = false
 
                 val style = map.style
-                if (style == null || !style.isFullyLoaded) {
+                val styleKey = provider to customStyleUrl
+                if (style == null || !style.isFullyLoaded || lastStyleKey.value != styleKey) {
+                    lastStyleKey.value = styleKey
+                    lastRouteGeoJson.value = routeGeoJson
                     map.setStyle(styleBuilder) { loadedStyle ->
                         setupMapLayers(
                             map = map,
@@ -624,12 +632,12 @@ fun MapLibreRoute(
                         )
                     }
                 } else {
+                    val routeChanged = lastRouteGeoJson.value !== routeGeoJson
+                    if (routeChanged) lastRouteGeoJson.value = routeGeoJson
                     updateMapData(
                         style = style,
                         validPoints = validPoints,
-                        metricMode = metricMode,
-                        maxHr = maxHeartRate,
-                        defaultColor = defaultLineColor,
+                        routeGeoJson = if (routeChanged) routeGeoJson else null,
                         pauses = pauses,
                         splits = splits,
                         showKmMarkers = showKmMarkers,
@@ -901,9 +909,7 @@ private fun setupMapLayers(
 private fun updateMapData(
     style: Style,
     validPoints: List<TrackPoint>,
-    metricMode: MapMetricMode,
-    maxHr: Int?,
-    defaultColor: String,
+    routeGeoJson: FeatureCollection?,
     pauses: List<ActivityPause>,
     splits: List<ActivityKmSplit>,
     showKmMarkers: Boolean,
@@ -920,9 +926,10 @@ private fun updateMapData(
         }
     }
 
-    // Aktualizace trasy
-    val routeGeoJson = MapTrackAnalytics.buildColoredSegments(validPoints, metricMode, maxHr, defaultColor)
-    style.getSourceAs<GeoJsonSource>("route")?.setGeoJson(routeGeoJson)
+    // Aktualizace trasy pouze při změně trasy/režimu (nikoli při tažení kurzoru)
+    if (routeGeoJson != null) {
+        style.getSourceAs<GeoJsonSource>("route")?.setGeoJson(routeGeoJson)
+    }
 
     // Aktualizace kilometrovníků
     val splitFeatures = if (showKmMarkers) {

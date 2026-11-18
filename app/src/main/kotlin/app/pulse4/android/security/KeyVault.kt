@@ -6,6 +6,7 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.security.keystore.StrongBoxUnavailableException
 import java.io.File
+import java.io.FileOutputStream
 import java.security.KeyStore
 import java.security.SecureRandom
 import javax.crypto.Cipher
@@ -23,9 +24,16 @@ import javax.crypto.spec.GCMParameterSpec
 class KeyVault(private val context: Context) {
     private val alias = "pulse4.master.v1"
 
+    private fun hasSealedFiles(): Boolean {
+        if (File(context.noBackupFilesDir, "db.key").exists()) return true
+        val secretsDir = File(context.noBackupFilesDir, "secrets")
+        return secretsDir.listFiles()?.any { it.isFile && !it.name.endsWith(".tmp") } == true
+    }
+
     private fun masterKey(): SecretKey {
         val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         (ks.getKey(alias, null) as? SecretKey)?.let { return it }
+        check(!hasSealedFiles()) { "Hlavní klíč v Keystore chybí, ale existují zapečetěné soubory" }
         fun spec(strongBox: Boolean) = KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
             .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
             .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
@@ -58,7 +66,14 @@ class KeyVault(private val context: Context) {
         val f = File(context.noBackupFilesDir, "db.key")
         if (f.exists()) return open(f.readBytes())
         val pass = ByteArray(32).also { SecureRandom().nextBytes(it) }
-        f.writeBytes(seal(pass))
+        val sealed = seal(pass)
+        val tmp = File(context.noBackupFilesDir, "db.key.tmp")
+        FileOutputStream(tmp).use {
+            it.write(sealed)
+            it.flush()
+            it.fd.sync()
+        }
+        check(tmp.renameTo(f)) { "Atomický zápis db.key selhal" }
         return pass
     }
 }
@@ -82,7 +97,11 @@ class SecretStore(context: Context, private val vault: KeyVault) {
         if (!tmp.renameTo(file(name))) { file(name).delete(); check(tmp.renameTo(file(name))) { "Zápis tajemství selhal" } }
     }
 
-    fun get(name: String): ByteArray? = file(name).takeIf { it.exists() }?.let { runCatching { vault.open(it.readBytes()) }.getOrNull() }
+    fun get(name: String): ByteArray? {
+        val f = file(name)
+        if (!f.exists()) return null
+        return vault.open(f.readBytes())
+    }
 
     fun putString(name: String, value: String) = put(name, value.toByteArray(Charsets.UTF_8))
     fun getString(name: String): String? = get(name)?.toString(Charsets.UTF_8)

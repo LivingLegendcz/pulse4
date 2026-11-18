@@ -1,6 +1,6 @@
 package app.pulse4.android.reticulum
 
-import java.nio.ByteBuffer
+import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
 import java.security.SecureRandom
 import javax.crypto.Cipher
@@ -14,8 +14,48 @@ import org.bouncycastle.crypto.params.X25519PrivateKeyParameters
 import org.bouncycastle.crypto.params.X25519PublicKeyParameters
 import org.bouncycastle.crypto.signers.Ed25519Signer
 
+object RnsHeaderType {
+    const val HEADER_1 = 0x00
+    const val HEADER_2 = 0x01
+}
+
+object RnsTransportType {
+    const val BROADCAST = 0x00
+    const val TRANSPORT = 0x01
+}
+
+object RnsDestType {
+    const val SINGLE = 0x00
+    const val GROUP = 0x01
+    const val PLAIN = 0x02
+    const val LINK = 0x03
+}
+
+object RnsPacketType {
+    const val DATA = 0x00
+    const val ANNOUNCE = 0x01
+    const val LINKREQUEST = 0x02
+    const val PROOF = 0x03
+}
+
+object RnsContext {
+    const val NONE = 0x00.toByte()
+    const val REQUEST = 0x09.toByte()
+    const val RESPONSE = 0x0A.toByte()
+    const val KEEPALIVE = 0xFA.toByte()
+    const val LINKIDENTIFY = 0xFB.toByte()
+    const val LINKCLOSE = 0xFC.toByte()
+    const val LRRTT = 0xFE.toByte()
+    const val LRPROOF = 0xFF.toByte()
+}
+
+object RnsLinkMode {
+    const val AES128_CBC = 0
+    const val AES256_CBC = 1
+}
+
 /**
- * Reticulum (RNS 1.0–1.5+) kryptografické a paketové primitivy:
+ * Reticulum (RNS 1.0–1.6+) kryptografické a paketové primitivy:
  * - HKDF-SHA256
  * - RNS Fernet (AES-256-CBC + PKCS5/7 + HMAC-SHA256)
  * - RNS Link MTU signalling (3 bajty, RNS 0.9.3+)
@@ -25,6 +65,84 @@ import org.bouncycastle.crypto.signers.Ed25519Signer
 object RnsCrypto {
     const val PATH_REQUEST_DEST = "6b9f66014d9853faab220fba47d02761"
     const val DEFAULT_LINK_MTU = 32768 // TCP/Wi-Fi Link MTU (RNS 0.9.3+ discovery)
+
+    const val HDLC_FLAG = 0x7E.toByte()
+    const val HDLC_ESC = 0x7D.toByte()
+    const val HDLC_ESC_MASK = 0x20
+
+    fun packetFlags(headerType: Int, transportType: Int, destType: Int, packetType: Int): Byte =
+        (((headerType and 0x01) shl 6) or
+            ((transportType and 0x01) shl 4) or
+            ((destType and 0x03) shl 2) or
+            (packetType and 0x03)).toByte()
+
+    fun hexToBytes(hex: String): ByteArray {
+        val clean = hex.trim()
+        require(clean.length % 2 == 0) { "Odd hex string length: ${clean.length}" }
+        val len = clean.length
+        val data = ByteArray(len / 2)
+        var i = 0
+        while (i < len) {
+            val hi = Character.digit(clean[i], 16)
+            val lo = Character.digit(clean[i + 1], 16)
+            require(hi >= 0 && lo >= 0) { "Invalid hex character" }
+            data[i / 2] = ((hi shl 4) + lo).toByte()
+            i += 2
+        }
+        return data
+    }
+
+    fun bytesToHex(bytes: ByteArray): String = bytes.joinToString("") { "%02x".format(it) }
+
+    fun hdlcEscape(data: ByteArray): ByteArray {
+        val out = ByteArrayOutputStream(data.size + 16)
+        for (b in data) {
+            val ub = b.toInt() and 0xFF
+            if (b == HDLC_ESC) {
+                out.write(HDLC_ESC.toInt())
+                out.write(HDLC_ESC.toInt() xor HDLC_ESC_MASK)
+            } else if (b == HDLC_FLAG) {
+                out.write(HDLC_ESC.toInt())
+                out.write(HDLC_FLAG.toInt() xor HDLC_ESC_MASK)
+            } else {
+                out.write(ub)
+            }
+        }
+        return out.toByteArray()
+    }
+
+    fun hdlcUnescape(data: ByteArray): ByteArray {
+        val out = ByteArrayOutputStream(data.size)
+        var i = 0
+        while (i < data.size) {
+            val b = data[i]
+            if (b == HDLC_ESC && i + 1 < data.size) {
+                val next = data[i + 1]
+                out.write(next.toInt() xor HDLC_ESC_MASK)
+                i += 2
+            } else {
+                out.write(b.toInt() and 0xFF)
+                i++
+            }
+        }
+        return out.toByteArray()
+    }
+
+    /** Reticulum Packet.get_hash(): SHA-256(hashable_part). */
+    fun packetHash(rawPacket: ByteArray): ByteArray {
+        require(rawPacket.size >= 3) { "Packet too short for hash" }
+        val flags = rawPacket[0].toInt() and 0xFF
+        val headerType = (flags and 0x40) shr 6
+        val bodyStart = if (headerType == RnsHeaderType.HEADER_2) 18 else 2
+        require(rawPacket.size > bodyStart) { "Packet too short for headerType=$headerType" }
+        val sha = MessageDigest.getInstance("SHA-256")
+        sha.update((flags and 0x0F).toByte())
+        sha.update(rawPacket, bodyStart, rawPacket.size - bodyStart)
+        return sha.digest()
+    }
+
+    /** Reticulum Packet.getTruncatedHash(): SHA-256(hashable_part)[0:16]. */
+    fun packetTruncatedHash(rawPacket: ByteArray): ByteArray = packetHash(rawPacket).copyOf(16)
 
     fun hkdfSha256(ikm: ByteArray, salt: ByteArray?, info: ByteArray = ByteArray(0), length: Int = 64): ByteArray {
         val actualSalt = if (salt == null || salt.isEmpty()) ByteArray(32) else salt
@@ -108,9 +226,9 @@ object RnsCrypto {
         RnsFernet(derived).decrypt(ciphertext.copyOfRange(32, ciphertext.size))
     }.getOrNull()
 
-    /** RNS 0.9.3+ Link signalling bytes (3B): 21 bitů MTU + 3 bity mode. */
-    fun encodeSignalling(mtu: Int = DEFAULT_LINK_MTU, mode: Int = 1): ByteArray {
-        val value = ((mtu and 0x1FFFFF) shl 3) or (mode and 0x07)
+    /** RNS 0.9.3+ Link signalling bytes (3B): (mtu & 0x1FFFFF) | (((mode << 5) & 0xE0) << 16). */
+    fun encodeSignalling(mtu: Int = DEFAULT_LINK_MTU, mode: Int = RnsLinkMode.AES256_CBC): ByteArray {
+        val value = (mtu and 0x1FFFFF) or (((mode shl 5) and 0xE0) shl 16)
         return byteArrayOf(
             ((value ushr 16) and 0xFF).toByte(),
             ((value ushr 8) and 0xFF).toByte(),
@@ -122,17 +240,17 @@ object RnsCrypto {
         val value = ((bytes[offset].toInt() and 0xFF) shl 16) or
             ((bytes[offset + 1].toInt() and 0xFF) shl 8) or
             (bytes[offset + 2].toInt() and 0xFF)
-        val mtu = (value ushr 3) and 0x1FFFFF
-        val mode = value and 0x07
+        val mtu = value and 0x1FFFFF
+        val mode = (value ushr 21) and 0x07
         return mtu to mode
     }
 
     fun buildPathRequestPacket(targetDest16: ByteArray, transportId16: ByteArray? = null): ByteArray {
-        val destBytes = ReticulumBridge.hexToBytes(PATH_REQUEST_DEST)
+        val destBytes = hexToBytes(PATH_REQUEST_DEST)
         val tag = ByteArray(16).also { SecureRandom().nextBytes(it) }
         val payload = if (transportId16 != null) targetDest16 + transportId16 + tag else targetDest16 + tag
-        // HEADER_1 (0x00), PLAIN dest_type (0x02 << 2 = 0x08), DATA (0x00)
-        return byteArrayOf(0x08, 0x00) + destBytes + byteArrayOf(0x00) + payload
+        val flags = packetFlags(RnsHeaderType.HEADER_1, RnsTransportType.BROADCAST, RnsDestType.PLAIN, RnsPacketType.DATA)
+        return byteArrayOf(flags, 0x00) + destBytes + byteArrayOf(RnsContext.NONE) + payload
     }
 }
 
@@ -154,12 +272,12 @@ object RnsAnnounceParser {
         if (packet.size < 19) return null
         val flags = packet[0].toInt() and 0xFF
         val packetType = flags and 0x03
-        if (packetType != 0x01) return null
+        if (packetType != RnsPacketType.ANNOUNCE) return null
 
         val headerType = (flags and 0x40) shr 6
         val contextFlag = (flags and 0x20) shr 5
-        val destOffset = if (headerType == 1) 18 else 2
-        val payloadOffset = if (headerType == 1) 35 else 19
+        val destOffset = if (headerType == RnsHeaderType.HEADER_2) 18 else 2
+        val payloadOffset = if (headerType == RnsHeaderType.HEADER_2) 35 else 19
         if (packet.size < payloadOffset + 64 + 10 + 10 + 64) return null
 
         val dest16 = packet.copyOfRange(destOffset, destOffset + 16)
@@ -189,8 +307,8 @@ object RnsAnnounceParser {
         val verified = verifier.verifySignature(sig64)
 
         ParsedRnsAnnounce(
-            destinationHash = ReticulumBridge.bytesToHex(dest16),
-            identityHash = ReticulumBridge.bytesToHex(identHash),
+            destinationHash = RnsCrypto.bytesToHex(dest16),
+            identityHash = RnsCrypto.bytesToHex(identHash),
             publicKey64 = pubKey64,
             nameHash10 = nameHash10,
             ratchetPub32 = ratchetPub32,
@@ -203,7 +321,7 @@ object RnsAnnounceParser {
 /**
  * Stavová relace Reticulum Link (Initiator):
  * 1. Vytvoří LinkRequest + spočítá LinkId.
- * 2. Ověří LinkProof z cílového uzlu a odvodí RNS Fernet klíč.
+ * 2. Ověří LinkProof z cílového uzlu (vyžaduje známý Ed25519 klíč cíle) a odvodí RNS Fernet klíč.
  * 3. Odešle LinkRTT a přejde do stavu ACTIVE pro šifrované DATA / REQUEST pakety.
  */
 class RnsLinkSession(
@@ -213,11 +331,23 @@ class RnsLinkSession(
 ) {
     enum class State { PENDING, ACTIVE, CLOSED }
 
+    companion object {
+        const val KEEPALIVE_MAX_RTT_SEC = 1.75
+        const val KEEPALIVE_MAX_SEC = 360.0
+        const val KEEPALIVE_MIN_SEC = 5.0
+    }
+
     var state: State = State.PENDING
         private set
     var negotiatedMtu: Int = 500
         private set
     var identified: Boolean = false
+        private set
+    var rttSec: Double = 0.05
+        private set
+    var keepaliveIntervalMs: Long = 30_000L
+        private set
+    var lastActivityMs: Long = System.currentTimeMillis()
         private set
 
     private val ephSeed = ByteArray(32).also { SecureRandom().nextBytes(it) }
@@ -225,7 +355,7 @@ class RnsLinkSession(
     private val ephXPub32 = ephXPriv.generatePublicKey().encoded
     private val ephEdPriv = Ed25519PrivateKeyParameters(ByteArray(32).also { SecureRandom().nextBytes(it) }, 0)
     private val ephEdPub32 = ephEdPriv.generatePublicKey().encoded
-    private val signalling3 = RnsCrypto.encodeSignalling(offeredMtu, mode = 1)
+    private val signalling3 = RnsCrypto.encodeSignalling(offeredMtu, mode = RnsLinkMode.AES256_CBC)
     private val createdAtMs = System.currentTimeMillis()
     private var fernet: RnsCrypto.RnsFernet? = null
 
@@ -233,21 +363,33 @@ class RnsLinkSession(
     val linkIdHex: String
 
     init {
-        val dest16 = ReticulumBridge.hexToBytes(destinationHash)
+        val dest16 = RnsCrypto.hexToBytes(destinationHash)
         // Reticulum LinkId = SHA-256(hashable_part_without_hops_and_signalling)[0:16]
-        val hashableFlags = byteArrayOf(0x03) // HEADER_1, LINKREQUEST
-        val hashable = hashableFlags + dest16 + byteArrayOf(0x00) + ephXPub32 + ephEdPub32
+        val hashableFlags = byteArrayOf(RnsPacketType.LINKREQUEST.toByte())
+        val hashable = hashableFlags + dest16 + byteArrayOf(RnsContext.NONE) + ephXPub32 + ephEdPub32
         linkIdBytes = MessageDigest.getInstance("SHA-256").digest(hashable).copyOf(16)
-        linkIdHex = ReticulumBridge.bytesToHex(linkIdBytes)
+        linkIdHex = RnsCrypto.bytesToHex(linkIdBytes)
     }
 
     fun buildLinkRequestPacket(transportId16: ByteArray? = null): ByteArray {
-        val dest16 = ReticulumBridge.hexToBytes(destinationHash)
+        val dest16 = RnsCrypto.hexToBytes(destinationHash)
         val payload = ephXPub32 + ephEdPub32 + signalling3
         return if (transportId16 != null) {
-            byteArrayOf(0x53.toByte(), 0x00) + transportId16 + dest16 + byteArrayOf(0x00) + payload
+            val flags = RnsCrypto.packetFlags(
+                RnsHeaderType.HEADER_2,
+                RnsTransportType.TRANSPORT,
+                RnsDestType.SINGLE,
+                RnsPacketType.LINKREQUEST,
+            )
+            byteArrayOf(flags, 0x00) + transportId16 + dest16 + byteArrayOf(RnsContext.NONE) + payload
         } else {
-            byteArrayOf(0x03, 0x00) + dest16 + byteArrayOf(0x00) + payload
+            val flags = RnsCrypto.packetFlags(
+                RnsHeaderType.HEADER_1,
+                RnsTransportType.BROADCAST,
+                RnsDestType.SINGLE,
+                RnsPacketType.LINKREQUEST,
+            )
+            byteArrayOf(flags, 0x00) + dest16 + byteArrayOf(RnsContext.NONE) + payload
         }
     }
 
@@ -255,20 +397,21 @@ class RnsLinkSession(
     fun handleLinkProof(proofPayload: ByteArray): ByteArray? {
         if (state != State.PENDING) return null
         if (proofPayload.size < 64 + 32) return null
+        val pub64 = destinationPubKey64 ?: return null
+        if (pub64.size < 64) return null
+
         val sig64 = proofPayload.copyOfRange(0, 64)
         val peerXPub32 = proofPayload.copyOfRange(64, 96)
         val peerSigBytes = if (proofPayload.size >= 99) proofPayload.copyOfRange(96, 99) else null
         negotiatedMtu = peerSigBytes?.let { RnsCrypto.decodeSignalling(it).first.coerceAtLeast(500) } ?: 500
 
-        // Pokud známe Ed25519 klíč cíle, ověříme podpis nad linkId + peerXPub + peerEdPub + signalling
-        destinationPubKey64?.let { pub64 ->
-            val peerEdPub32 = pub64.copyOfRange(32, 64)
-            val signed = linkIdBytes + peerXPub32 + peerEdPub32 + (peerSigBytes ?: ByteArray(0))
-            val verifier = Ed25519Signer()
-            verifier.init(false, Ed25519PublicKeyParameters(peerEdPub32, 0))
-            verifier.update(signed, 0, signed.size)
-            if (!verifier.verifySignature(sig64)) return null
-        }
+        // Ověříme Ed25519 podpis nad linkId + peerXPub + peerEdPub + signalling
+        val peerEdPub32 = pub64.copyOfRange(32, 64)
+        val signed = linkIdBytes + peerXPub32 + peerEdPub32 + (peerSigBytes ?: ByteArray(0))
+        val verifier = Ed25519Signer()
+        verifier.init(false, Ed25519PublicKeyParameters(peerEdPub32, 0))
+        verifier.update(signed, 0, signed.size)
+        if (!verifier.verifySignature(sig64)) return null
 
         val agreement = X25519Agreement().apply { init(ephXPriv) }
         val shared = ByteArray(agreement.agreementSize)
@@ -276,24 +419,91 @@ class RnsLinkSession(
         val derived = RnsCrypto.hkdfSha256(shared, salt = linkIdBytes, length = 64)
         fernet = RnsCrypto.RnsFernet(derived)
         state = State.ACTIVE
+        lastActivityMs = System.currentTimeMillis()
 
-        val rttSec = ((System.currentTimeMillis() - createdAtMs).coerceAtLeast(1L)) / 1000.0
+        rttSec = ((lastActivityMs - createdAtMs).coerceAtLeast(1L)) / 1000.0
+        keepaliveIntervalMs = (rttSec * (KEEPALIVE_MAX_SEC / KEEPALIVE_MAX_RTT_SEC))
+            .coerceIn(KEEPALIVE_MIN_SEC, KEEPALIVE_MAX_SEC)
+            .toLong() * 1000L
         val rttPayload = MsgPack.encode(rttSec)
-        return buildEncryptedLinkPacket(context = 0xFE.toByte(), plaintext = rttPayload)
+        return buildEncryptedLinkPacket(context = RnsContext.LRRTT, plaintext = rttPayload)
     }
 
     fun buildEncryptedLinkPacket(context: Byte, plaintext: ByteArray): ByteArray? {
         val f = fernet ?: return null
         val ct = f.encrypt(plaintext)
-        // HEADER_1, DATA, DEST_TYPE_LINK (0x03 shl 2 = 0x0C)
-        val pkt = byteArrayOf(0x0C, 0x00) + linkIdBytes + byteArrayOf(context) + ct
+        val flags = RnsCrypto.packetFlags(
+            RnsHeaderType.HEADER_1,
+            RnsTransportType.BROADCAST,
+            RnsDestType.LINK,
+            RnsPacketType.DATA,
+        )
+        val pkt = byteArrayOf(flags, 0x00) + linkIdBytes + byteArrayOf(context) + ct
         if (pkt.size > negotiatedMtu) {
             return null
         }
+        lastActivityMs = System.currentTimeMillis()
         return pkt
     }
 
-    fun decryptLinkPayload(ciphertext: ByteArray): ByteArray? = fernet?.decrypt(ciphertext)
+    /** Reticulum KEEPALIVE (0xFA) se na linku posílá nešifrovaný (Packet.py:209). */
+    fun buildKeepalivePacket(): ByteArray? {
+        if (state != State.ACTIVE) return null
+        val flags = RnsCrypto.packetFlags(
+            RnsHeaderType.HEADER_1,
+            RnsTransportType.BROADCAST,
+            RnsDestType.LINK,
+            RnsPacketType.DATA,
+        )
+        lastActivityMs = System.currentTimeMillis()
+        return byteArrayOf(flags, 0x00) + linkIdBytes + byteArrayOf(RnsContext.KEEPALIVE, 0xFF.toByte())
+    }
+
+    fun buildKeepaliveResponsePacket(): ByteArray? {
+        if (state != State.ACTIVE) return null
+        val flags = RnsCrypto.packetFlags(
+            RnsHeaderType.HEADER_1,
+            RnsTransportType.BROADCAST,
+            RnsDestType.LINK,
+            RnsPacketType.DATA,
+        )
+        lastActivityMs = System.currentTimeMillis()
+        return byteArrayOf(flags, 0x00) + linkIdBytes + byteArrayOf(RnsContext.KEEPALIVE, 0xFE.toByte())
+    }
+
+    fun buildLinkClosePacket(): ByteArray? {
+        if (state != State.ACTIVE) return null
+        return buildEncryptedLinkPacket(context = RnsContext.LINKCLOSE, plaintext = linkIdBytes)
+    }
+
+    fun verifyAndHandleLinkClose(ciphertext: ByteArray): Boolean {
+        val decrypted = decryptLinkPayload(ciphertext) ?: return false
+        if (!decrypted.contentEquals(linkIdBytes)) return false
+        close()
+        return true
+    }
+
+    fun verifyPacketProof(proofPayload: ByteArray, expectedPacketHash32: ByteArray): Boolean {
+        if (proofPayload.size < 32 + 64) return false
+        val pub64 = destinationPubKey64 ?: return false
+        if (pub64.size < 64) return false
+        val packetHash32 = proofPayload.copyOfRange(0, 32)
+        if (!MessageDigest.isEqual(packetHash32, expectedPacketHash32)) return false
+        val sig64 = proofPayload.copyOfRange(32, 96)
+        val peerEdPub32 = pub64.copyOfRange(32, 64)
+        val verifier = Ed25519Signer()
+        verifier.init(false, Ed25519PublicKeyParameters(peerEdPub32, 0))
+        verifier.update(packetHash32, 0, packetHash32.size)
+        return verifier.verifySignature(sig64)
+    }
+
+    fun decryptLinkPayload(ciphertext: ByteArray): ByteArray? = fernet?.decrypt(ciphertext)?.also {
+        lastActivityMs = System.currentTimeMillis()
+    }
+
+    fun touchInbound() {
+        lastActivityMs = System.currentTimeMillis()
+    }
 
     fun buildIdentifyPacket(pubKey64: ByteArray, edPriv: Ed25519PrivateKeyParameters): ByteArray? {
         if (state != State.ACTIVE || pubKey64.size != 64) return null
@@ -302,7 +512,7 @@ class RnsLinkSession(
         signer.init(true, edPriv)
         signer.update(signedData, 0, signedData.size)
         val sig64 = signer.generateSignature()
-        val pkt = buildEncryptedLinkPacket(context = 0xFB.toByte(), plaintext = pubKey64 + sig64) ?: return null
+        val pkt = buildEncryptedLinkPacket(context = RnsContext.LINKIDENTIFY, plaintext = pubKey64 + sig64) ?: return null
         identified = true
         return pkt
     }
@@ -311,8 +521,8 @@ class RnsLinkSession(
         val pathHash = MessageDigest.getInstance("SHA-256").digest(path.toByteArray(Charsets.UTF_8)).copyOf(16)
         val reqTime = System.currentTimeMillis() / 1000.0
         val packed = MsgPack.encode(listOf(reqTime, pathHash, data))
-        val reqId = MessageDigest.getInstance("SHA-256").digest(packed).copyOf(16)
-        val pkt = buildEncryptedLinkPacket(context = 0x09, plaintext = packed) ?: return null
+        val pkt = buildEncryptedLinkPacket(context = RnsContext.REQUEST, plaintext = packed) ?: return null
+        val reqId = RnsCrypto.packetTruncatedHash(pkt)
         return reqId to pkt
     }
 

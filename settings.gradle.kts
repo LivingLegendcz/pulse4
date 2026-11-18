@@ -50,6 +50,7 @@ include(
     ":analytics",
     ":sharing-policy",
     ":sync-protocol",
+    ":rns-core",
     ":provider-router",
     ":connector-garmin-personal",
     ":connector-withings",

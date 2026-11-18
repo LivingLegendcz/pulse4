@@ -32,8 +32,10 @@ data class LxmfPropagationNodeInfo(
 object LxmfCodec {
     const val PROPAGATION_APP_NAME = "lxmf.propagation"
     const val DELIVERY_APP_NAME = "lxmf.delivery"
+    const val LEGACY_DELIVERY_APP_NAME = "pulse.delivery"
     const val OFFER_REQUEST_PATH = "/offer"
     const val MESSAGE_GET_PATH = "/get"
+    const val ERROR_INVALID_STAMP = 0xF5
 
     /**
      * Zabalí a podepíše LXMF zprávu podle standardního wire formátu:
@@ -49,8 +51,8 @@ object LxmfCodec {
         timestampSec: Double = System.currentTimeMillis() / 1000.0,
         stamp: ByteArray? = null,
     ): ByteArray {
-        val dest16 = ReticulumBridge.hexToBytes(destinationHash)
-        val source16 = ReticulumBridge.hexToBytes(sourceHash)
+        val dest16 = RnsCrypto.hexToBytes(destinationHash)
+        val source16 = RnsCrypto.hexToBytes(sourceHash)
         require(dest16.size == 16 && source16.size == 16) { "Invalid LXMF hash length" }
 
         val baseList = listOf(timestampSec, title.toByteArray(Charsets.UTF_8), content, fields)
@@ -115,9 +117,9 @@ object LxmfCodec {
         }
 
         LxmfMessage(
-            destinationHash = ReticulumBridge.bytesToHex(dest16),
-            sourceHash = ReticulumBridge.bytesToHex(source16),
-            messageId = ReticulumBridge.bytesToHex(messageId),
+            destinationHash = RnsCrypto.bytesToHex(dest16),
+            sourceHash = RnsCrypto.bytesToHex(source16),
+            messageId = RnsCrypto.bytesToHex(messageId),
             timestampSec = ts,
             title = String(titleBytes, Charsets.UTF_8),
             content = contentBytes,
@@ -155,23 +157,43 @@ object LxmfCodec {
     }.getOrNull()
 
     /**
+     * Vytvoří zašifrovaný payload pro uložení na LXMF Propagation Node (bez stampu):
+     * `dest16 + RnsCrypto.encryptForIdentity(lxmf[16..end])`.
+     */
+    fun encryptPropagationPayload(
+        lxmfWire: ByteArray,
+        recipientX25519Pub32: ByteArray,
+        recipientIdentityHash16: ByteArray,
+    ): ByteArray {
+        val dest16 = lxmfWire.copyOfRange(0, 16)
+        return dest16 + RnsCrypto.encryptForIdentity(
+            plaintext = lxmfWire.copyOfRange(16, lxmfWire.size),
+            recipientX25519Pub = recipientX25519Pub32,
+            recipientIdentityHash = recipientIdentityHash16,
+        )
+    }
+
+    /**
      * Zabalí LXMF zprávu do šifrované obálky pro LXMF Propagation Node:
-     * [timestampSec, [dest16 + RnsCrypto.encryptForIdentity(lxmf[16..end])]]
+     * `[timestampSec, [dest16 + enc (+ optional 32B pnStamp)]]`
      */
     fun packPropagationDeposit(
         lxmfWire: ByteArray,
         recipientX25519Pub32: ByteArray,
         recipientIdentityHash16: ByteArray,
         timestampSec: Double = System.currentTimeMillis() / 1000.0,
+        pnStamp: ByteArray? = null,
     ): ByteArray {
-        val dest16 = lxmfWire.copyOfRange(0, 16)
-        val encrypted = dest16 + RnsCrypto.encryptForIdentity(
-            plaintext = lxmfWire.copyOfRange(16, lxmfWire.size),
-            recipientX25519Pub = recipientX25519Pub32,
-            recipientIdentityHash = recipientIdentityHash16,
-        )
-        return MsgPack.encode(listOf(timestampSec, listOf(encrypted)))
+        val encrypted = encryptPropagationPayload(lxmfWire, recipientX25519Pub32, recipientIdentityHash16)
+        val lxd = if (pnStamp != null) encrypted + pnStamp else encrypted
+        return MsgPack.encode(listOf(timestampSec, listOf(lxd)))
     }
+
+    /** Zabalí již zašifrovaný `lxd` (dest16 + enc + optional stamp) do deposit obálky. */
+    fun packPropagationDepositRaw(
+        lxd: ByteArray,
+        timestampSec: Double = System.currentTimeMillis() / 1000.0,
+    ): ByteArray = MsgPack.encode(listOf(timestampSec, listOf(lxd)))
 
     /** Rozbalí zprávu staženou z LXMF Propagation Node. */
     fun unpackPropagationMessage(
@@ -189,15 +211,28 @@ object LxmfCodec {
         dest16 + decrypted
     }.getOrNull()
 
-    fun buildGetMessagesRequest(wantIds: List<ByteArray> = emptyList(), haveIds: List<ByteArray> = emptyList()): List<Any> =
-        listOf(wantIds, haveIds)
+    /**
+     * Dvoufázový `/get` požadavek dle `LXMRouter.message_get_request`:
+     * - Fáze 1: `[null, null]` -> vrací seznam dostupných transient ID
+     * - Fáze 2: `[wantIds, haveIds]` -> stáhne `wantIds` a smaže `haveIds`
+     */
+    fun buildGetMessagesRequest(
+        wantIds: List<ByteArray>? = null,
+        haveIds: List<ByteArray>? = null,
+    ): List<Any?> = listOf(wantIds, haveIds)
 }
 
 /**
  * LXMF Proof-of-Work Stamper (LXStamper): ochrana propagation uzlů proti spamu.
  */
 object LxmfStamper {
-    const val DEFAULT_WORKBLOCK_ROUNDS = 256
+    const val DEFAULT_WORKBLOCK_ROUNDS = 3000
+    const val PN_WORKBLOCK_ROUNDS = 1000
+    const val PEERING_WORKBLOCK_ROUNDS = 25
+    const val STAMP_SIZE = 32
+
+    fun transientId(destPlusEncrypted: ByteArray): ByteArray =
+        MessageDigest.getInstance("SHA-256").digest(destPlusEncrypted)
 
     fun workblock(material: ByteArray, expandRounds: Int = DEFAULT_WORKBLOCK_ROUNDS): ByteArray {
         val out = ByteArray(expandRounds * 256)
@@ -236,13 +271,15 @@ object LxmfStamper {
         material: ByteArray,
         targetCost: Int,
         expandRounds: Int = DEFAULT_WORKBLOCK_ROUNDS,
-        maxAttempts: Int = 500_000,
+        maxAttempts: Int = 1_000_000,
+        isCancelled: () -> Boolean = { false },
     ): ByteArray? {
-        if (targetCost <= 0) return ByteArray(32).also { SecureRandom().nextBytes(it) }
+        if (targetCost <= 0) return ByteArray(STAMP_SIZE).also { SecureRandom().nextBytes(it) }
         val wb = workblock(material, expandRounds)
         val rng = SecureRandom()
-        val candidate = ByteArray(32)
-        repeat(maxAttempts) {
+        val candidate = ByteArray(STAMP_SIZE)
+        repeat(maxAttempts) { attempt ->
+            if ((attempt and 0x3FF) == 0 && isCancelled()) return null
             rng.nextBytes(candidate)
             if (stampValue(wb, candidate) >= targetCost) {
                 return candidate.copyOf()

@@ -76,4 +76,88 @@ class FitImporterTest {
         assertIs<FitResult.Invalid>(FitImporter.parse(good.copyOf(good.size - 7)))
         assertIs<FitResult.Invalid>(FitImporter.parse(ByteArray(FitImporter.MAX_BYTES + 1)))
     }
+
+    @Test fun `HLT-1 HLT-4 D3 D5 stepLength is not perfCondition, cadence is unified spm, verticalOscillation always mm to cm`() {
+        val f = java.io.File.createTempFile("pulse4-truth", ".fit")
+        try {
+            val enc = FileEncoder(f, Fit.ProtocolVersion.V2_0)
+            enc.write(FileIdMesg().apply { type = File.ACTIVITY; manufacturer = Manufacturer.GARMIN; product = 1; serialNumber = 123L; timeCreated = DateTime(t0) })
+            enc.write(RecordMesg().apply {
+                timestamp = DateTime(t0)
+                cadence = 86.toShort() // 86 strides/min -> 172 spm
+                stepLength = 1050f // mm -> 1.05 m (field 85!)
+                verticalOscillation = 20f // 20 mm -> 2.0 cm (not 20 cm!)
+            })
+            enc.write(LapMesg().apply {
+                startTime = DateTime(t0)
+                totalElapsedTime = 120f
+                totalTimerTime = 90f // 30s pauza
+                avgCadence = 86.toShort() // bez m.sport -> musí zdvojnásobit podle session RUNNING
+            })
+            enc.write(SessionMesg().apply {
+                startTime = DateTime(t0)
+                sport = com.garmin.fit.Sport.RUNNING
+                totalElapsedTime = 120f
+                totalTimerTime = 90f
+                avgCadence = 86.toShort()
+                totalStrides = 100L
+            })
+            enc.close()
+            val r = assertIs<FitResult.Ok>(FitImporter.parse(f.readBytes())).parsed
+            val pt = r.points.single()
+            assertNull(pt.performanceCondition)
+            assertNull(pt.staminaPct)
+            assertNull(pt.staminaPotentialPct)
+            assertEquals(1.05, assertNotNull(pt.strideLengthM), 1e-3)
+            assertEquals(2.0, assertNotNull(pt.verticalOscillationCm), 1e-3)
+            assertEquals(172, pt.cadence)
+            assertEquals(172.0, assertNotNull(r.avgCadence), 1e-3)
+            assertEquals(172.0, assertNotNull(r.laps.single().avgCadence), 1e-3)
+            assertEquals(120_000L, r.laps.single().endMs - r.laps.single().startMs)
+            assertEquals(200, r.steps)
+        } finally { f.delete() }
+    }
+
+    @Test fun `D3 cycling does not double cadence or compute steps`() {
+        val f = java.io.File.createTempFile("pulse4-bike", ".fit")
+        try {
+            val enc = FileEncoder(f, Fit.ProtocolVersion.V2_0)
+            enc.write(FileIdMesg().apply { type = File.ACTIVITY; manufacturer = Manufacturer.GARMIN; product = 1; serialNumber = 123L; timeCreated = DateTime(t0) })
+            enc.write(RecordMesg().apply {
+                timestamp = DateTime(t0)
+                cadence = 85.toShort()
+            })
+            enc.write(SessionMesg().apply {
+                startTime = DateTime(t0)
+                sport = com.garmin.fit.Sport.CYCLING
+                totalElapsedTime = 60f
+                avgCadence = 85.toShort()
+                totalStrides = 50L
+            })
+            enc.close()
+            val r = assertIs<FitResult.Ok>(FitImporter.parse(f.readBytes())).parsed
+            assertEquals(85, r.points.single().cadence)
+            assertEquals(85.0, assertNotNull(r.avgCadence), 1e-3)
+            assertNull(r.steps)
+        } finally { f.delete() }
+    }
+
+    @Test fun `HLT-10 multisport FIT keeps all sessions`() {
+        val f = java.io.File.createTempFile("pulse4-multi", ".fit")
+        try {
+            val enc = FileEncoder(f, Fit.ProtocolVersion.V2_0)
+            enc.write(FileIdMesg().apply { type = File.ACTIVITY; manufacturer = Manufacturer.GARMIN; product = 1; serialNumber = 123L; timeCreated = DateTime(t0) })
+            enc.write(RecordMesg().apply { timestamp = DateTime(t0); cadence = 80.toShort() })
+            enc.write(SessionMesg().apply { startTime = DateTime(t0); sport = com.garmin.fit.Sport.CYCLING; totalElapsedTime = 60f; avgCadence = 80.toShort() })
+            enc.write(RecordMesg().apply { timestamp = DateTime(t0 + 100); cadence = 90.toShort() })
+            enc.write(SessionMesg().apply { startTime = DateTime(t0 + 100); sport = com.garmin.fit.Sport.RUNNING; totalElapsedTime = 60f; avgCadence = 90.toShort() })
+            enc.close()
+            val ok = assertIs<FitResult.Ok>(FitImporter.parse(f.readBytes()))
+            assertEquals(2, ok.sessions.size)
+            assertEquals(Sport.CYCLING, ok.sessions[0].sport)
+            assertEquals(80, ok.sessions[0].points.single().cadence)
+            assertEquals(Sport.RUNNING, ok.sessions[1].sport)
+            assertEquals(180, ok.sessions[1].points.single().cadence)
+        } finally { f.delete() }
+    }
 }

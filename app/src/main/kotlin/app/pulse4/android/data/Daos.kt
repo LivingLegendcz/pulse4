@@ -127,6 +127,9 @@ interface InboxDao {
     @Query("SELECT * FROM received_object WHERE objectType = :t ORDER BY objectId DESC") fun objectsNow(t: String): List<ReceivedRow>
     @Query("SELECT * FROM received_object WHERE author = :a AND objectType = :t") fun objectsOf(a: String, t: String): Flow<List<ReceivedRow>>
     @Query("SELECT * FROM sent_projection WHERE recipient = :r AND objectKey = :k") fun sent(r: String, k: String): SentRow?
+    @Query("SELECT * FROM sent_projection") fun allSentNow(): List<SentRow>
+    @Query("SELECT * FROM received_object") fun allReceivedNow(): List<ReceivedRow>
+    @Query("UPDATE receipt SET author = :newAuthor WHERE author = :oldAuthor") fun updateReceiptAuthor(oldAuthor: String, newAuthor: String)
     @Insert(onConflict = OnConflictStrategy.REPLACE) fun putSent(row: SentRow)
     @Query("DELETE FROM sent_projection WHERE recipient = :r AND objectKey = :k") fun deleteSent(r: String, k: String)
     @Query("DELETE FROM received_object WHERE author = :a") fun removeAllFrom(a: String)
@@ -146,6 +149,7 @@ interface PlanDao {
     @Query("SELECT * FROM plan_revision WHERE planId = :id ORDER BY revision DESC LIMIT 1") fun headFlow(id: String): Flow<PlanRevisionRow?>
     @Insert(onConflict = OnConflictStrategy.REPLACE) fun putProposal(row: ProposalRow)
     @Query("SELECT * FROM proposal WHERE id = :id") fun proposal(id: String): ProposalRow?
+    @Query("SELECT * FROM proposal") fun allProposalsNow(): List<ProposalRow>
     @Query("SELECT * FROM proposal WHERE status IN ('PENDING','CONFLICT') ORDER BY id") fun openProposals(): Flow<List<ProposalRow>>
     @Insert(onConflict = OnConflictStrategy.REPLACE) fun putExport(row: ExportRow)
     @Query("SELECT * FROM export_record WHERE planId = :planId") fun exports(planId: String): List<ExportRow>
@@ -160,6 +164,7 @@ interface SettingDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE) fun put(row: SettingRow)
     @Query("SELECT value FROM setting WHERE `key` = :key") fun get(key: String): String?
     @Query("SELECT * FROM setting") fun all(): Flow<List<SettingRow>>
+    @Query("SELECT * FROM setting") fun allNow(): List<SettingRow>
 }
 
 @Dao

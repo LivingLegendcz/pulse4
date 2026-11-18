@@ -5,8 +5,11 @@ import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.security.keystore.StrongBoxUnavailableException
+import app.pulse4.domain.PLog
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
+import java.security.GeneralSecurityException
 import java.security.KeyStore
 import java.security.SecureRandom
 import javax.crypto.Cipher
@@ -100,7 +103,21 @@ class SecretStore(context: Context, private val vault: KeyVault) {
     fun get(name: String): ByteArray? {
         val f = file(name)
         if (!f.exists()) return null
-        return vault.open(f.readBytes())
+        if (name in CRITICAL_SECRETS) {
+            return vault.open(f.readBytes())
+        }
+        return try {
+            vault.open(f.readBytes())
+        } catch (e: GeneralSecurityException) {
+            PLog.w("SecretStore", e) { "Poškozené ne-kritické tajemství '$name', vracím null" }
+            null
+        } catch (e: IllegalArgumentException) {
+            PLog.w("SecretStore", e) { "Neplatný formát tajemství '$name', vracím null" }
+            null
+        } catch (e: IOException) {
+            PLog.w("SecretStore", e) { "Chyba čtení tajemství '$name', vracím null" }
+            null
+        }
     }
 
     fun putString(name: String, value: String) = put(name, value.toByteArray(Charsets.UTF_8))
@@ -113,5 +130,6 @@ class SecretStore(context: Context, private val vault: KeyVault) {
         const val GARMIN_API_KEY_EXPIRES = "garmin.apikey.expires"
         const val GARMIN_EXT_TOKENS = "garmin.ext.tokens"
         const val RETICULUM_IDENTITY = "reticulum.identity"
+        private val CRITICAL_SECRETS = setOf(RETICULUM_IDENTITY)
     }
 }

@@ -1,5 +1,6 @@
 package app.pulse4.android.di
 
+import app.pulse4.domain.PLog
 import app.pulse4.sync.Wire
 import app.pulse4.withings.WITHINGS_WEB_APPLIVER
 import app.pulse4.withings.WithingsUserProfile
@@ -311,7 +312,7 @@ class WithingsDirectAuth(
                     lastStatus = res.code
                     val finalHttpUrl = res.request.url
                     if (finalHttpUrl.host.equals("app.withings.com", ignoreCase = true) || cookieJar.hasSession()) {
-                        android.util.Log.i("WithingsDirectAuth", "trySilentSsoRefresh: SSO redirect succeeded via $u")
+                        PLog.i("WithingsDirectAuth") { "trySilentSsoRefresh: SSO redirect succeeded via $u" }
                         val fin = finishLogin()
                         if (fin is WithingsLoginResult.Ok) return fin
                     }
@@ -323,10 +324,10 @@ class WithingsDirectAuth(
                 else -> WithingsLoginResult.Error("Tiché SSO obnovení nevyústilo v aktivní relaci.", WithingsAuthFailureKind.OTHER)
             }
         } catch (e: IOException) {
-            android.util.Log.w("WithingsDirectAuth", "trySilentSsoRefresh network exception: ${e.message}")
+            PLog.w("WithingsDirectAuth", e) { "trySilentSsoRefresh network exception: ${e.message}" }
             WithingsLoginResult.Error(e.message ?: "Chyba sítě při tichém obnovení relace.", WithingsAuthFailureKind.NETWORK)
         } catch (e: Exception) {
-            android.util.Log.w("WithingsDirectAuth", "trySilentSsoRefresh exception: ${e.message}")
+            PLog.w("WithingsDirectAuth", e) { "trySilentSsoRefresh exception: ${e.message}" }
             WithingsLoginResult.Error(e.message ?: "Chyba při tichém obnovení relace.", WithingsAuthFailureKind.OTHER)
         }
     }
@@ -465,7 +466,7 @@ class WithingsDirectAuth(
         cookieJar.clearSessionAndWorkflowCookies()
         val em = email.trim()
         pendingEmail = em
-        android.util.Log.i("WithingsDirectAuth", "loginPassword starting")
+        PLog.i("WithingsDirectAuth") { "loginPassword starting" }
 
         return try {
             val loginUrl = "https://account.withings.com/new_workflow/login?r=https%3A%2F%2Fapp.withings.com%2F"
@@ -477,7 +478,7 @@ class WithingsDirectAuth(
                 .build()
             client.newCall(req1).execute().use { res1 ->
                 if (isLoggedInUrl(res1.request.url)) {
-                    android.util.Log.i("WithingsDirectAuth", "loginPassword: req1 SSO already succeeded")
+                    PLog.i("WithingsDirectAuth") { "loginPassword: req1 SSO already succeeded" }
                     val fin = finishLogin()
                     if (fin is WithingsLoginResult.Ok) return fin
                 }
@@ -517,7 +518,7 @@ class WithingsDirectAuth(
             val finalUrl = finalHttpUrl.toString()
             res3.close()
 
-            android.util.Log.i("WithingsDirectAuth", "loginPassword POST response: status=$statusCode, finalUrl=$finalUrl, hasSession=${cookieJar.hasSession()}")
+            PLog.i("WithingsDirectAuth") { "loginPassword POST response: status=$statusCode, finalUrl=$finalUrl, hasSession=${cookieJar.hasSession()}" }
 
             if (isLoggedInUrl(finalHttpUrl)) {
                 return finishLogin()
@@ -537,15 +538,15 @@ class WithingsDirectAuth(
                 }
                 lastHiddenFields = parseHiddenInputs(bodyText)
                 isAwaitingCode = true
-                android.util.Log.i("WithingsDirectAuth", "loginPassword requires 2FA: lastMfaUrl=$lastMfaUrl")
+                PLog.i("WithingsDirectAuth") { "loginPassword requires 2FA: lastMfaUrl=$lastMfaUrl" }
                 return classified
             }
             classified
         } catch (e: IOException) {
-            android.util.Log.w("WithingsDirectAuth", "loginPassword network exception", e)
+            PLog.w("WithingsDirectAuth", e) { "loginPassword network exception" }
             WithingsLoginResult.Error("Nepodařilo se spojit se serverem Withings. Zkontrolujte připojení a zkuste to znovu.", WithingsAuthFailureKind.NETWORK)
         } catch (e: Exception) {
-            android.util.Log.e("WithingsDirectAuth", "loginPassword exception", e)
+            PLog.e("WithingsDirectAuth", e) { "loginPassword exception" }
             WithingsLoginResult.Error("Přihlášení se nezdařilo. Zkuste to prosím znovu.", WithingsAuthFailureKind.OTHER)
         }
     }
@@ -712,10 +713,10 @@ class WithingsDirectAuth(
 
         val cookies = cookieJar.getCookieString()
         val sessionToken = cookieJar.getSessionToken()
-        android.util.Log.i("WithingsDirectAuth", "finishLogin: cookies=[${cookieJar.describe()}], hasSessionToken=${sessionToken != null}")
+        PLog.i("WithingsDirectAuth") { "finishLogin: cookies=[${cookieJar.describe()}], hasSessionToken=${sessionToken != null}" }
         return try {
             val profiles = webClient.getUsersList(cookies, sessionToken)
-            android.util.Log.i("WithingsDirectAuth", "finishLogin: fetched ${profiles.size} profiles")
+            PLog.i("WithingsDirectAuth") { "finishLogin: fetched ${profiles.size} profiles" }
             if (profiles.isEmpty()) {
                 WithingsLoginResult.Error("Přihlášeno k Withings, ale nebyl nalezen žádný profil.")
             } else {
@@ -739,10 +740,10 @@ class WithingsDirectAuth(
                 WithingsLoginResult.Ok(session, profiles)
             }
         } catch (e: IOException) {
-            android.util.Log.w("WithingsDirectAuth", "finishLogin network exception", e)
+            PLog.w("WithingsDirectAuth", e) { "finishLogin network exception" }
             WithingsLoginResult.Error("Nepodařilo se spojit se serverem Withings. Zkontrolujte připojení a zkuste to znovu.", WithingsAuthFailureKind.NETWORK)
         } catch (e: Exception) {
-            android.util.Log.e("WithingsDirectAuth", "finishLogin exception", e)
+            PLog.e("WithingsDirectAuth", e) { "finishLogin exception" }
             WithingsLoginResult.Error("Chyba při načtení profilů účtu Withings.", WithingsAuthFailureKind.OTHER)
         }
     }

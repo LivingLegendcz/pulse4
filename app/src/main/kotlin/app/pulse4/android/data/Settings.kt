@@ -68,7 +68,7 @@ class Settings(private val db: AppDatabase) {
     private val missingKeys = ConcurrentHashMap.newKeySet<String>()
     @Volatile private var warmedUp = false
 
-    private fun getRaw(k: String): String? {
+    internal fun getRaw(k: String): String? {
         cache[k]?.let { return it }
         if (warmedUp || missingKeys.contains(k)) return null
         val v = db.settings().get(k)
@@ -81,7 +81,7 @@ class Settings(private val db: AppDatabase) {
     }
 
     private fun get(k: String, d: String) = getRaw(k) ?: d
-    private fun put(k: String, v: String) {
+    internal fun put(k: String, v: String) {
         cache[k] = v
         missingKeys.remove(k)
         db.settings().put(SettingRow(k, v))
@@ -209,6 +209,7 @@ class Settings(private val db: AppDatabase) {
 
     // --- Withings ---
     var withingsDirectEnabled: Boolean get() = get("withingsDirect", "true").toBoolean(); set(v) = put("withingsDirect", v.toString())
+    var withingsOAuthEnabled: Boolean get() = get("withingsOAuth", "false").toBoolean(); set(v) = put("withingsOAuth", v.toString())
     var withingsClientId: String get() = get("withingsClientId", ""); set(v) = put("withingsClientId", v.trim())
     /** Pojmenování aktivního profilu ve Withings (např. "Hlavní profil (Já)" nebo "Dětský profil – Honzík"). */
     var withingsProfileLabel: String get() = get("withingsProfileLabel", "Hlavní profil (Já)"); set(v) = put("withingsProfileLabel", v.trim())
@@ -225,7 +226,7 @@ class Settings(private val db: AppDatabase) {
     var childWeightMinKg: Double get() = get("childWeightMinKg", "12.0").toDoubleOrNull() ?: 12.0; set(v) = put("childWeightMinKg", v.toString())
     var childWeightMaxKg: Double get() = get("childWeightMaxKg", "45.0").toDoubleOrNull() ?: 45.0; set(v) = put("childWeightMaxKg", v.toString())
     /** Na telefonu dítěte: přijímat vlastní váhu přeposlanou z účtu Withings rodiče přímo do mých osobních metrik. */
-    var acceptWeightFromParent: Boolean get() = get("acceptWeightFromParent", "true").toBoolean(); set(v) = put("acceptWeightFromParent", v.toString())
+    var acceptWeightFromParent: Boolean get() = get("acceptWeightFromParent", "false").toBoolean(); set(v) = put("acceptWeightFromParent", v.toString())
 
     var healthConnectEnabled: Boolean get() = get("healthConnect", "false").toBoolean(); set(v) = put("healthConnect", v.toString())
     /** Balíčky aplikací, jejichž záznamy z Health Connect přijímáme (výchozí: aplikace Withings). Prázdné = všechny. */

@@ -593,10 +593,38 @@ fun TodayScreen(
     val states by sl.db.areaStates().all().collectAsState(initial = emptyList())
     val units by sl.settings.unitSystemFlow.collectAsState()
     val recentActs by sl.db.activities().recentSummaries(1).collectAsState(initial = emptyList())
+    val currentDateKey = LocalDate.now(ZoneId.of(sl.settings.zoneId)).toString()
+    val importWorkInfos by androidx.work.WorkManager.getInstance(ctx)
+        .getWorkInfosForUniqueWorkFlow("import-now")
+        .collectAsState(initial = emptyList())
+    var syncTriggeredAtMs by remember { mutableStateOf<Long?>(null) }
+    val isWorkRunning = importWorkInfos.any {
+        it.state == androidx.work.WorkInfo.State.RUNNING || it.state == androidx.work.WorkInfo.State.ENQUEUED
+    }
+    LaunchedEffect(isWorkRunning, importWorkInfos, states) {
+        val triggeredAt = syncTriggeredAtMs ?: return@LaunchedEffect
+        if (!isWorkRunning) {
+            val latestWork = importWorkInfos.firstOrNull()
+            when (latestWork?.state) {
+                androidx.work.WorkInfo.State.FAILED, androidx.work.WorkInfo.State.CANCELLED -> {
+                    syncing = false
+                    syncTriggeredAtMs = null
+                    syncMessage = "Synchronizace selhala."
+                }
+                androidx.work.WorkInfo.State.SUCCEEDED -> {
+                    syncing = false
+                    syncTriggeredAtMs = null
+                    val recentError = states.firstOrNull { (it.lastAttemptMs ?: 0L) >= triggeredAt && !it.lastError.isNullOrBlank() }?.lastError
+                    syncMessage = if (recentError != null) "Synchronizace s chybou: $recentError" else "Synchronizace dokončena."
+                }
+                else -> Unit
+            }
+        }
+    }
 
     val dashboardData by produceState<TodayDashboardBundle?>(
         initialValue = ScreenMemoryCache.todayDashboard,
-        key1 = Triple(states.map { it.area to it.lastSuccessMs }, bgWindowDays, units)
+        key1 = listOf(states.map { it.area to it.lastSuccessMs }, bgWindowDays, units, currentDateKey)
     ) {
         val result = withContext(Dispatchers.IO) {
             val today = LocalDate.now(ZoneId.of(sl.settings.zoneId))
@@ -722,12 +750,8 @@ fun TodayScreen(
                         .background(Color(0xFF0C1523))
                         .border(BorderStroke(1.dp, Color(0xFF2DD4BF).copy(alpha = 0.35f)), CircleShape)
                         .clickable {
-                            scope.launch {
-                                withContext(Dispatchers.IO) {
-                                    sl.importService.seedDemoData(System.currentTimeMillis())
-                                }
-                                syncMessage = "Ukázková data Garmin & Withings nahrána."
-                            }
+                            ctx.sendBroadcast(android.content.Intent("app.pulse4.debug.SEED_DEMO").setPackage(ctx.packageName))
+                            syncMessage = "Požadavek na ukázková data odeslán."
                         },
                     contentAlignment = Alignment.Center
                 ) {
@@ -764,15 +788,11 @@ fun TodayScreen(
                         .clip(RoundedCornerShape(18.dp))
                         .background(Color(0xFF0E1B2C))
                         .border(BorderStroke(1.dp, Color(0xFF2DD4BF).copy(alpha = 0.45f)), RoundedCornerShape(18.dp))
-                        .clickable(enabled = !syncing) {
+                        .clickable(enabled = !syncing && !isWorkRunning) {
                             syncing = true
+                            syncTriggeredAtMs = System.currentTimeMillis()
                             syncMessage = null
                             app.pulse4.android.work.Scheduler.importNow(ctx)
-                            scope.launch {
-                                kotlinx.coroutines.delay(2500)
-                                syncing = false
-                                syncMessage = "Synchronizace dokončena."
-                            }
                         }
                         .padding(horizontal = 12.dp),
                     contentAlignment = Alignment.Center
@@ -786,7 +806,7 @@ fun TodayScreen(
                         )
                         Spacer(Modifier.width(5.dp))
                         Text(
-                            if (syncing) "…" else "Sync",
+                            if (syncing || isWorkRunning) "…" else "Sync",
                             style = MaterialTheme.typography.labelMedium.copy(
                                 fontFamily = app.pulse4.android.ui.theme.JetBrainsMonoFamily
                             ),
@@ -1236,15 +1256,28 @@ fun TodayScreen(
                         val isEcgToday = latestEcg.localDate == today.toString()
                         val ecgDet = parseEcgOrigin(latestEcg.origin, latestEcg.value)
                         val ecgStatusBadge = when (ecgDet.afibClassification) {
-                            0 -> "Sinusový rytmus"
+                            0 -> "AFib nezjištěna"
                             1 -> "AFib detekována"
                             2 -> "Neprůkazný záznam"
                             else -> if (isEcgToday) "Dnes" else "Starší (${latestEcg.localDate?.takeLast(5) ?: fmt.time(latestEcg.startUtcMs)})"
                         }
-                        val ecgValFormatted = if (latestEcg.value >= 200.0) {
-                            "${fmt.number(latestEcg.value, 0)} ms QTc" + (ecgDet.heartRate?.let { " · $it bpm" } ?: "")
-                        } else {
-                            "${fmt.number(latestEcg.value, 0)} bpm"
+                        val ecgValFormatted = when (latestEcg.type.name) {
+                            "ECG_HR" -> "${fmt.number(latestEcg.value, 0)} bpm"
+                            "ECG_QTC" -> "${fmt.number(latestEcg.value, 0)} ms QTc"
+                            "ECG_QRS" -> "${fmt.number(latestEcg.value, 0)} ms QRS"
+                            "ECG_AFIB" -> when (latestEcg.value.toInt()) {
+                                0 -> "AFib nezjištěna"
+                                1 -> "AFib detekována"
+                                2 -> "Neprůkazný"
+                                else -> "Neznámý"
+                            }
+                            else -> {
+                                val parts = buildList {
+                                    ecgDet.heartRate?.let { add("$it bpm") }
+                                    ecgDet.qtcMs?.let { add("$it ms QTc") }
+                                }
+                                if (parts.isNotEmpty()) parts.joinToString(" · ") else fmt.number(latestEcg.value, 0)
+                            }
                         }
                         val ecgReading: Reading<String> = Reading.Value(
                             ecgValFormatted,
@@ -1358,9 +1391,10 @@ fun MetricInfoPopupDialog(
                         }
                         Spacer(Modifier.height(4.dp))
                         Text(
-                            when (type) {
-                                MetricType.ECG -> "Normální nález: Pravidelný sinusový rytmus bez arytmie. Hraniční QTc: >450 ms (muži) / >460 ms (ženy)."
-                                MetricType.VISCERAL_FAT -> "Withings Body Scan desetinná bioimpedance: 0,0–2,9 (normální zdravá úroveň), 3,0–6,9 (mírně zvýšená), 7,0+ (vysoké kardiovaskulární riziko)."
+                            when (type.name) {
+                                "ECG", "ECG_HR", "ECG_QTC", "ECG_QRS", "ECG_AFIB" -> "Klasifikace přístroje Withings (AFib nezjištěna / AFib detekována / Neprůkazný záznam). Orientační prahy QTc: >450 ms (muži) / >460 ms (ženy). Není lékařská diagnóza."
+                                "VISCERAL_FAT" -> "Index viscerálního tuku (bioimpedance Withings Body Scan): 0,0–2,9 (nízká úroveň), 3,0–6,9 (zvýšená), 7,0+ (vysoká úroveň dle výrobce Withings). Není lékařská diagnóza."
+                                else -> when (type) {
                                 MetricType.HRV -> "rMSSD v milisekundách. Hodnoceno vůči vašemu osobnímu 7dennímu a 28dennímu pásmu (vyvážený / nevyvážený stav)."
                                 MetricType.RESTING_HEART_RATE -> "Klidový tep v bpm zaznamenaný během nejhlubší fáze spánku. Stabilní či klesající trend značí dobrou kardio kondici."
                                 MetricType.SLEEP_DURATION -> "Doporučené rozmezí pro dospělého sportovce je 7 až 9 hodin kvalitního spánku za noc."
@@ -1375,6 +1409,7 @@ fun MetricInfoPopupDialog(
                                 MetricType.BMR -> "Klidový energetický výdej v kcal bez započtení fyzické aktivity. Závisí přímo na množství svalové tkáně."
                                 MetricType.SPO2 -> "Nasycení krve kyslíkem v %. Normální hodnoty jsou 95–100 %."
                                 else -> "Jednotka: ${cfg.unit.ifBlank { "bezrozměrná" }}. Sledováno v kontextu dlouhodobých trendů a osobního optima."
+                            }
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = Color(0xFF94A3B8)
@@ -1489,8 +1524,19 @@ private fun formatMetricValue(type: MetricType, v: Double): String {
         MetricType.PULSE_WAVE_VELOCITY -> "${fmt.number(v, 1)} m/s"
         MetricType.BMR -> "${fmt.number(v, 0)} kcal"
         MetricType.RESPIRATION -> "${fmt.number(v, 1)} brpm"
-        MetricType.ECG -> if (v >= 200.0) "${fmt.number(v, 0)} ms (QTc)" else "${fmt.number(v, 0)} bpm"
-        else -> "${fmt.number(v, 1)} ${cfg.unit}"
+        else -> when (type.name) {
+            "ECG_HR" -> "${fmt.number(v, 0)} bpm"
+            "ECG_QTC" -> "${fmt.number(v, 0)} ms (QTc)"
+            "ECG_QRS" -> "${fmt.number(v, 0)} ms (QRS)"
+            "ECG_AFIB" -> when (v.toInt()) {
+                0 -> "AFib nezjištěna"
+                1 -> "AFib detekována"
+                2 -> "Neprůkazný"
+                else -> "Neznámý"
+            }
+            "ECG" -> fmt.number(v, 0)
+            else -> "${fmt.number(v, 1)} ${cfg.unit}"
+        }
     }
 }
 
@@ -1511,15 +1557,15 @@ fun convertBodyCompValue(
     refWeightKg: Double?,
     mode: BodyUnitMode,
 ): Double {
-    val w = (refWeightKg ?: 90.0).takeIf { it in 25.0..250.0 } ?: 90.0
+    val w = refWeightKg?.takeIf { it in 25.0..250.0 }
     return when (mode) {
         BodyUnitMode.KG -> when (type) {
             MetricType.WEIGHT, MetricType.MUSCLE_MASS, MetricType.FAT_FREE_MASS, MetricType.BONE_MASS -> fmt.convertWeight(rawVal)
-            MetricType.BODY_FAT, MetricType.BODY_WATER -> fmt.convertWeight(w * (rawVal / 100.0))
+            MetricType.BODY_FAT, MetricType.BODY_WATER -> if (w != null) fmt.convertWeight(w * (rawVal / 100.0)) else rawVal
             else -> rawVal
         }
         BodyUnitMode.PERCENT -> when (type) {
-            MetricType.MUSCLE_MASS, MetricType.FAT_FREE_MASS, MetricType.BONE_MASS -> (rawVal / w) * 100.0
+            MetricType.MUSCLE_MASS, MetricType.FAT_FREE_MASS, MetricType.BONE_MASS -> if (w != null) (rawVal / w) * 100.0 else rawVal
             MetricType.BODY_FAT, MetricType.BODY_WATER -> rawVal
             MetricType.WEIGHT -> fmt.convertWeight(rawVal)
             else -> rawVal
@@ -1544,9 +1590,13 @@ fun formatBodyCompValue(
 ): String {
     if (type == MetricType.WEIGHT) return fmt.weight(rawVal)
     if (!isConvertibleBodyCompMetric(type)) return formatMetricValue(type, rawVal)
-    val w = (refWeightKg ?: 90.0).takeIf { it in 25.0..250.0 } ?: 90.0
-    val kgVal = if (type in setOf(MetricType.BODY_FAT, MetricType.BODY_WATER)) w * (rawVal / 100.0) else rawVal
-    val pctVal = if (type in setOf(MetricType.BODY_FAT, MetricType.BODY_WATER)) rawVal else (rawVal / w) * 100.0
+    val w = refWeightKg?.takeIf { it in 25.0..250.0 }
+    val isPctNative = type in setOf(MetricType.BODY_FAT, MetricType.BODY_WATER)
+    if (w == null) {
+        return if (isPctNative) "${fmt.number(rawVal, 1)} %" else fmt.weight(rawVal)
+    }
+    val kgVal = if (isPctNative) w * (rawVal / 100.0) else rawVal
+    val pctVal = if (isPctNative) rawVal else (rawVal / w) * 100.0
     val kgStr = fmt.weight(kgVal)
     val pctStr = "${fmt.number(pctVal, 1)} %"
     return if (includeSecondary) {
@@ -1619,15 +1669,17 @@ fun BodyCompositionStackedBar(
     onUnitModeChange: (BodyUnitMode) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val w = (weightKg ?: 93.10).takeIf { it in 25.0..250.0 } ?: 93.10
-    val mKg = muscleKg ?: (w * 0.75)
-    val fPct = fatPct ?: 20.9
-    val fKg = w * (fPct / 100.0)
-    val bKg = boneKg ?: (w * 0.038)
-    val sumKg = (mKg + fKg + bKg).coerceAtLeast(1.0)
-    val mShare = (mKg / sumKg).toFloat().coerceIn(0.10f, 0.85f)
-    val fShare = (fKg / sumKg).toFloat().coerceIn(0.08f, 0.60f)
-    val bShare = (1f - mShare - fShare).coerceAtLeast(0.04f)
+    // HLT-3: Skrýt segmenty bez měření; bez váhy žádná konverze kg <-> %
+    val w = weightKg?.takeIf { it in 25.0..250.0 }
+    val mKg = muscleKg?.takeIf { it > 0.0 }
+    val fPct = fatPct?.takeIf { it in 0.0..80.0 }
+    val fKg = if (w != null && fPct != null) w * (fPct / 100.0) else null
+    val bKg = boneKg?.takeIf { it > 0.0 }
+    if (mKg == null && fPct == null && bKg == null) return
+    val sumKg = listOfNotNull(mKg, fKg, bKg).sum()
+    val mShare = if (mKg != null && sumKg > 0.0) (mKg / sumKg).toFloat().coerceAtLeast(0.05f) else 0f
+    val fShare = if (fKg != null && sumKg > 0.0) (fKg / sumKg).toFloat().coerceAtLeast(0.05f) else 0f
+    val bShare = if (bKg != null && sumKg > 0.0) (bKg / sumKg).toFloat().coerceAtLeast(0.04f) else 0f
 
     Card(
         modifier = modifier.fillMaxWidth().padding(vertical = 4.dp),
@@ -1705,27 +1757,49 @@ fun BodyCompositionStackedBar(
                     )
                 }
 
-                // Skládaný pruh složení těla (Svaly + Tuk + Kosti = Celková váha)
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .height(16.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                ) {
-                    Box(Modifier.weight(mShare).fillMaxSize().background(Color(0xFF10B981)))
-                    Spacer(Modifier.width(2.dp))
-                    Box(Modifier.weight(fShare).fillMaxSize().background(Color(0xFFF59E0B)))
-                    Spacer(Modifier.width(2.dp))
-                    Box(Modifier.weight(bShare).fillMaxSize().background(Color(0xFF38BDF8)))
+                // Skládaný pruh složení těla (jen naměřené složky)
+                if (sumKg > 0.0) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .height(16.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                    ) {
+                        if (mShare > 0f) {
+                            Box(Modifier.weight(mShare).fillMaxSize().background(Color(0xFF10B981)))
+                        }
+                        if (fShare > 0f) {
+                            if (mShare > 0f) Spacer(Modifier.width(2.dp))
+                            Box(Modifier.weight(fShare).fillMaxSize().background(Color(0xFFF59E0B)))
+                        }
+                        if (bShare > 0f) {
+                            if (mShare > 0f || fShare > 0f) Spacer(Modifier.width(2.dp))
+                            Box(Modifier.weight(bShare).fillMaxSize().background(Color(0xFF38BDF8)))
+                        }
+                    }
                 }
 
                 Row(
                     Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    val mText = if (unitMode == BodyUnitMode.KG) fmt.weight(mKg) else "${fmt.number((mKg / w) * 100.0, 1)} %"
-                    val fText = if (unitMode == BodyUnitMode.KG) fmt.weight(fKg) else "${fmt.number(fPct, 1)} %"
-                    val bText = if (unitMode == BodyUnitMode.KG) fmt.weight(bKg) else "${fmt.number((bKg / w) * 100.0, 1)} %"
+                    val mText = when {
+                        mKg == null -> "—"
+                        unitMode == BodyUnitMode.KG -> fmt.weight(mKg)
+                        w != null -> "${fmt.number((mKg / w) * 100.0, 1)} %"
+                        else -> fmt.weight(mKg)
+                    }
+                    val fText = when {
+                        fPct == null -> "—"
+                        unitMode == BodyUnitMode.KG -> if (fKg != null) fmt.weight(fKg) else "${fmt.number(fPct, 1)} %"
+                        else -> "${fmt.number(fPct, 1)} %"
+                    }
+                    val bText = when {
+                        bKg == null -> "—"
+                        unitMode == BodyUnitMode.KG -> fmt.weight(bKg)
+                        w != null -> "${fmt.number((bKg / w) * 100.0, 1)} %"
+                        else -> fmt.weight(bKg)
+                    }
                     Column {
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                             Icon(PulseIcons.Muscle, contentDescription = null, tint = Color(0xFF10B981), modifier = Modifier.size(13.dp))
@@ -2226,8 +2300,13 @@ fun DedicatedMetricDetailScreen(
 
         val refWeightKg = (if (type == MetricType.WEIGHT) latestObs?.value else null)
             ?: sl.db.observations().latest(MetricType.WEIGHT.name)?.value?.takeIf { it in 25.0..250.0 }
-            ?: 93.10
         val isBodyComp = isConvertibleBodyCompMetric(type) || type == MetricType.WEIGHT
+        val weightsByDate = if (isBodyComp) {
+            sl.db.observations().forTypeInRange(MetricType.WEIGHT.name, fromDate, toDate)
+                .filter { !it.deleted && it.localDate != null && it.value in 25.0..250.0 }
+                .groupBy { it.localDate!! }
+                .mapValues { (_, list) -> list.maxByOrNull { it.startUtcMs }!!.value }
+        } else emptyMap()
         val latestMuscleKg = if (isBodyComp) {
             sl.db.observations().latest(MetricType.MUSCLE_MASS.name)?.value
         } else null
@@ -2249,6 +2328,7 @@ fun DedicatedMetricDetailScreen(
             sleepDetailsByDate = sleepDetailsByDate,
             suspectWeights = suspectWeights,
             refWeightKg = refWeightKg,
+            weightsByDate = weightsByDate,
             latestMuscleKg = latestMuscleKg,
             latestFatPct = latestFatPct,
             latestBoneKg = latestBoneKg
@@ -2413,7 +2493,7 @@ fun DedicatedMetricDetailScreen(
             MetricType.ECG -> {
                 val ecgDetails = parseEcgOrigin(latestObs.origin, latestObs.value)
                 val rhythmTitle = when (ecgDetails.afibClassification) {
-                    0 -> "Normální sinusový rytmus"
+                    0 -> "AFib nezjištěna (Withings)"
                     1 -> "Fibrilace síní (AFib detekována)"
                     2 -> "Neprůkazný záznam"
                     else -> "Záznam ECG pořízen"
@@ -2425,10 +2505,10 @@ fun DedicatedMetricDetailScreen(
                     else -> Color(0xFF38BDF8)
                 }
                 val rhythmDesc = when (ecgDetails.afibClassification) {
-                    0 -> "Nebyly detekovány žádné známky fibrilace síní (AFib). Srdeční rytmus je pravidelný."
-                    1 -> "Záznam vykazuje známky fibrilace síní. Pokud pociťujete dušnost či palpitace, kontaktujte lékaře."
-                    2 -> "Signál obsahoval pohybové artefakty nebo byl kontakt s elektrodami nestabilní."
-                    else -> "Jednosvodové měření elektrické aktivity srdce ze snímačů Withings."
+                    0 -> "Přístroj Withings v tomto záznamu nedetekoval fibrilaci síní (AFib). Výsledek není lékařská diagnóza."
+                    1 -> "Přístroj Withings detekoval známky fibrilace síní (AFib). Výsledek není lékařská diagnóza – pokud pociťujete obtíže, kontaktujte lékaře."
+                    2 -> "Signál obsahoval pohybové artefakty nebo byl kontakt s elektrodami nestabilní. Není lékařská diagnóza."
+                    else -> "Jednosvodové měření elektrické aktivity srdce ze snímačů Withings. Není lékařská diagnóza."
                 }
                 val rhythmIcon = when (ecgDetails.afibClassification) {
                     0 -> Icons.Outlined.CheckCircle
@@ -2956,13 +3036,14 @@ fun DedicatedMetricDetailScreen(
                 val latestVal = latestObs.value
                 val usual = series.usual
                 val formattedVal = if (type == MetricType.BODY_FAT) {
-                    if (bodyUnitMode == BodyUnitMode.KG) {
-                        val fatKg = b.refWeightKg * (latestVal / 100.0)
+                    val rw = b.refWeightKg
+                    if (bodyUnitMode == BodyUnitMode.KG && rw != null) {
+                        val fatKg = rw * (latestVal / 100.0)
                         "${fmt.weight(fatKg)} (${fmt.number(latestVal, 1)} %)"
                     } else {
                         "${fmt.number(latestVal, 1)} %"
                     }
-                } else if (type in setOf(MetricType.MUSCLE_MASS, MetricType.FAT_FREE_MASS, MetricType.BONE_MASS) && bodyUnitMode == BodyUnitMode.PERCENT) {
+                } else if (type in setOf(MetricType.MUSCLE_MASS, MetricType.FAT_FREE_MASS, MetricType.BONE_MASS) && bodyUnitMode == BodyUnitMode.PERCENT && b.refWeightKg != null) {
                     val pct = (latestVal / b.refWeightKg) * 100.0
                     "${fmt.number(pct, 1)} % (${fmt.weight(latestVal)})"
                 } else {
@@ -3129,13 +3210,19 @@ fun DedicatedMetricDetailScreen(
                 val isWeightType = type in listOf(MetricType.WEIGHT, MetricType.MUSCLE_MASS, MetricType.BONE_MASS, MetricType.FAT_FREE_MASS)
                 val chartValues = if (type == MetricType.BODY_FAT) {
                     if (bodyUnitMode == BodyUnitMode.KG) {
-                        series.values.map { it?.let { p -> fmt.convertWeight(b.refWeightKg * (p / 100.0)) } }
+                        series.dates.zip(series.values).map { (d, v) ->
+                            val w = b.weightsByDate[d.toString()] ?: b.refWeightKg
+                            if (v != null && w != null) fmt.convertWeight(w * (v / 100.0)) else null
+                        }
                     } else {
                         series.values
                     }
                 } else if (isWeightType) {
                     if (bodyUnitMode == BodyUnitMode.PERCENT && type != MetricType.WEIGHT) {
-                        series.values.map { it?.let { w -> (w / b.refWeightKg) * 100.0 } }
+                        series.dates.zip(series.values).map { (d, v) ->
+                            val w = b.weightsByDate[d.toString()] ?: b.refWeightKg
+                            if (v != null && w != null) (v / w) * 100.0 else null
+                        }
                     } else {
                         series.values.map { it?.let(fmt::convertWeight) }
                     }
@@ -3143,13 +3230,15 @@ fun DedicatedMetricDetailScreen(
 
                 val chartBand = if (type == MetricType.BODY_FAT) {
                     if (bodyUnitMode == BodyUnitMode.KG) {
-                        usual?.let { (fmt.convertWeight(b.refWeightKg * (it.low / 100.0)))..(fmt.convertWeight(b.refWeightKg * (it.high / 100.0))) }
+                        val rw = b.refWeightKg
+                        if (rw != null) usual?.let { (fmt.convertWeight(rw * (it.low / 100.0)))..(fmt.convertWeight(rw * (it.high / 100.0))) } else null
                     } else {
                         usual?.let { it.low..it.high }
                     }
                 } else if (isWeightType) {
                     if (bodyUnitMode == BodyUnitMode.PERCENT && type != MetricType.WEIGHT) {
-                        usual?.let { ((it.low / b.refWeightKg) * 100.0)..((it.high / b.refWeightKg) * 100.0) }
+                        val rw = b.refWeightKg
+                        if (rw != null) usual?.let { ((it.low / rw) * 100.0)..((it.high / rw) * 100.0) } else null
                     } else {
                         usual?.let { fmt.convertWeight(it.low)..fmt.convertWeight(it.high) }
                     }
@@ -3217,7 +3306,7 @@ fun LazyMetricHistoryListCard(
     type: MetricType,
     zone: ZoneId = ZoneId.of(sl.settings.zoneId),
     usual: app.pulse4.analytics.Baseline.UsualRange? = null,
-    refWeightKg: Double = 93.10,
+    refWeightKg: Double? = null,
     bodyUnitMode: BodyUnitMode = BodyUnitMode.KG,
     sleepScoresByDate: Map<String, Double> = emptyMap(),
     sleepDetailsByDate: Map<String, SleepDetails> = emptyMap(),
@@ -3721,7 +3810,8 @@ private data class DedicatedBundle(
     val sleepScoresByDate: Map<String, Double>,
     val sleepDetailsByDate: Map<String, SleepDetails> = emptyMap(),
     val suspectWeights: List<app.pulse4.domain.MetricObservation> = emptyList(),
-    val refWeightKg: Double = 93.10,
+    val refWeightKg: Double? = null,
+    val weightsByDate: Map<String, Double> = emptyMap(),
     val latestMuscleKg: Double? = null,
     val latestFatPct: Double? = null,
     val latestBoneKg: Double? = null,
@@ -3743,7 +3833,7 @@ private data class MultiMetricEntry(
 
 private data class MetricsScreenBundle(
     val entries: List<MultiMetricEntry>,
-    val refWeightKg: Double,
+    val refWeightKg: Double?,
     val weightsByDate: Map<String, Double>,
     val latestMuscleKg: Double?,
     val latestFatPct: Double?,
@@ -3913,7 +4003,7 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType = MetricType.HRV) 
             .ifEmpty { rangeObs.filter { it.type == MetricType.WEIGHT } }
         val latestWeightObs = weightRows.filter { !it.deleted }.maxByOrNull { it.startUtcMs }
             ?: sl.db.observations().latest(MetricType.WEIGHT.name)?.toDomain()
-        val refWeightKg = latestWeightKgOrFallback(latestWeightObs?.value)
+        val refWeightKg = latestWeightKgOrNull(latestWeightObs?.value)
         val weightsByDate = weightRows.filter { !it.deleted && it.value in 25.0..250.0 }
             .associate { (it.localDate ?: "") to it.value }
 
@@ -4551,8 +4641,9 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType = MetricType.HRV) 
                     MetricType.SLEEP_DURATION -> entry.series.values.map { it?.div(3600.0) }
                     MetricType.WEIGHT -> entry.series.values.map { it?.let(fmt::convertWeight) }
                     MetricType.MUSCLE_MASS, MetricType.BONE_MASS, MetricType.FAT_FREE_MASS -> {
-                        if (bodyUnitMode == BodyUnitMode.PERCENT && !normalizeMultiChart) {
-                            entry.series.values.map { v -> v?.let { (it / bundle.refWeightKg) * 100.0 } }
+                        val rw = bundle.refWeightKg
+                        if (bodyUnitMode == BodyUnitMode.PERCENT && !normalizeMultiChart && rw != null) {
+                            entry.series.values.map { v -> v?.let { (it / rw) * 100.0 } }
                         } else {
                             entry.series.values.map { it?.let(fmt::convertWeight) }
                         }
@@ -4560,10 +4651,8 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType = MetricType.HRV) 
                     MetricType.BODY_FAT -> {
                         if (!normalizeMultiChart && bodyUnitMode == BodyUnitMode.KG) {
                             entry.series.dates.zip(entry.series.values).map { (d, v) ->
-                                if (v != null) {
-                                    val w = bundle.weightsByDate[d.toString()] ?: bundle.refWeightKg
-                                    fmt.convertWeight(w * (v / 100.0))
-                                } else null
+                                val w = bundle.weightsByDate[d.toString()] ?: bundle.refWeightKg
+                                if (v != null && w != null) fmt.convertWeight(w * (v / 100.0)) else null
                             }
                         } else {
                             entry.series.values
@@ -4572,10 +4661,8 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType = MetricType.HRV) 
                     MetricType.BODY_WATER -> {
                         if (!normalizeMultiChart && bodyUnitMode == BodyUnitMode.KG) {
                             entry.series.dates.zip(entry.series.values).map { (d, v) ->
-                                if (v != null) {
-                                    val w = bundle.weightsByDate[d.toString()] ?: bundle.refWeightKg
-                                    fmt.convertWeight(w * (v / 100.0))
-                                } else null
+                                val w = bundle.weightsByDate[d.toString()] ?: bundle.refWeightKg
+                                if (v != null && w != null) fmt.convertWeight(w * (v / 100.0)) else null
                             }
                         } else {
                             entry.series.values
@@ -4658,10 +4745,8 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType = MetricType.HRV) 
 
             if (isBodyCompTriple) {
                 val fatKgValues = fEntry!!.series.dates.zip(fEntry.series.values).map { (d, f) ->
-                    if (f != null) {
-                        val w = bundle.weightsByDate[d.toString()] ?: bundle.refWeightKg
-                        fmt.convertWeight(w * (f / 100.0))
-                    } else null
+                    val w = bundle.weightsByDate[d.toString()] ?: bundle.refWeightKg
+                    if (f != null && w != null) fmt.convertWeight(w * (f / 100.0)) else null
                 }
 
                 Card(
@@ -4727,22 +4812,24 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType = MetricType.HRV) 
                             ) {
                                 Column {
                                     Text("Celková váha", style = MaterialTheme.typography.labelSmall, color = Color(0xFFCBD5E1))
-                                    Text(fmt.weight(bundle.refWeightKg), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold, color = Color.White)
+                                    Text(bundle.refWeightKg?.let { fmt.weight(it) } ?: "—", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold, color = Color.White)
                                 }
                                 Column {
                                     Text("Svalová hmota", style = MaterialTheme.typography.labelSmall, color = Color(0xFFCBD5E1))
                                     val lMuscle = bundle.latestMuscleKg
+                                    val rw = bundle.refWeightKg
                                     val mTxt = if (lMuscle == null) "—"
-                                    else if (bodyUnitMode == BodyUnitMode.KG) fmt.weight(lMuscle)
-                                    else "${fmt.number((lMuscle / bundle.refWeightKg) * 100.0, 1)} %"
+                                    else if (bodyUnitMode == BodyUnitMode.KG || rw == null) fmt.weight(lMuscle)
+                                    else "${fmt.number((lMuscle / rw) * 100.0, 1)} %"
                                     Text(mTxt, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold, color = Color(0xFF10B981))
                                 }
                                 Column {
                                     Text("Tělesný tuk", style = MaterialTheme.typography.labelSmall, color = Color(0xFFCBD5E1))
                                     val lFat = bundle.latestFatPct
+                                    val rw = bundle.refWeightKg
                                     val fTxt = if (lFat == null) "—"
-                                    else if (bodyUnitMode == BodyUnitMode.KG) {
-                                        val fKg = bundle.refWeightKg * (lFat / 100.0)
+                                    else if (bodyUnitMode == BodyUnitMode.KG && rw != null) {
+                                        val fKg = rw * (lFat / 100.0)
                                         "${fmt.weight(fKg)} (${fmt.number(lFat, 1)} %)"
                                     } else {
                                         "${fmt.number(lFat, 1)} %"
@@ -4798,25 +4885,26 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType = MetricType.HRV) 
                 val isBodyComp = isConvertibleBodyCompMetric(entry.type) || entry.type == MetricType.WEIGHT
                 val showKg = (!normalizeMultiChart || bodyUnitMode == BodyUnitMode.KG) && isBodyComp
 
+                val rw = bundle.refWeightKg
                 val formattedValueText = if (latestVal == null) {
                     "—"
                 } else if (entry.type == MetricType.BODY_FAT) {
-                    val fatKg = bundle.refWeightKg * (latestVal / 100.0)
-                    if (showKg) {
+                    if (showKg && rw != null) {
+                        val fatKg = rw * (latestVal / 100.0)
                         "${fmt.weight(fatKg)} (${fmt.number(latestVal, 1)} %)"
                     } else {
                         "${fmt.number(latestVal, 1)} %"
                     }
                 } else if (entry.type == MetricType.BODY_WATER) {
-                    val waterKg = bundle.refWeightKg * (latestVal / 100.0)
-                    if (showKg) {
+                    if (showKg && rw != null) {
+                        val waterKg = rw * (latestVal / 100.0)
                         "${fmt.weight(waterKg)} (${fmt.number(latestVal, 1)} %)"
                     } else {
                         "${fmt.number(latestVal, 1)} %"
                     }
                 } else if (entry.type in setOf(MetricType.MUSCLE_MASS, MetricType.FAT_FREE_MASS, MetricType.BONE_MASS)) {
-                    if (!showKg) {
-                        val pct = (latestVal / bundle.refWeightKg) * 100.0
+                    if (!showKg && rw != null) {
+                        val pct = (latestVal / rw) * 100.0
                         "${fmt.number(pct, 1)} % (${fmt.weight(latestVal)})"
                     } else {
                         fmt.weight(latestVal)
@@ -4828,14 +4916,14 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType = MetricType.HRV) 
                 val medianText = if (usual == null) {
                     "Sběr osobního pásma"
                 } else if (entry.type == MetricType.BODY_FAT) {
-                    if (showKg) {
-                        val medKg = bundle.refWeightKg * (usual.median / 100.0)
+                    if (showKg && rw != null) {
+                        val medKg = rw * (usual.median / 100.0)
                         "Medián (${daysCount}d): ${fmt.weight(medKg)} (${fmt.number(usual.median, 1)} %)"
                     } else {
                         "Medián (${daysCount}d): ${fmt.number(usual.median, 1)} %"
                     }
-                } else if (entry.type in setOf(MetricType.MUSCLE_MASS, MetricType.FAT_FREE_MASS, MetricType.BONE_MASS) && !showKg) {
-                    val medPct = (usual.median / bundle.refWeightKg) * 100.0
+                } else if (entry.type in setOf(MetricType.MUSCLE_MASS, MetricType.FAT_FREE_MASS, MetricType.BONE_MASS) && !showKg && rw != null) {
+                    val medPct = (usual.median / rw) * 100.0
                     "Medián (${daysCount}d): ${fmt.number(medPct, 1)} %"
                 } else {
                     "Medián (${daysCount}d): ${formatMetricValue(entry.type, usual.median)}"
@@ -4846,15 +4934,13 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType = MetricType.HRV) 
                     MetricType.BODY_FAT -> {
                         if (showKg) {
                             val vals = entry.series.dates.zip(entry.series.values).map { (d, v) ->
-                                if (v != null) {
-                                    val w = bundle.weightsByDate[d.toString()] ?: bundle.refWeightKg
-                                    fmt.convertWeight(w * (v / 100.0))
-                                } else null
+                                val w = bundle.weightsByDate[d.toString()] ?: rw
+                                if (v != null && w != null) fmt.convertWeight(w * (v / 100.0)) else null
                             }
-                            val band = usual?.let {
-                                (fmt.convertWeight(bundle.refWeightKg * (it.low / 100.0)))..(fmt.convertWeight(bundle.refWeightKg * (it.high / 100.0)))
-                            }
-                            Triple(vals, band, fmt.weightUnit())
+                            val band = if (rw != null) usual?.let {
+                                (fmt.convertWeight(rw * (it.low / 100.0)))..(fmt.convertWeight(rw * (it.high / 100.0)))
+                            } else null
+                            Triple(vals, band, if (rw != null) fmt.weightUnit() else "%")
                         } else {
                             Triple(entry.series.values, usual?.let { it.low..it.high }, "%")
                         }
@@ -4862,15 +4948,13 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType = MetricType.HRV) 
                     MetricType.BODY_WATER -> {
                         if (showKg) {
                             val vals = entry.series.dates.zip(entry.series.values).map { (d, v) ->
-                                if (v != null) {
-                                    val w = bundle.weightsByDate[d.toString()] ?: bundle.refWeightKg
-                                    fmt.convertWeight(w * (v / 100.0))
-                                } else null
+                                val w = bundle.weightsByDate[d.toString()] ?: rw
+                                if (v != null && w != null) fmt.convertWeight(w * (v / 100.0)) else null
                             }
-                            val band = usual?.let {
-                                (fmt.convertWeight(bundle.refWeightKg * (it.low / 100.0)))..(fmt.convertWeight(bundle.refWeightKg * (it.high / 100.0)))
-                            }
-                            Triple(vals, band, fmt.weightUnit())
+                            val band = if (rw != null) usual?.let {
+                                (fmt.convertWeight(rw * (it.low / 100.0)))..(fmt.convertWeight(rw * (it.high / 100.0)))
+                            } else null
+                            Triple(vals, band, if (rw != null) fmt.weightUnit() else "%")
                         } else {
                             Triple(entry.series.values, usual?.let { it.low..it.high }, "%")
                         }
@@ -4883,9 +4967,9 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType = MetricType.HRV) 
                         )
                     }
                     MetricType.MUSCLE_MASS, MetricType.FAT_FREE_MASS, MetricType.BONE_MASS -> {
-                        if (!showKg) {
-                            val vals = entry.series.values.map { v -> v?.let { (it / bundle.refWeightKg) * 100.0 } }
-                            val band = usual?.let { ((it.low / bundle.refWeightKg) * 100.0)..((it.high / bundle.refWeightKg) * 100.0) }
+                        if (!showKg && rw != null) {
+                            val vals = entry.series.values.map { v -> v?.let { (it / rw) * 100.0 } }
+                            val band = usual?.let { ((it.low / rw) * 100.0)..((it.high / rw) * 100.0) }
                             Triple(vals, band, "%")
                         } else {
                             Triple(
@@ -5081,15 +5165,16 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType = MetricType.HRV) 
             } else {
                 val latestValue = latestObs.value
                 val usual = series.usual
+                val rw = bundle.refWeightKg
                 val latestFormatted = if (type == MetricType.BODY_FAT) {
-                    if (bodyUnitMode == BodyUnitMode.KG) {
-                        val fatKg = bundle.refWeightKg * (latestValue / 100.0)
+                    if (bodyUnitMode == BodyUnitMode.KG && rw != null) {
+                        val fatKg = rw * (latestValue / 100.0)
                         "${fmt.weight(fatKg)} (${fmt.number(latestValue, 1)} %)"
                     } else {
                         "${fmt.number(latestValue, 1)} %"
                     }
-                } else if (type in setOf(MetricType.MUSCLE_MASS, MetricType.FAT_FREE_MASS, MetricType.BONE_MASS) && bodyUnitMode == BodyUnitMode.PERCENT) {
-                    val pct = (latestValue / bundle.refWeightKg) * 100.0
+                } else if (type in setOf(MetricType.MUSCLE_MASS, MetricType.FAT_FREE_MASS, MetricType.BONE_MASS) && bodyUnitMode == BodyUnitMode.PERCENT && rw != null) {
+                    val pct = (latestValue / rw) * 100.0
                     "${fmt.number(pct, 1)} % (${fmt.weight(latestValue)})"
                 } else {
                     formatMetricValue(type, latestValue)
@@ -5123,8 +5208,8 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType = MetricType.HRV) 
                             "$sign${fmt.number(conv, 1)} ${fmt.weightUnit()} vs medián"
                         }
                         MetricType.BODY_FAT -> {
-                            if (bodyUnitMode == BodyUnitMode.KG) {
-                                val diffKg = fmt.convertWeight(bundle.refWeightKg * (diff / 100.0))
+                            if (bodyUnitMode == BodyUnitMode.KG && rw != null) {
+                                val diffKg = fmt.convertWeight(rw * (diff / 100.0))
                                 val sign = if (diffKg >= 0) "+" else ""
                                 "$sign${fmt.number(diffKg, 1)} ${fmt.weightUnit()} vs medián"
                             } else {
@@ -5154,27 +5239,27 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType = MetricType.HRV) 
                 }
 
                 val medianFormatted = if (usual != null) {
-                    if (type == MetricType.BODY_FAT && bodyUnitMode == BodyUnitMode.KG) {
-                        val medKg = bundle.refWeightKg * (usual.median / 100.0)
+                    if (type == MetricType.BODY_FAT && bodyUnitMode == BodyUnitMode.KG && rw != null) {
+                        val medKg = rw * (usual.median / 100.0)
                         "${fmt.weight(medKg)} (${fmt.number(usual.median, 1)} %)"
-                    } else if (type in setOf(MetricType.MUSCLE_MASS, MetricType.FAT_FREE_MASS, MetricType.BONE_MASS) && bodyUnitMode == BodyUnitMode.PERCENT) {
-                        "${fmt.number((usual.median / bundle.refWeightKg) * 100.0, 1)} %"
+                    } else if (type in setOf(MetricType.MUSCLE_MASS, MetricType.FAT_FREE_MASS, MetricType.BONE_MASS) && bodyUnitMode == BodyUnitMode.PERCENT && rw != null) {
+                        "${fmt.number((usual.median / rw) * 100.0, 1)} %"
                     } else {
                         formatMetricValue(type, usual.median)
                     }
                 } else "—"
 
                 val minMaxFormatted = if (finite.isNotEmpty()) {
-                    if (type == MetricType.BODY_FAT && bodyUnitMode == BodyUnitMode.KG) {
-                        "${fmt.weight(bundle.refWeightKg * (minV / 100.0))} – ${fmt.weight(bundle.refWeightKg * (maxV / 100.0))}"
+                    if (type == MetricType.BODY_FAT && bodyUnitMode == BodyUnitMode.KG && rw != null) {
+                        "${fmt.weight(rw * (minV / 100.0))} – ${fmt.weight(rw * (maxV / 100.0))}"
                     } else {
                         "${formatMetricValue(type, minV)} – ${formatMetricValue(type, maxV)}"
                     }
                 } else "—"
 
                 val usualFormatted = if (usual != null) {
-                    if (type == MetricType.BODY_FAT && bodyUnitMode == BodyUnitMode.KG) {
-                        "${fmt.weight(bundle.refWeightKg * (usual.low / 100.0))} – ${fmt.weight(bundle.refWeightKg * (usual.high / 100.0))}"
+                    if (type == MetricType.BODY_FAT && bodyUnitMode == BodyUnitMode.KG && rw != null) {
+                        "${fmt.weight(rw * (usual.low / 100.0))} – ${fmt.weight(rw * (usual.high / 100.0))}"
                     } else {
                         "${formatMetricValue(type, usual.low)} – ${formatMetricValue(type, usual.high)}"
                     }
@@ -5419,17 +5504,15 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType = MetricType.HRV) 
                 val chartValues = if (type == MetricType.BODY_FAT) {
                     if (bodyUnitMode == BodyUnitMode.KG) {
                         series.dates.zip(series.values).map { (d, v) ->
-                            if (v != null) {
-                                val w = bundle.weightsByDate[d.toString()] ?: bundle.refWeightKg
-                                fmt.convertWeight(w * (v / 100.0))
-                            } else null
+                            val w = bundle.weightsByDate[d.toString()] ?: rw
+                            if (v != null && w != null) fmt.convertWeight(w * (v / 100.0)) else null
                         }
                     } else {
                         series.values
                     }
                 } else if (isWeightType) {
-                    if (bodyUnitMode == BodyUnitMode.PERCENT && type != MetricType.WEIGHT) {
-                        series.values.map { it?.let { w -> (w / bundle.refWeightKg) * 100.0 } }
+                    if (bodyUnitMode == BodyUnitMode.PERCENT && type != MetricType.WEIGHT && rw != null) {
+                        series.values.map { it?.let { w -> (w / rw) * 100.0 } }
                     } else {
                         series.values.map { it?.let(fmt::convertWeight) }
                     }
@@ -5438,14 +5521,14 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType = MetricType.HRV) 
                 } else series.values
 
                 val chartBand = if (type == MetricType.BODY_FAT) {
-                    if (bodyUnitMode == BodyUnitMode.KG) {
-                        usual?.let { (fmt.convertWeight(bundle.refWeightKg * (it.low / 100.0)))..(fmt.convertWeight(bundle.refWeightKg * (it.high / 100.0))) }
+                    if (bodyUnitMode == BodyUnitMode.KG && rw != null) {
+                        usual?.let { (fmt.convertWeight(rw * (it.low / 100.0)))..(fmt.convertWeight(rw * (it.high / 100.0))) }
                     } else {
                         usual?.let { it.low..it.high }
                     }
                 } else if (isWeightType) {
-                    if (bodyUnitMode == BodyUnitMode.PERCENT && type != MetricType.WEIGHT) {
-                        usual?.let { ((it.low / bundle.refWeightKg) * 100.0)..((it.high / bundle.refWeightKg) * 100.0) }
+                    if (bodyUnitMode == BodyUnitMode.PERCENT && type != MetricType.WEIGHT && rw != null) {
+                        usual?.let { ((it.low / rw) * 100.0)..((it.high / rw) * 100.0) }
                     } else {
                         usual?.let { fmt.convertWeight(it.low)..fmt.convertWeight(it.high) }
                     }
@@ -5507,8 +5590,8 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType = MetricType.HRV) 
     }
 }
 
-private fun latestWeightKgOrFallback(v: Double?): Double =
-    v?.takeIf { it in 25.0..250.0 } ?: 93.10
+private fun latestWeightKgOrNull(v: Double?): Double? =
+    v?.takeIf { it in 25.0..250.0 }
 
 fun Sport.czechName(): String = when (this) {
     Sport.RUNNING -> "Běh"
@@ -7161,7 +7244,7 @@ data class LoadedActivityDetail(
     val track: List<TrackPoint>,
     val sharedProjection: ActivityProjection? = null,
     val domainActivity: Activity? = null,
-    val relativeEffort: Int = 0,
+    val relativeEffort: Int? = null,
     val bestEfforts: List<app.pulse4.analytics.BestEffort> = emptyList(),
     val gapPaceSPerKm: Double? = null,
 )
@@ -7209,30 +7292,17 @@ fun loadUnifiedActivity(sl: ServiceLocator, key: String): LoadedActivityDetail? 
             avgCadence = cadPts.map { it.second }.average().takeIf { it.isFinite() },
             aerobicTE = p.aerobicTrainingEffect,
             anaerobicTE = p.anaerobicTrainingEffect,
-            maxHr = hrPts.maxOfOrNull { it.second.toInt() }
+            maxHr = null // D1: Nepředávat max HR aktivity jako max HR uživatele
         )
 
-        val sharedHrZones = if (enrichedReconstructed.isNotEmpty() && hrPts.isNotEmpty()) {
-            val maxRef = (hrPts.maxOfOrNull { it.second.toInt() } ?: 185).coerceAtLeast(150).toDouble()
-            val bounds = listOf(maxRef * 0.60, maxRef * 0.70, maxRef * 0.80, maxRef * 0.90)
-            app.pulse4.analytics.Zones.timeInZones(
-                enrichedReconstructed.map { it.tMs to it.heartRate?.toDouble() },
-                app.pulse4.analytics.Zones.ZoneSet(bounds)
-            ).toList()
-        } else emptyList()
+        val sharedHrZones = emptyList<Double>() // D1: Bez uživatelského max HR nepočítat zóny z max HR aktivity
 
         val eff = app.pulse4.analytics.RunningDynamicsModel.computeStravaRelativeEffort(
             hrZonesTimesS = sharedHrZones,
             totalTimeS = p.totalTimeS ?: p.movingTimeS ?: 0.0
         )
         val be = app.pulse4.analytics.RunningDynamicsModel.findBestEfforts(enrichedReconstructed)
-        val nonNullPts = enrichedReconstructed.filter { it.distanceM != null && it.speedMps != null && it.elevationM != null }
-        val gp = if (nonNullPts.size >= 2) {
-            val avgGapSpd = nonNullPts.map {
-                app.pulse4.analytics.RunningDynamicsModel.computeGapSpeedMps(it.speedMps ?: 0.0, 0.0)
-            }.average()
-            if (avgGapSpd > 0.2) 1000.0 / avgGapSpd else null
-        } else null
+        val gp = app.pulse4.analytics.RunningDynamicsModel.computeAverageGapPaceSPerKm(enrichedReconstructed)
 
         return LoadedActivityDetail(
             key = key,
@@ -7288,7 +7358,7 @@ fun loadUnifiedActivity(sl: ServiceLocator, key: String): LoadedActivityDetail? 
             avgVerticalRatioPct = a.avgVerticalRatioPct,
             aerobicTE = a.aerobicTrainingEffect,
             anaerobicTE = a.anaerobicTrainingEffect,
-            maxHr = a.maxHeartRate
+            maxHr = null // D1: Nepředávat max HR aktivity jako max HR uživatele
         )
 
         val eff = app.pulse4.analytics.RunningDynamicsModel.computeStravaRelativeEffort(
@@ -7296,13 +7366,7 @@ fun loadUnifiedActivity(sl: ServiceLocator, key: String): LoadedActivityDetail? 
             totalTimeS = a.totalTimeS
         )
         val be = app.pulse4.analytics.RunningDynamicsModel.findBestEfforts(enrichedLocal)
-        val nonNullPts = enrichedLocal.filter { it.distanceM != null && it.speedMps != null && it.elevationM != null }
-        val gp = if (nonNullPts.size >= 2) {
-            val avgGapSpd = nonNullPts.map {
-                app.pulse4.analytics.RunningDynamicsModel.computeGapSpeedMps(it.speedMps ?: 0.0, 0.0)
-            }.average()
-            if (avgGapSpd > 0.2) 1000.0 / avgGapSpd else null
-        } else null
+        val gp = app.pulse4.analytics.RunningDynamicsModel.computeAverageGapPaceSPerKm(enrichedLocal)
 
         return LoadedActivityDetail(
             key = key,
@@ -7408,7 +7472,7 @@ fun ActivityDetailScreen(sl: ServiceLocator, id: String, onBack: () -> Unit = {}
         act.sharedProjection?.route?.map { it.lat to it.lon } ?: view.route()
     }
     val trackCursor = cursor?.let { chart.trackIndex.getOrNull(it) }?.let { view.nearestWithPosition(it) }
-    val trackRange = range?.let { chart.trackRange(it) }
+    val trackRange = if (chart.trackIndex.isNotEmpty()) range?.let { chart.trackRange(it) } else null
     val summary = view.summary(trackRange, movingOnly)
 
     val dist = if (range != null) summary.distanceM else (act.distanceM ?: summary.distanceM)
@@ -7721,7 +7785,7 @@ fun ActivityDetailScreen(sl: ServiceLocator, id: String, onBack: () -> Unit = {}
                     }
 
                     // Spodní rychlé telemetrické kapsle v Hero kartě
-                    if (aeValHero != null || dom?.trainingLoad != null || dom?.avgPowerW != null || stravaEffort > 0) {
+                    if (aeValHero != null || dom?.trainingLoad != null || dom?.avgPowerW != null || (stravaEffort ?: 0) > 0) {
                         Spacer(Modifier.height(10.dp))
                         Row(
                             Modifier
@@ -7749,9 +7813,9 @@ fun ActivityDetailScreen(sl: ServiceLocator, id: String, onBack: () -> Unit = {}
                                     color = Color(0xFFFBBF24)
                                 )
                             }
-                            if (stravaEffort > 0) {
+                            if (stravaEffort != null && stravaEffort > 0) {
                                 TelemetryPillBadge(
-                                    text = "Kardio úsilí $stravaEffort",
+                                    text = "Kardio úsilí $stravaEffort (odhad)",
                                     color = Color(0xFFFB7185)
                                 )
                             }
@@ -7997,10 +8061,10 @@ fun ActivityDetailScreen(sl: ServiceLocator, id: String, onBack: () -> Unit = {}
             val aeMsg = dom?.aerobicTrainingEffectMessage
             val anMsg = dom?.anaerobicTrainingEffectMessage
 
-            if (aeVal != null || anVal != null || dom?.trainingLoad != null || dom?.bodyBatteryImpact != null) {
+            if (aeVal != null && anVal != null) {
                 GarminTrainingEffectCard(
-                    aerobic = aeVal ?: 2.8,
-                    anaerobic = anVal ?: 0.5,
+                    aerobic = aeVal,
+                    anaerobic = anVal,
                     label = teLbl,
                     aerobicMsg = aeMsg,
                     anaerobicMsg = anMsg,
@@ -8030,12 +8094,14 @@ fun ActivityDetailScreen(sl: ServiceLocator, id: String, onBack: () -> Unit = {}
                 Spacer(Modifier.height(12.dp))
             }
 
-            RelativeEffortCard(
-                score = stravaEffort,
-                hrZonesTimesS = dom?.hrZoneTimesS ?: emptyList(),
-                totalTimeS = act.totalTimeS
-            )
-            Spacer(Modifier.height(12.dp))
+            if (stravaEffort != null) {
+                RelativeEffortCard(
+                    score = stravaEffort,
+                    hrZonesTimesS = dom?.hrZoneTimesS ?: emptyList(),
+                    totalTimeS = act.totalTimeS
+                )
+                Spacer(Modifier.height(12.dp))
+            }
 
             if (gapPace != null) {
                 GapCard(

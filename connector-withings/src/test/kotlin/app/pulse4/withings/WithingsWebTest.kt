@@ -1,5 +1,6 @@
 package app.pulse4.withings
 
+import app.pulse4.domain.EcgAfibClassification
 import app.pulse4.domain.MeasurementExclusions
 import app.pulse4.domain.MetricObservation
 import app.pulse4.domain.MetricType
@@ -145,7 +146,7 @@ class WithingsWebTest {
         assertEquals(64.9, byType.getValue(MetricType.FAT_FREE_MASS).value, 0.001)
         assertEquals(61.5, byType.getValue(MetricType.MUSCLE_MASS).value, 0.001)
         assertEquals(3.4, byType.getValue(MetricType.BONE_MASS).value, 0.001)
-        assertEquals(58.5, byType.getValue(MetricType.BODY_WATER).value, 0.001)
+        assertEquals((58.5 / 78.4) * 100.0, byType.getValue(MetricType.BODY_WATER).value, 0.01)
         assertEquals(62.0, byType.getValue(MetricType.HEART_RATE).value, 0.001)
         assertEquals(6.8, byType.getValue(MetricType.PULSE_WAVE_VELOCITY).value, 0.001)
         assertEquals(34.0, byType.getValue(MetricType.VASCULAR_AGE).value, 0.001)
@@ -292,9 +293,12 @@ class WithingsWebTest {
         assertTrue(extendCalled)
         assertEquals("renewed-tok-999", session.sessionToken)
         assertTrue(session.cookies.contains("session_token=renewed-tok-999"))
-        assertEquals(2, storedObs.size) // 1 WEIGHT + 1 ECG summary
+        assertEquals(5, storedObs.size) // 1 WEIGHT + 4 typed ECG metrics
         assertTrue(storedObs.any { it.type == MetricType.WEIGHT && it.value == 77.5 })
-        assertTrue(storedObs.any { it.type == MetricType.ECG && it.value == 402.0 })
+        assertTrue(storedObs.any { it.type == MetricType.ECG_QTC && it.value == 402.0 })
+        assertTrue(storedObs.any { it.type == MetricType.ECG_QRS && it.value == 88.0 })
+        assertTrue(storedObs.any { it.type == MetricType.ECG_HR && it.value == 64.0 })
+        assertTrue(storedObs.any { it.type == MetricType.ECG_AFIB && it.value == EcgAfibClassification.NONE_DETECTED.code })
         assertTrue(deletedIds.contains(existingIdForDeletedGroup))
     }
 
@@ -418,5 +422,110 @@ class WithingsWebTest {
         assertTrue(fallbackCalled)
         assertEquals("fresh-tok", session.sessionToken)
         assertTrue(session.cookies.contains("session_key=fresh-from-sso"))
+    }
+
+    @Test
+    fun testHydrationWithoutWeightIsSkippedAndOutOfRangeIsSuspect() {
+        val noWeightGroup = MeasureGroup(
+            grpId = 100L,
+            date = 1730800000L,
+            modified = 1730800000L,
+            attrib = 0,
+            category = 1,
+            deviceId = null,
+            timezone = null,
+            measures = listOf(Measure(WithingsWebTypes.HYDRATION, 45.0))
+        )
+        val noWeightRes = WithingsWebMapper.map(listOf(noWeightGroup), 1001L, "Europe/Prague")
+        assertEquals(0, noWeightRes.items.size)
+        assertEquals(1, noWeightRes.skipped)
+
+        val outOfRangeGroup = MeasureGroup(
+            grpId = 101L,
+            date = 1730800100L,
+            modified = 1730800100L,
+            attrib = 0,
+            category = 1,
+            deviceId = null,
+            timezone = null,
+            measures = listOf(
+                Measure(WithingsWebTypes.WEIGHT, 80.0),
+                Measure(WithingsWebTypes.HYDRATION, 16.0) // 20% -> < 25% -> SUSPECT
+            )
+        )
+        val suspectRes = WithingsWebMapper.map(listOf(outOfRangeGroup), 1001L, "Europe/Prague")
+        val water = suspectRes.items.first { it.type == MetricType.BODY_WATER }
+        assertEquals(20.0, water.value, 0.01)
+        assertEquals(Quality.SUSPECT, water.quality)
+    }
+
+    @Test
+    fun testEcgWithoutNumericValuesEmitsOnlyAfibAndNever72Fallback() {
+        val obs = WithingsWebMapper.mapEcgSummaries(
+            summaries = listOf(WithingsEcgSummary(signalId = 999L, timestampSec = 1730850100L, heartRate = null, afibClassification = 1)),
+            userId = 1001L,
+            defaultZone = "Europe/Prague",
+        )
+        assertEquals(1, obs.size)
+        assertEquals(MetricType.ECG_AFIB, obs[0].type)
+        assertEquals(EcgAfibClassification.AFIB.code, obs[0].value)
+        assertFalse(obs.any { it.value == 72.0 })
+    }
+
+    @Test
+    fun testEcgFetchFailureDoesNotTombstoneExistingEcgObservations() {
+        val fakeHttp = object : HttpGateway {
+            override fun get(url: String, headers: Map<String, String>): HttpResponse = error("unused")
+            override fun postForm(url: String, form: Map<String, String>, headers: Map<String, String>): HttpResponse {
+                return when (form["action"]) {
+                    "getmeas" -> HttpResponse(
+                        200, emptyMap(),
+                        """{"status":0,"body":{"updatetime":1730900000,"more":0,"measuregrps":[{"grpid":9001,"attrib":0,"date":1730850000,"category":1,"measures":[{"value":77500,"unit":-3,"type":1}]}]}}"""
+                    )
+                    "list" -> HttpResponse(500, emptyMap(), """{"status":500}""")
+                    else -> error("Unexpected action ${form["action"]}")
+                }
+            }
+        }
+        val session = WithingsWebSession("session_token=tok", "tok", 1001L, "Petr", lastExtendedMs = 1730900000_000L)
+        val existingEcgId = "WITHINGS_API|1001|id:ecg:77701:afib"
+        val fetcher = WithingsWebFetcher(
+            client = WithingsWebClient(fakeHttp),
+            sessionProvider = { session },
+            defaultZone = "Europe/Prague",
+            existingIds = { _, _ -> setOf(existingEcgId) },
+            nowMs = { 1730900000_000L }
+        )
+        val batch = fetcher.fetch(SyncArea.WEIGHT, 1730800000_000L)
+        assertFalse(batch.tombstones.contains(existingEcgId))
+    }
+
+    @Test
+    fun testExplicitDeleteOutsideWindowIsTombstoned() {
+        val fakeHttp = object : HttpGateway {
+            override fun get(url: String, headers: Map<String, String>): HttpResponse = error("unused")
+            override fun postForm(url: String, form: Map<String, String>, headers: Map<String, String>): HttpResponse {
+                return when (form["action"]) {
+                    "getmeas" -> HttpResponse(
+                        200, emptyMap(),
+                        """{"status":0,"body":{"updatetime":1730900000,"more":0,"measuregrps":[{"grpid":5001,"attrib":0,"date":1700000000,"category":1,"deleted":1,"measures":[]}]}}"""
+                    )
+                    "list" -> HttpResponse(200, emptyMap(), """{"status":0,"body":{"more":false,"series":[]}}""")
+                    else -> error("Unexpected action ${form["action"]}")
+                }
+            }
+        }
+        val session = WithingsWebSession("session_token=tok", "tok", 1001L, "Petr", lastExtendedMs = 1730900000_000L)
+        val oldId = "WITHINGS_API|1001|id:5001:1"
+        val fetcher = WithingsWebFetcher(
+            client = WithingsWebClient(fakeHttp),
+            sessionProvider = { session },
+            defaultZone = "Europe/Prague",
+            existingIds = { _, _ -> emptySet() },
+            existingIdsByGrpIds = { grpIds -> if (5001L in grpIds) setOf(oldId) else emptySet() },
+            nowMs = { 1730900000_000L }
+        )
+        val batch = fetcher.fetch(SyncArea.WEIGHT, 1730800000_000L)
+        assertTrue(batch.tombstones.contains(oldId))
     }
 }

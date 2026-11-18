@@ -1,5 +1,6 @@
 package app.pulse4.withings
 
+import app.pulse4.domain.EcgAfibClassification
 import app.pulse4.domain.ImportFilter
 import app.pulse4.domain.ImportKey
 import app.pulse4.domain.MeasurementExclusions
@@ -32,6 +33,8 @@ sealed interface WithingsExtendResult {
     data class TransientError(val reason: String) : WithingsExtendResult
 }
 
+const val WITHINGS_WEB_APPLIVER = "bb4050e3"
+
 @Serializable
 data class WithingsWebConfig(
     val baseUrl: String = "https://scalews.withings.com/cgi-bin/",
@@ -39,7 +42,7 @@ data class WithingsWebConfig(
     // Stejná identifikace klienta jako webová aplikace app.withings.com (WS_APP_NAME / appliver = 8 znaků build hashe)
     val appName: String = "hmw",
     val appPfm: String = "web",
-    val appLiver: String = "bb4050e3",
+    val appLiver: String = WITHINGS_WEB_APPLIVER,
     val attribQuality: Map<Int, Quality> = mapOf(
         0 to Quality.OK,
         2 to Quality.OK,
@@ -209,9 +212,10 @@ class WithingsWebClient(
     ): List<WithingsUserProfile> {
         val form = baseForm(action, cookies, sessionToken)
         val res = post(endpoint, form, cookies, sessionToken)
-        onDebugLog?.invoke("fetchUsersFromEndpoint $endpoint res.body: ${res.body}")
         val body = Wire.check(Wire.parse(res.body))
-        return parseUsersFromBody(body)
+        val users = parseUsersFromBody(body)
+        onDebugLog?.invoke("fetchUsersFromEndpoint $endpoint users=${users.size}")
+        return users
     }
 
     private fun parseUsersFromBody(body: JsonObject): List<WithingsUserProfile> {
@@ -332,17 +336,17 @@ class WithingsWebClient(
         startDateSec: Long? = null,
         endDateSec: Long? = null,
         sessionToken: String? = null,
-    ): List<WithingsEcgSummary> {
+    ): Result<List<WithingsEcgSummary>> = runCatching {
         val form = baseForm("list", cookies, sessionToken).apply {
             put("userid", userId.toString())
             if (startDateSec != null) put("startdate", startDateSec.toString())
             if (endDateSec != null) put("enddate", endDateSec.toString())
         }
-        val res = runCatching { post("v2/heart", form, cookies, sessionToken) }.getOrNull() ?: return emptyList()
-        val env = runCatching { Wire.parse(res.body) }.getOrNull() ?: return emptyList()
-        if (env.status != 0) return emptyList()
+        val res = post("v2/heart", form, cookies, sessionToken)
+        val env = Wire.parse(res.body)
+        if (env.status != 0) throw ProviderError.Server(env.status)
         val series = (env.body?.get("series") as? JsonArray).orEmpty()
-        return series.mapNotNull { elem ->
+        series.mapNotNull { elem ->
             val o = elem.jsonObject
             val ecgObj = o["ecg"] as? JsonObject ?: o
             val sigId = ecgObj["signalid"]?.jsonPrimitive?.longOrNull
@@ -568,17 +572,12 @@ object WithingsWebMapper {
                     WithingsWebTypes.MUSCLE_MASS -> Triple(MetricType.MUSCLE_MASS, m.value, m.value in 5.0..200.0)
                     WithingsWebTypes.BONE_MASS -> Triple(MetricType.BONE_MASS, m.value, m.value in 0.5..15.0)
                     WithingsWebTypes.HYDRATION -> {
-                        if (weightInGroup != null && weightInGroup > 18.0 && m.value in 5.0..(weightInGroup * 0.85)) {
-                            // Pokud je hodnota menší než 72 % váhy v kg (např. 49.9 kg vody u 93 kg člověka), převedeme na %
-                            if (m.value <= weightInGroup * 0.72) {
-                                val pct = (m.value / weightInGroup) * 100.0
-                                Triple(MetricType.BODY_WATER, pct, pct in 25.0..85.0)
-                            } else {
-                                Triple(MetricType.BODY_WATER, m.value, m.value in 25.0..85.0)
-                            }
-                        } else {
-                            Triple(MetricType.BODY_WATER, m.value, m.value in 25.0..85.0)
+                        if (weightInGroup == null || weightInGroup <= 18.0) {
+                            skipped++
+                            continue
                         }
+                        val pct = (m.value / weightInGroup) * 100.0
+                        Triple(MetricType.BODY_WATER, pct, pct.isFinite() && pct > 0.0)
                     }
                     WithingsWebTypes.HEART_RATE -> Triple(MetricType.HEART_RATE, m.value, m.value in 30.0..240.0)
                     WithingsWebTypes.PWV -> Triple(MetricType.PULSE_WAVE_VELOCITY, m.value, m.value in 2.0..25.0)
@@ -596,6 +595,11 @@ object WithingsWebMapper {
                 val start = g.date * 1000L
                 val segSuffix = buildSegmentalOriginSuffix(g.measures)
                 val baseOrigin = g.deviceId?.let { "withings:web:$it" } ?: "withings:web"
+                val effectiveQuality = if (type == MetricType.BODY_WATER && normValue !in 25.0..85.0) {
+                    Quality.SUSPECT
+                } else {
+                    quality
+                }
                 out += MetricObservation(
                     id = ImportKey.of(Provider.WITHINGS_API, uidStr, ext, listOf(type.name, start.toString())),
                     provider = Provider.WITHINGS_API,
@@ -607,7 +611,7 @@ object WithingsWebMapper {
                     value = normValue,
                     zoneId = zone,
                     localDate = TimeRules.localDate(start, zone).toString(),
-                    quality = quality,
+                    quality = effectiveQuality,
                     sourceVersion = 1,
                     origin = if (segSuffix.isNotEmpty() && type in setOf(MetricType.WEIGHT, MetricType.MUSCLE_MASS, MetricType.BODY_FAT, MetricType.FAT_FREE_MASS)) {
                         "$baseOrigin$segSuffix"
@@ -647,32 +651,40 @@ object WithingsWebMapper {
         val out = ArrayList<MetricObservation>()
         for (s in summaries) {
             val start = s.timestampSec * 1000L
-            val ext = "ecg:${s.signalId}"
             val matchedHr = heartRatesBySec.entries
                 .firstOrNull { kotlin.math.abs(it.key - s.timestampSec) <= 300L }
                 ?.value
-            val valueToStore = s.qtcMs
-                ?: s.qrsMs
-                ?: s.heartRate?.toDouble()
-                ?: matchedHr
-                ?: 72.0
+            val hrValue = s.heartRate?.toDouble() ?: matchedHr
             val hrInfo = s.heartRate ?: matchedHr?.toInt() ?: 0
+            val afibClass = EcgAfibClassification.fromWithingsCode(s.afibClassification)
             val afibInfo = s.afibClassification ?: -1
-            out += MetricObservation(
-                id = ImportKey.of(Provider.WITHINGS_API, uidStr, ext, listOf(MetricType.ECG.name, start.toString())),
-                provider = Provider.WITHINGS_API,
-                accountId = uidStr,
-                externalId = ext,
-                type = MetricType.ECG,
-                startUtcMs = start,
-                endUtcMs = null,
-                value = valueToStore,
-                zoneId = defaultZone,
-                localDate = TimeRules.localDate(start, defaultZone).toString(),
-                quality = Quality.OK,
-                sourceVersion = 1,
-                origin = "withings:ecg:sig=${s.signalId}:afib=$afibInfo:hr=$hrInfo",
-            )
+            val localDate = TimeRules.localDate(start, defaultZone).toString()
+            val origin = "withings:ecg:sig=${s.signalId}:afib=$afibInfo:hr=$hrInfo"
+
+            fun addMetric(suffix: String, type: MetricType, value: Double) {
+                if (!value.isFinite()) return
+                val ext = "ecg:${s.signalId}:$suffix"
+                out += MetricObservation(
+                    id = ImportKey.of(Provider.WITHINGS_API, uidStr, ext, listOf(type.name, start.toString())),
+                    provider = Provider.WITHINGS_API,
+                    accountId = uidStr,
+                    externalId = ext,
+                    type = type,
+                    startUtcMs = start,
+                    endUtcMs = null,
+                    value = value,
+                    zoneId = defaultZone,
+                    localDate = localDate,
+                    quality = Quality.OK,
+                    sourceVersion = 1,
+                    origin = origin,
+                )
+            }
+
+            addMetric("afib", MetricType.ECG_AFIB, afibClass.code)
+            hrValue?.let { addMetric("hr", MetricType.ECG_HR, it) }
+            s.qtcMs?.let { addMetric("qtc", MetricType.ECG_QTC, it) }
+            s.qrsMs?.let { addMetric("qrs", MetricType.ECG_QRS, it) }
         }
         return out
     }
@@ -698,6 +710,7 @@ class WithingsWebFetcher(
     private val config: WithingsWebConfig = WithingsWebConfig(),
     private val existingHeartRates: () -> Map<Long, Double> = { emptyMap() },
     private val onRefreshFallback: (() -> WithingsWebSession?)? = null,
+    private val existingIdsByGrpIds: (Set<Long>) -> Set<String> = { emptySet() },
 ) : AreaFetcher {
     var skippedItems = 0
         private set
@@ -752,16 +765,15 @@ class WithingsWebFetcher(
             .filter { it.type == MetricType.HEART_RATE }
             .associate { (it.startUtcMs / 1000L) to it.value }
 
-        val ecgItems = runCatching {
-            // Voláme v2/heart?action=list bez omezujícího startdate (stejně jako webová aplikace Withings v HARu),
-            // aby se vždy načetla kompletní historie EKG záznamů.
-            val ecgs = client.getHeartList(
-                cookies = s.cookies,
-                userId = s.primaryUserId,
-                sessionToken = s.sessionToken
-            )
+        val heartResult = client.getHeartList(
+            cookies = s.cookies,
+            userId = s.primaryUserId,
+            sessionToken = s.sessionToken
+        ).map { ecgs ->
             WithingsWebMapper.mapEcgSummaries(ecgs, s.primaryUserId, zone, hrBySec)
-        }.getOrDefault(emptyList())
+        }
+        val heartOk = heartResult.isSuccess
+        val ecgItems = heartResult.getOrDefault(emptyList())
 
         skippedItems += windowMapped.skipped + (modifiedMapped?.skipped ?: 0)
 
@@ -774,17 +786,24 @@ class WithingsWebFetcher(
         val allDeletedGrpIds = windowMapped.deletedGroupIds + (modifiedMapped?.deletedGroupIds ?: emptySet())
         val existingInWindow = existingIds(fromMs, now)
 
-        // 1. Tombstony z porovnání okna (včetně EKG a modified položek, aby se EKG záznamy nesmazaly!)
+        // 1. Tombstony z porovnání okna (při selhání v2/heart vyřadíme ecg:* aby nedošlo k falešnému smazání)
+        val existingForReconcile = if (heartOk) {
+            existingInWindow
+        } else {
+            existingInWindow.filterNot { it.contains("|id:ecg:") }.toSet()
+        }
         val fetchedIdsInWindow = (windowMapped.items.map { it.id } + modifiedMapped?.items.orEmpty().map { it.id } + ecgItems.map { it.id }).toSet()
         val windowTombstones = if (windowMapped.items.isEmpty()) {
             emptyList()
         } else {
-            Reconcile.tombstones(existingInWindow, fetchedIdsInWindow)
+            Reconcile.tombstones(existingForReconcile, fetchedIdsInWindow)
         }
 
-        // 2. Explicitní tombstony ze skupin označených serverem jako `deleted`
+        // 2. Explicitní tombstony ze skupin označených serverem jako `deleted` (bez časového okna)
         val explicitDeletedTombstones = if (allDeletedGrpIds.isNotEmpty()) {
-            existingInWindow.filter { existingId ->
+            val outsideWindowPool = existingIdsByGrpIds(allDeletedGrpIds)
+            val pool = (existingInWindow + outsideWindowPool).distinct()
+            pool.filter { existingId ->
                 allDeletedGrpIds.any { grpId -> existingId.contains("|id:$grpId:") }
             }
         } else emptyList()

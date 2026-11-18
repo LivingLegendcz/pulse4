@@ -3763,7 +3763,7 @@ fun getMetricArtworkRes(type: MetricType): Int = when (type) {
     MetricType.BODY_FAT, MetricType.VISCERAL_FAT -> R.drawable.img_motif_body_fat
     MetricType.BODY_WATER -> R.drawable.img_motif_body_water
     MetricType.BONE_MASS -> R.drawable.img_motif_bone_mass
-    MetricType.ECG, MetricType.VASCULAR_AGE, MetricType.PULSE_WAVE_VELOCITY -> R.drawable.img_motif_ecg_signal
+    MetricType.ECG, MetricType.ECG_HR, MetricType.ECG_QTC, MetricType.ECG_QRS, MetricType.ECG_AFIB, MetricType.VASCULAR_AGE, MetricType.PULSE_WAVE_VELOCITY -> R.drawable.img_motif_ecg_signal
     MetricType.SPO2, MetricType.RESPIRATION -> R.drawable.img_nordic_wellness_hero
 }
 
@@ -3780,7 +3780,7 @@ fun getMetricMotifKind(type: MetricType): MetricMotifKind = when (type) {
     MetricType.BODY_FAT, MetricType.VISCERAL_FAT -> MetricMotifKind.BODY_FAT
     MetricType.BODY_WATER -> MetricMotifKind.BODY_WATER
     MetricType.BONE_MASS -> MetricMotifKind.BONE_MASS
-    MetricType.ECG, MetricType.VASCULAR_AGE, MetricType.PULSE_WAVE_VELOCITY -> MetricMotifKind.ECG_SIGNAL
+    MetricType.ECG, MetricType.ECG_HR, MetricType.ECG_QTC, MetricType.ECG_QRS, MetricType.ECG_AFIB, MetricType.VASCULAR_AGE, MetricType.PULSE_WAVE_VELOCITY -> MetricMotifKind.ECG_SIGNAL
     MetricType.SPO2, MetricType.RESPIRATION -> MetricMotifKind.HRV_AUTONOMIC
 }
 

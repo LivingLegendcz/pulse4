@@ -26,10 +26,11 @@ class Fmt(
     fun pace(secPerKm: Double?): String =
         secPerKm?.takeIf { it.isFinite() && it > 0 }?.let {
             if (isImperial) {
-                val secPerMi = (it * 1.609344).toInt()
+                val secPerMi = kotlin.math.round(it * 1.609344).toInt()
                 String.format(locale, "%d:%02d /mi", secPerMi / 60, secPerMi % 60)
             } else {
-                String.format(locale, "%d:%02d /km", it.toInt() / 60, it.toInt() % 60)
+                val sec = kotlin.math.round(it).toInt()
+                String.format(locale, "%d:%02d /km", sec / 60, sec % 60)
             }
         } ?: "—"
 

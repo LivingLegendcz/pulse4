@@ -86,6 +86,25 @@ object Labels {
         is ProviderError.Timeout -> "Odpověď nedorazila; výsledek je nejistý."
     }
 
+    /** UX-5: Lidská zpráva pro chyby přihlášení bez technických detailů (`e::class.simpleName` / `e.message`). */
+    fun loginError(e: Throwable): String = when (e) {
+        is ProviderError.MfaRequired -> "Garmin vyžaduje dvoufázový kód – zadejte ho do pole Ověřovací kód a potvrďte."
+        is ProviderError.Unauthorized -> "Neplatný e-mail, heslo nebo ověřovací kód. Zkontrolujte údaje a zkuste to znovu."
+        is ProviderError.Forbidden -> "Přístup byl službou odepřen. Zkuste se přihlásit později."
+        is ProviderError.RateLimited -> e.retryAfterS?.let {
+            "Příliš mnoho pokusů o přihlášení. Zkuste to znovu za $it s."
+        } ?: "Příliš mnoho pokusů o přihlášení. Počkejte prosím několik minut a zkuste to znovu."
+        is ProviderError.Network -> "Nepodařilo se připojit ke službě. Zkontrolujte připojení k internetu a zkuste to znovu."
+        is ProviderError.Timeout -> "Spojení se službou vypršelo. Zkuste to znovu."
+        is ProviderError.NotConfigured -> "Přihlášení není správně nastaveno. Zkontrolujte údaje účtu."
+        is ProviderError.Server -> "Služba je dočasně nedostupná. Zkuste to prosím za chvíli."
+        is java.net.UnknownHostException, is java.net.ConnectException ->
+            "Nepodařilo se připojit k internetu. Zkontrolujte síť a zkuste to znovu."
+        is java.net.SocketTimeoutException ->
+            "Spojení vypršelo. Zkuste to znovu."
+        else -> "Přihlášení se nezdařilo. Zkontrolujte údaje a připojení a zkuste to znovu."
+    }
+
     fun action(a: RetryAction) = when (a) {
         RetryAction.RefreshTokenOnce -> "Obnovuje se přístup"
         RetryAction.NeedNewApiKey -> "Je potřeba nový klíč / nové přihlášení"

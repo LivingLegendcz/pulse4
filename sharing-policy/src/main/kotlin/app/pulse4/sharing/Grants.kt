@@ -134,9 +134,13 @@ object CircleAdminPolicy {
         val remaining = currentAdmins - targetMemberId
         if (remaining.isEmpty()) return null
         val nextAdminId = if (targetMemberId == group.adminId) remaining.first() else group.adminId
+        val nextHandover = group.pendingAdminHandover?.takeUnless {
+            it.initiatedBy == targetMemberId || it.targetMemberId == targetMemberId
+        }
         return group.copy(
             adminId = nextAdminId,
             admins = remaining,
+            pendingAdminHandover = nextHandover,
             version = group.version + 1,
         )
     }
@@ -170,6 +174,7 @@ object CircleAdminPolicy {
         if (group.dissolved) return null
         val handover = group.pendingAdminHandover ?: return null
         if (handover.targetMemberId != actorId || nowMs > handover.expiresAtMs) return null
+        if (handover.initiatedBy !in group.effectiveAdmins) return null
         if (actorId !in group.members) return null
         val baseAdmins = group.effectiveAdmins + actorId
         val newAdmins = if (removeInitiator) baseAdmins - handover.initiatedBy else baseAdmins
@@ -206,10 +211,14 @@ object CircleAdminPolicy {
         }
         val remainingAdmins = group.effectiveAdmins - actorId
         val nextAdminId = if (group.adminId == actorId) remainingAdmins.first() else group.adminId
+        val nextHandover = group.pendingAdminHandover?.takeUnless {
+            it.initiatedBy == actorId || it.targetMemberId == actorId
+        }
         return group.copy(
             adminId = nextAdminId,
             members = remainingMembers,
             admins = remainingAdmins,
+            pendingAdminHandover = nextHandover,
             version = group.version + 1,
         )
     }
@@ -238,6 +247,10 @@ object MembershipPolicy {
     fun effectiveRecipients(grant: ShareGrant, group: Group?): Set<String> {
         if (!grant.active) return emptySet()
         val base = grant.recipients - grant.ownerId
-        return if (grant.groupId != null && group != null && group.id == grant.groupId) base.intersect(group.members) else base
+        if (grant.groupId != null) {
+            if (group == null || group.id != grant.groupId || group.dissolved) return emptySet()
+            return base.intersect(group.members)
+        }
+        return base
     }
 }

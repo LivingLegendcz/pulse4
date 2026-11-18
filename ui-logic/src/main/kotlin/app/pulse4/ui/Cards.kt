@@ -3,6 +3,7 @@ package app.pulse4.ui
 import app.pulse4.analytics.Baseline
 import app.pulse4.domain.MetricObservation
 import app.pulse4.domain.MetricType
+import app.pulse4.domain.Provider
 import app.pulse4.domain.Reading
 import app.pulse4.provider.SyncArea
 import java.time.LocalDate
@@ -37,10 +38,29 @@ object Aggregation {
         else -> Agg.AVG
     }
 
+    private val sumProviderOrder = listOf(
+        Provider.GARMIN_PERSONAL,
+        Provider.GARMIN_EXTENDED,
+        Provider.WITHINGS_API,
+        Provider.HEALTH_CONNECT,
+        Provider.MANUAL,
+    )
+
     fun value(t: MetricType, samples: List<MetricObservation>): Double? {
         val s = samples.filter { it.type == t && !it.deleted && it.value.isFinite() }.sortedBy { it.startUtcMs }
         if (s.isEmpty()) return null
-        return when (of(t)) { Agg.SUM -> s.sumOf { it.value }; Agg.LAST -> s.last().value; Agg.AVG -> s.map { it.value }.average() }
+        return when (of(t)) {
+            Agg.SUM -> {
+                val byProvider = s.groupBy { it.provider }
+                val deduped = if (byProvider.size <= 1) s else {
+                    val chosen = sumProviderOrder.firstOrNull { it in byProvider } ?: s.first().provider
+                    byProvider[chosen].orEmpty()
+                }
+                deduped.sumOf { it.value }
+            }
+            Agg.LAST -> s.last().value
+            Agg.AVG -> s.map { it.value }.average()
+        }
     }
 }
 

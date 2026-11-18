@@ -52,6 +52,9 @@ import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Checkbox
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -99,6 +102,8 @@ import app.pulse4.sharing.TimeScope
 import app.pulse4.sync.DeliveryState
 import app.pulse4.sync.Wire
 import app.pulse4.ui.Fmt
+import app.pulse4.ui.GrantEditor
+import app.pulse4.ui.Labels
 import app.pulse4.ui.Status
 import app.pulse4.ui.UnitSystem
 import java.time.LocalDate
@@ -810,23 +815,29 @@ private fun GlobalSharingSection(
         grants.mapNotNull { runCatching { Wire.json.decodeFromString(ShareGrant.serializer(), it.json) }.getOrNull() }
             .filter { it.active }
     }
+    val directGrants = remember(activeGrants) { GrantEditor.directGrants(activeGrants) }
 
-    val initialFields = remember(activeGrants) {
-        activeGrants.firstOrNull()?.fields ?: emptySet()
+    var enabledCategoryNames by rememberSaveable { mutableStateOf(emptySet<String>()) }
+    var selectedRecipients by rememberSaveable { mutableStateOf(emptySet<String>()) }
+    var extraActFieldNames by rememberSaveable { mutableStateOf(emptySet<String>()) }
+    var isDirty by rememberSaveable { mutableStateOf(false) }
+
+    LaunchedEffect(directGrants, isDirty) {
+        if (!isDirty) {
+            val form = GrantEditor.initialGlobalForm(directGrants)
+            enabledCategoryNames = form.enabledCategories.map { it.name }.toSet()
+            selectedRecipients = form.selectedRecipients
+            extraActFieldNames = form.extraActivityFields.map { it.name }.toSet()
+        }
     }
-    var enabledCategories by remember(initialFields) {
-        mutableStateOf(
-            Category.entries.filter { cat ->
-                val cf = Field.entries.filter { it.category == cat }
-                cf.isNotEmpty() && cf.any { it in initialFields }
-            }.toSet()
-        )
+
+    val enabledCategories = remember(enabledCategoryNames) {
+        enabledCategoryNames.mapNotNull { runCatching { Category.valueOf(it) }.getOrNull() }.toSet()
     }
-    var selectedRecipients by remember(activeGrants, contacts) {
-        mutableStateOf(
-            activeGrants.firstOrNull()?.recipients ?: contacts.map { it.identity }.toSet()
-        )
+    val extraActivityFields = remember(extraActFieldNames) {
+        extraActFieldNames.mapNotNull { runCatching { Field.valueOf(it) }.getOrNull() }.toSet()
     }
+    var showConfirmSaveDialog by remember { mutableStateOf(false) }
     var notice by remember { mutableStateOf<String?>(null) }
 
     val sectionDefs = listOf(
@@ -882,11 +893,17 @@ private fun GlobalSharingSection(
                 // Rychlá tlačítka
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(
-                        onClick = { enabledCategories = Category.entries.toSet() },
+                        onClick = {
+                            enabledCategoryNames = Category.entries.map { it.name }.toSet()
+                            isDirty = true
+                        },
                         modifier = Modifier.weight(1f)
                     ) { Text("Zapnout vše") }
                     OutlinedButton(
-                        onClick = { enabledCategories = emptySet() },
+                        onClick = {
+                            enabledCategoryNames = emptySet()
+                            isDirty = true
+                        },
                         modifier = Modifier.weight(1f)
                     ) { Text("Vypnout vše") }
                 }
@@ -905,7 +922,8 @@ private fun GlobalSharingSection(
                             .fillMaxWidth()
                             .padding(vertical = 4.dp)
                             .clickable {
-                                enabledCategories = if (isOn) enabledCategories - cat else enabledCategories + cat
+                                enabledCategoryNames = if (isOn) enabledCategoryNames - cat.name else enabledCategoryNames + cat.name
+                                isDirty = true
                             }
                     ) {
                         Box(Modifier.fillMaxWidth()) {
@@ -952,10 +970,36 @@ private fun GlobalSharingSection(
                                 Switch(
                                     checked = isOn,
                                     onCheckedChange = { checked ->
-                                        enabledCategories = if (checked) enabledCategories + cat else enabledCategories - cat
+                                        enabledCategoryNames = if (checked) enabledCategoryNames + cat.name else enabledCategoryNames - cat.name
+                                        isDirty = true
                                     }
                                 )
                             }
+                        }
+                    }
+                }
+
+                if (Category.ACTIVITY in enabledCategories) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "Citlivé detaily aktivit (výchozí je pouze souhrn):",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xFFFDE68A)
+                    )
+                    listOf(
+                        Field.ACT_ROUTE to "GPS trasa (může odhalit polohu)",
+                        Field.ACT_EXACT_TIME to "Přesný čas startu a konce",
+                        Field.ACT_FULL_RECORD to "Úplný FIT záznam (obsahuje přesný čas)",
+                    ).forEach { (field, label) ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(
+                                checked = field in extraActivityFields,
+                                onCheckedChange = { checked ->
+                                    extraActFieldNames = if (checked) extraActFieldNames + field.name else extraActFieldNames - field.name
+                                    isDirty = true
+                                }
+                            )
+                            Text(label, style = MaterialTheme.typography.labelSmall, color = Color(0xFFCBD5E1))
                         }
                     }
                 }
@@ -976,6 +1020,7 @@ private fun GlobalSharingSection(
                             onClick = {
                                 val allIds = contacts.map { it.identity }.toSet()
                                 selectedRecipients = if (selectedRecipients.containsAll(allIds)) emptySet() else allIds
+                                isDirty = true
                             },
                             label = { Text("Všechny kontakty (${contacts.size})") },
                             modifier = Modifier.padding(end = 4.dp)
@@ -985,6 +1030,7 @@ private fun GlobalSharingSection(
                                 selected = c.identity in selectedRecipients,
                                 onClick = {
                                     selectedRecipients = if (c.identity in selectedRecipients) selectedRecipients - c.identity else selectedRecipients + c.identity
+                                    isDirty = true
                                 },
                                 label = { Text(c.displayName) },
                                 modifier = Modifier.padding(end = 4.dp)
@@ -996,36 +1042,87 @@ private fun GlobalSharingSection(
                 Spacer(Modifier.height(10.dp))
                 Button(
                     enabled = contacts.isNotEmpty() && selectedRecipients.isNotEmpty(),
-                    onClick = {
-                        scope.launch {
-                            withContext(Dispatchers.IO) {
-                                val self = sl.bridge.ensureStarted().deliveryHash
-                                val today = LocalDate.now(ZoneId.of(sl.settings.zoneId))
-                                // Odvolat předchozí aktivní granty při přepsání globálního profilu
-                                activeGrants.forEach { old -> sl.shareService.revoke(old.id, System.currentTimeMillis()) }
-                                val chosenFields = Field.entries.filter { it.category in enabledCategories }.toSet()
-                                if (chosenFields.isNotEmpty()) {
-                                    val newGrant = ShareGrant(
-                                        id = UUID.randomUUID().toString(),
-                                        ownerId = self,
-                                        recipients = selectedRecipients,
-                                        fields = chosenFields,
-                                        scope = TimeScope.continuousFrom(today.minusDays(7)),
-                                        groupId = null,
-                                        createdAtMs = System.currentTimeMillis()
-                                    )
-                                    sl.shareService.saveGrant(newGrant)
-                                    sl.shareService.planAndEnqueue(System.currentTimeMillis())
-                                    notice = "Globální sdílení uloženo (${enabledCategories.size} sekcí, ${chosenFields.size} polí) a zařazeno k odeslání."
-                                } else {
-                                    notice = "Všechna sdílení byla vypnuta. Žádná data se nesdílejí."
-                                }
-                            }
-                        }
-                    },
+                    onClick = { showConfirmSaveDialog = true },
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text("Uložit globální profil sdílení")
+                }
+
+                if (showConfirmSaveDialog) {
+                    val diff = GrantEditor.computeGlobalDiff(directGrants, enabledCategories, selectedRecipients)
+                    fun contactNames(ids: Set<String>) = ids.joinToString(", ") { id ->
+                        contacts.firstOrNull { it.identity == id }?.displayName ?: id.take(10)
+                    }
+                    AlertDialog(
+                        onDismissRequest = { showConfirmSaveDialog = false },
+                        containerColor = Color(0xFF0A101B),
+                        titleContentColor = Color.White,
+                        textContentColor = Color(0xFFCBD5E1),
+                        title = { Text("Potvrdit změny přímého sdílení", fontWeight = FontWeight.ExtraBold) },
+                        text = {
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                if (diff.newlySharedRecipients.isNotEmpty()) {
+                                    Text("Nově uvidí: ${contactNames(diff.newlySharedRecipients)}", style = MaterialTheme.typography.bodySmall, color = Color(0xFF34D399))
+                                }
+                                if (diff.removedRecipients.isNotEmpty()) {
+                                    Text("Přestane vidět: ${contactNames(diff.removedRecipients)}", style = MaterialTheme.typography.bodySmall, color = Color(0xFFF59E0B))
+                                }
+                                if (diff.newlyAddedCategories.isNotEmpty()) {
+                                    Text("Přidané sekce: ${diff.newlyAddedCategories.joinToString(", ") { it.name }}", style = MaterialTheme.typography.bodySmall)
+                                }
+                                if (diff.removedCategories.isNotEmpty()) {
+                                    Text("Odebrané sekce: ${diff.removedCategories.joinToString(", ") { it.name }}", style = MaterialTheme.typography.bodySmall, color = Color(0xFFF59E0B))
+                                }
+                                Text(
+                                    "Sdílení v kruzích a rodinných vazbách zůstane beze změny. Při zapnutí se odešle i posledních 7 dní historie.",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFF94A3B8)
+                                )
+                            }
+                        },
+                        confirmButton = {
+                            Button(onClick = {
+                                showConfirmSaveDialog = false
+                                scope.launch {
+                                    val resultMsg = withContext(Dispatchers.IO) {
+                                        val now = System.currentTimeMillis()
+                                        val self = sl.bridge.ensureStarted().deliveryHash
+                                        val today = LocalDate.now(ZoneId.of(sl.settings.zoneId))
+                                        directGrants.forEach { old -> sl.shareService.revoke(old.id, now) }
+                                        val newGrant = GrantEditor.buildGlobalGrant(
+                                            id = UUID.randomUUID().toString(),
+                                            ownerId = self,
+                                            existingDirectGrants = directGrants,
+                                            selectedCategories = enabledCategories,
+                                            selectedRecipients = selectedRecipients,
+                                            extraActivityFields = extraActivityFields,
+                                            today = today,
+                                            nowMs = now,
+                                        )
+                                        if (newGrant != null) {
+                                            sl.shareService.saveGrantWithPolicy(newGrant, null).fold(
+                                                onSuccess = {
+                                                    sl.shareService.planAndEnqueue(now)
+                                                    isDirty = false
+                                                    "Globální sdílení uloženo (${enabledCategories.size} sekcí, ${newGrant.fields.size} polí) a zařazeno k odeslání."
+                                                },
+                                                onFailure = { err ->
+                                                    err.message ?: "Uložení globálního sdílení selhalo."
+                                                }
+                                            )
+                                        } else {
+                                            isDirty = false
+                                            "Přímé globální sdílení bylo vypnuto. Kruhy zůstaly beze změny."
+                                        }
+                                    }
+                                    notice = resultMsg
+                                }
+                            }) { Text("Potvrdit a uložit", fontWeight = FontWeight.Bold) }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { showConfirmSaveDialog = false }) { Text("Zrušit", color = Color(0xFF94A3B8)) }
+                        }
+                    )
                 }
 
                 if (onOpenSharingOverview != null) {
@@ -1294,7 +1391,7 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                     val okAreas = res.values.filterIsInstance<app.pulse4.provider.AreaResult.Success>()
                     val failedAreas = res.entries.mapNotNull { (a, r) ->
                         when (r) {
-                            is app.pulse4.provider.AreaResult.Failed -> "${a.name}: ${r.error::class.simpleName}"
+                            is app.pulse4.provider.AreaResult.Failed -> "${a.name}: ${Labels.error(r.error)}"
                             is app.pulse4.provider.AreaResult.NeedsUser -> "${a.name}: vyžaduje přihlášení/klíč"
                             else -> null
                         }
@@ -1438,15 +1535,9 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                                             }
                                         } catch (e: ProviderError.MfaRequired) {
                                             needMfa = true
-                                            "Garmin vyžaduje dvoufázový kód – zadejte ho do pole Ověřovací kód a klikněte na Potvrdit kód."
-                                        } catch (e: ProviderError.Unauthorized) {
-                                            "Neplatný e-mail, heslo nebo ověřovací kód pro Garmin Connect."
-                                        } catch (e: ProviderError.RateLimited) {
-                                            "Garmin dočasně omezil počet pokusů (429 Too Many Requests). Zkuste to za chvíli."
-                                        } catch (e: ProviderError) {
-                                            "Chyba komunikace s Garmin Connect (${e::class.simpleName})."
+                                            Labels.loginError(e)
                                         } catch (e: Exception) {
-                                            "Přihlášení selhalo: ${e.message}"
+                                            Labels.loginError(e)
                                         }
                                     }
                                     if (loginSucceeded) {

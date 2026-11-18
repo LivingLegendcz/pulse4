@@ -9,7 +9,12 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 
 /** Vlastní data jednoho dne tak, jak je zná telefon vlastníka. Nikdy se neposílají přímo. */
-data class OwnerDay(val date: LocalDate, val values: Map<Field, JsonElement>, val measuredAtUtcMs: Long? = null)
+data class OwnerDay(
+    val date: LocalDate,
+    val values: Map<Field, JsonElement>,
+    val measuredAtUtcMs: Long? = null,
+    val fieldTimestamps: Map<Field, Long> = emptyMap(),
+)
 
 /** Skutečně odeslaná omezená podoba dat. Je sestavena nově, ne zkopírována a „zakryta“. */
 @Serializable
@@ -38,12 +43,17 @@ object Projector {
             for (f in grant.fields) day.values[f]?.let { put(f, it) }
         }
         if (allowed.isEmpty()) return null
+        val permittedMeasuredAt = if (day.fieldTimestamps.isNotEmpty()) {
+            allowed.keys.mapNotNull { day.fieldTimestamps[it] }.maxOrNull()
+        } else {
+            day.measuredAtUtcMs
+        }
         return SharedProjection(
             ownerId = grant.ownerId,
             grantId = grant.id,
             date = day.date.toString(),
             fields = allowed,
-            measuredAtUtcMs = day.measuredAtUtcMs,
+            measuredAtUtcMs = permittedMeasuredAt,
             producedAtMs = nowMs,
         )
     }

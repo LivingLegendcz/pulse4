@@ -47,6 +47,7 @@ class Chart(val values: List<Double?>, val trackIndex: IntArray, val xStart: Dou
 
     /** Interval označený v grafu → odpovídající úsek bodů trasy. */
     fun trackRange(chartRange: IntRange): IntRange {
+        if (trackIndex.isEmpty() || size <= 0) return IntRange.EMPTY
         val a = trackIndex[chartRange.first.coerceIn(0, size - 1)]
         val b = trackIndex[chartRange.last.coerceIn(0, size - 1)]
         return minOf(a, b)..maxOf(a, b)

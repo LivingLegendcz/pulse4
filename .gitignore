@@ -12,7 +12,7 @@ local.properties
 *.png
 *.zip
 attachments/
-pulse4-vault/
+pulse4-vault
 .env
 metadata.json
 vault

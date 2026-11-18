@@ -92,10 +92,23 @@ class ReticulumTransport(
      * Jedno okno synchronizace: odeslat splatné, vyzvednout schránku, zpracovat události až do [windowMs].
      * Nikdy nemaže vlastní archiv; nepotvrzené položky zůstávají v outboxu.
      */
-    fun pump(nowMs: Long, windowMs: Long, onApplied: () -> Unit = {}): PumpStats = synchronized(pumpLock) {
+    fun pump(nowMs: Long, windowMs: Long, onApplied: () -> Unit = {}): PumpStats {
         val info = bridge.ensureStarted()
-        val rx = receiver(info.deliveryHash)
         val usePropagation = settings.propagationNode.isNotBlank()
+        ensureContactsRegistered()
+        val preLocalPeers = if (forceGateway) emptySet() else bridge.localPeerHashes()
+        if (usePropagation) {
+            // NEW-5: Run stamp PoW outside pumpLock so incoming message processing is not blocked
+            for (item in outbox.due(nowMs, localPeers = preLocalPeers)) {
+                if (item.recipient !in preLocalPeers) {
+                    runCatching {
+                        bridge.preparePropagationDeposit(item.recipient, item.wire.toString(Charsets.UTF_8), item.eventId)
+                    }
+                }
+            }
+        }
+        return synchronized(pumpLock) {
+        val rx = receiver(info.deliveryHash)
         var sent = 0; var received = 0; var rejected = 0
 
         // Průběžně vyčisti staré již doručené / nahrazené / zrušené položky z outboxu (starší než 24 hodin)
@@ -160,5 +173,6 @@ class ReticulumTransport(
         }
         val inFlight = outbox.due(Long.MAX_VALUE / 2, localPeers = localPeers).size
         PumpStats(sent, received, rejected, inFlight)
+        }
     }
 }

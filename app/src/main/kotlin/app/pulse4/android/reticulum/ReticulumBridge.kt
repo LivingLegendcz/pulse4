@@ -11,6 +11,7 @@ import android.net.wifi.WifiManager
 import app.pulse4.android.data.NetworkMode
 import app.pulse4.android.data.Settings
 import app.pulse4.android.security.SecretStore
+import app.pulse4.sync.E2eeEnvelope
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.io.OutputStream
@@ -81,20 +82,11 @@ sealed interface BridgeEvent {
     data class Delivery(val eventId: String, val state: String, val reason: String?) : BridgeEvent
 }
 
-@Serializable
-internal data class EncryptedEnvelope(
-    val v: Int = 1,
-    val sender: String,
-    val recipient: String,
-    val iv: String,
-    val ciphertext: String,
-    val mac: String,
-    val eventId: String? = null
-)
+internal typealias EncryptedEnvelope = E2eeEnvelope
 
 /**
  * Nativní Kotlin transportní most (PulseSync):
- * 1. Plné end-to-end šifrování (E2EE v2: X25519 ECDH + Ed25519 podpis + AES-256-GCM).
+ * 1. Plné end-to-end šifrování (E2EE v3: ephemeral X25519 + HKDF-SHA256 + Ed25519 podpis + AES-256-GCM + SEC-3 metadata protection; zpětně kompatibilní s v2).
  * 2. Tier 1: Lokální Wi-Fi přenos s nulovou konfigurací přes Android NSD (mDNS) a vestavěný mikro-server.
  * 3. Tier 2: Směrování přes Reticulum (RNS) TCP uzel v internetu s HDLC paketovým rámováním a nativní LXMF Propagation schránkou.
  */
@@ -124,9 +116,7 @@ class ReticulumBridge(
     private val registeredContacts = ConcurrentHashMap<String, String>() // deliveryHash -> publicKeyB64
     private val legacyToPrimaryContact = ConcurrentHashMap<String, String>() // legacy pulse.delivery -> lxmf.delivery
     private val localPeerMap = ConcurrentHashMap<String, String>() // deliveryHash -> "http://ip:port"
-    private val discoveredDestinations = object : LinkedHashMap<String, ByteArray>(64, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ByteArray>?): Boolean = size > 512
-    }
+    internal val routingState = GatewayRoutingState()
 
     private data class PendingDeposit(val eventId: String, val packetHash32: ByteArray, val sentAtMs: Long)
     private val pendingLinkProofs = ConcurrentHashMap<String, PendingDeposit>()
@@ -137,7 +127,13 @@ class ReticulumBridge(
     private val pendingPurgeIds = LinkedHashSet<String>()
     private val getRequestLock = Any()
     private var pendingGetResponse: CompletableFuture<List<Any?>>? = null
+    private var pendingGetRequestId: ByteArray? = null
+    private val resourceCoordinator = LinkResourceCoordinator()
     private var propagationKeepaliveJob: Job? = null
+    @Volatile
+    private var lastPropagationInboundMs: Long = 0L
+    @Volatile
+    private var propagationFractionalStampCost: Int? = null
     private val localServerSemaphore = Semaphore(4)
     @Volatile
     private var legacyDeliveryHash: String? = null
@@ -169,9 +165,11 @@ class ReticulumBridge(
     @Volatile
     var isGatewayOnline = false
         private set
+    val gatewayTransportId: ByteArray?
+        get() = routingState.gatewayTransportId
+
     @Volatile
-    var gatewayTransportId: ByteArray? = null
-        private set
+    internal var rawPacketSenderOverride: ((ByteArray) -> Boolean)? = null
 
     private var ed25519PrivKey: Ed25519PrivateKeyParameters? = null
     private var x25519PrivKey: X25519PrivateKeyParameters? = null
@@ -220,6 +218,28 @@ class ReticulumBridge(
         fun hexToBytes(hex: String): ByteArray = RnsCrypto.hexToBytes(hex)
 
         fun bytesToHex(bytes: ByteArray): String = RnsCrypto.bytesToHex(bytes)
+
+        /**
+         * Derives `(lxmf.delivery, pulse.delivery)` destination hashes from a 64-byte Base64 public key (RE-1).
+         */
+        fun deriveDeliveryHashes(publicKeyB64: String): Pair<String, String> {
+            val pubBytes = runCatching { Base64.getDecoder().decode(publicKeyB64) }.getOrNull()
+                ?: publicKeyB64.toByteArray(Charsets.UTF_8)
+            val sha256 = MessageDigest.getInstance("SHA-256")
+            val pub64 = if (pubBytes.size >= 64) pubBytes.copyOf(64) else {
+                val padded = ByteArray(64)
+                System.arraycopy(pubBytes, 0, padded, 0, minOf(pubBytes.size, 64))
+                padded
+            }
+            val identHash = sha256.digest(pub64).copyOf(16)
+            val lxmfNameHash = sha256.digest(LxmfCodec.DELIVERY_APP_NAME.toByteArray(Charsets.UTF_8)).copyOf(10)
+            val lxmfDestHex = bytesToHex(sha256.digest(lxmfNameHash + identHash).copyOf(16))
+            val legacyNameHash = sha256.digest(LxmfCodec.LEGACY_DELIVERY_APP_NAME.toByteArray(Charsets.UTF_8)).copyOf(10)
+            val legacyDestHex = bytesToHex(sha256.digest(legacyNameHash + identHash).copyOf(16))
+            return lxmfDestHex to legacyDestHex
+        }
+
+        fun derivePrimaryDeliveryHash(publicKeyB64: String): String = deriveDeliveryHashes(publicKeyB64).first
     }
 
     @Synchronized
@@ -326,7 +346,8 @@ class ReticulumBridge(
             propagationLink = null
             propagationLinkConnecting = false
         }
-        gatewayTransportId = null
+        resourceCoordinator.clear()
+        routingState.onConnectionChanged(clearEndpoint = true)
 
         localServerJob?.cancel()
         localServerJob = null
@@ -366,7 +387,11 @@ class ReticulumBridge(
         val cm = context.applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
         val cb = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
+                routingState.onConnectionChanged()
                 networkWakeSignal.trySend(Unit)
+            }
+            override fun onLost(network: Network) {
+                routingState.onConnectionChanged()
             }
         }
         defaultNetworkCallback = cb
@@ -626,13 +651,19 @@ class ReticulumBridge(
             tcpSocket = null
             tcpWriter = null
             isGatewayOnline = false
+            routingState.onConnectionChanged(clearEndpoint = true)
             _gatewayHealth.value = GatewayHealth(state = GatewayHealthState.UNCONFIGURED)
             runCatching { oldSocket?.close() }
             return
         }
         val port = settings.gatewayPort.takeIf { it > 0 } ?: 4242
 
-        if (tcpJob?.isActive == true && isGatewayOnline && tcpSocket?.isConnected == true && tcpSocket?.isClosed == false) {
+        if (tcpJob?.isActive == true &&
+            isGatewayOnline &&
+            tcpSocket?.isConnected == true &&
+            tcpSocket?.isClosed == false &&
+            routingState.isSameGatewayEndpoint(host, port)
+        ) {
             return
         }
 
@@ -641,6 +672,8 @@ class ReticulumBridge(
         tcpSocket = null
         tcpWriter = null
         isGatewayOnline = false
+        routingState.onGatewayEndpointSelected(host, port)
+        routingState.onConnectionChanged()
         _gatewayHealth.value = GatewayHealth(host = host, port = port, state = GatewayHealthState.CONNECTING)
         runCatching { oldSocket?.close() }
 
@@ -678,12 +711,15 @@ class ReticulumBridge(
                     _gatewayHealth.value = GatewayHealth(host = host, port = port, state = GatewayHealthState.ONLINE)
                     android.util.Log.i("PulseSync", "Úspěšně připojeno k Reticulum gateway $host:$port")
 
-                    // Odešli úvodní Announce paket a případně Path Request pro propagation uzel
+                    // Odešli úvodní Announce paket a Path Request pro propagation uzel i registrované kontakty
                     sendRnsAnnounce()
                     val propHash = settings.propagationNode.trim()
                     if (propHash.length == 32) {
-                        runCatching {
-                            sendRawRnsPacket(RnsCrypto.buildPathRequestPacket(hexToBytes(propHash), gatewayTransportId))
+                        requestPathIfNeeded(propHash, force = true)
+                    }
+                    for (contactDest in registeredContacts.keys) {
+                        if (!legacyToPrimaryContact.containsKey(contactDest)) {
+                            requestPathIfNeeded(contactDest, force = true)
                         }
                     }
 
@@ -744,7 +780,8 @@ class ReticulumBridge(
                         propagationLink = null
                         propagationLinkConnecting = false
                     }
-                    gatewayTransportId = null
+                    resourceCoordinator.clear()
+                    routingState.onConnectionChanged(clearEndpoint = true)
                     runCatching { currentSocket?.close() }
                 }
                 val backoffMs = if (failures > 0) {
@@ -777,8 +814,7 @@ class ReticulumBridge(
         // Dynamicky zachytíme transport ID internetové brány z jakéhokoliv transport paketu
         if (headerType == 1 && packet.size >= 18) {
             val tId = packet.copyOfRange(2, 18)
-            if (gatewayTransportId == null || !gatewayTransportId.contentEquals(tId)) {
-                gatewayTransportId = tId
+            if (routingState.updateGatewayTransportId(tId)) {
                 android.util.Log.i("PulseSync", "Zjištěno Transport ID internetové brány: ${bytesToHex(tId)}")
             }
         } else if (headerType == 0 && packet.size >= 51) {
@@ -788,8 +824,7 @@ class ReticulumBridge(
             // Payload začíná na indexu 19, transport ID brány je na offsetu 16..32 v payloadu (bajty 35..51 paketu)
             if (destHex.equals("6b9f66014d9853faab220fba47d02761", ignoreCase = true)) {
                 val tId = packet.copyOfRange(35, 51)
-                if (gatewayTransportId == null || !gatewayTransportId.contentEquals(tId)) {
-                    gatewayTransportId = tId
+                if (routingState.updateGatewayTransportId(tId)) {
                     android.util.Log.i("PulseSync", "Zjištěno Transport ID internetové brány z path request: ${bytesToHex(tId)}")
                 }
             }
@@ -800,12 +835,14 @@ class ReticulumBridge(
             val parsed = RnsAnnounceParser.parse(packet)
             if (parsed != null && parsed.verified) {
                 val destLower = parsed.destinationHash.lowercase()
-                synchronized(discoveredDestinations) {
-                    discoveredDestinations[destLower] = parsed.publicKey64
-                }
+                routingState.recordDiscoveredDestination(destLower, parsed.publicKey64)
                 if (destLower == settings.propagationNode.trim().lowercase()) {
                     LxmfCodec.parsePropagationAnnounceAppData(parsed.appData)?.let { info ->
                         propagationNodeInfo = info
+                        val rawList = runCatching { MsgPack.decode(parsed.appData).first as? List<*> }.getOrNull()
+                        val fracList = rawList?.getOrNull(7) as? List<*>
+                        val fracCost = (fracList?.getOrNull(0) as? Number)?.toDouble()
+                        propagationFractionalStampCost = fracCost?.let { kotlin.math.ceil(it).toInt().coerceIn(0, 24) }
                         android.util.Log.i(
                             "PulseSync",
                             "Aktualizováno info LXMF propagation uzlu: accepting=${info.acceptingMessages}, stampCost=${info.stampCost}, limit=${info.perTransferLimitKb}KB"
@@ -837,6 +874,7 @@ class ReticulumBridge(
             val link = propagationLink
             if (link != null && destHex.equals(link.linkIdHex, ignoreCase = true)) {
                 link.touchInbound()
+                lastPropagationInboundMs = System.currentTimeMillis()
                 if (contextByte == RnsContext.LRPROOF) {
                     val rttPkt = link.handleLinkProof(payload)
                     if (rttPkt != null) {
@@ -848,8 +886,14 @@ class ReticulumBridge(
                     val pktHashHex = bytesToHex(payload.copyOfRange(0, 32))
                     val pending = pendingLinkProofs.remove(pktHashHex)
                     if (pending != null && link.verifyPacketProof(payload, pending.packetHash32)) {
-                        cachedPropagationDeposits.remove(pending.eventId)
+                        removeCachedDeposit(pending.eventId)
                         emitEvent(BridgeEvent.Delivery(pending.eventId, "STORED", null))
+                    }
+                } else if (contextByte == RnsContext.RESOURCE_PRF) {
+                    val resProof = resourceCoordinator.handleProof(contextByte, payload)
+                    if (resProof != null) {
+                        removeCachedDeposit(resProof.eventId)
+                        emitEvent(BridgeEvent.Delivery(resProof.eventId, "STORED", null))
                     }
                 }
             }
@@ -860,6 +904,7 @@ class ReticulumBridge(
 
         val activeLink = propagationLink
         if (activeLink != null && destHex.equals(activeLink.linkIdHex, ignoreCase = true)) {
+            lastPropagationInboundMs = System.currentTimeMillis()
             if (contextByte == RnsContext.KEEPALIVE) { // KEEPALIVE (0xFA) - nešifrovaný
                 activeLink.touchInbound()
                 if (payload.size == 1 && payload[0] == 0xFF.toByte()) {
@@ -875,9 +920,20 @@ class ReticulumBridge(
                             propagationLinkConnecting = false
                         }
                     }
+                    resourceCoordinator.clear()
                     propagationKeepaliveJob?.cancel()
                     propagationKeepaliveJob = null
                 }
+                return
+            }
+            val (consumedResource, completedResource) = resourceCoordinator.handleLinkData(
+                link = activeLink,
+                contextByte = contextByte,
+                rawPayload = payload,
+                sendPacket = ::sendRawRnsPacket,
+            )
+            if (consumedResource) {
+                completedResource?.let { handleCompletedInboundResource(it) }
                 return
             }
             val decrypted = activeLink.decryptLinkPayload(payload) ?: return
@@ -898,6 +954,38 @@ class ReticulumBridge(
         }
     }
 
+    private fun handleCompletedInboundResource(result: LinkResourceCoordinator.ResourceInboundResult) {
+        if (result.isResponse) {
+            val decoded = runCatching { MsgPack.decode(result.data).first }.getOrNull() as? List<*>
+            val responseData: List<Any?> = when {
+                decoded == null -> emptyList()
+                decoded.size == 2 && decoded[0] is ByteArray && decoded[1] is List<*> ->
+                    @Suppress("UNCHECKED_CAST") (decoded[1] as List<Any?>)
+                else -> decoded
+            }
+            synchronized(getRequestLock) {
+                val expectedId = pendingGetRequestId
+                val actualId = result.requestId
+                if (expectedId == null || actualId == null || MessageDigest.isEqual(expectedId, actualId)) {
+                    pendingGetResponse?.complete(responseData)
+                }
+            }
+            return
+        }
+
+        val selfHash = info?.deliveryHash ?: return
+        val lxmfMsg = LxmfCodec.unpack(result.data)
+        if (lxmfMsg != null) {
+            val senderPub = registeredContacts[lxmfMsg.sourceHash]?.let { decodeContactPubKey64(it) }
+            val verified = senderPub?.let { LxmfCodec.unpack(result.data, it.second.encoded)?.signatureValid } ?: false
+            if (senderPub != null && verified) {
+                processIncomingEncryptedEnvelope(String(lxmfMsg.content, Charsets.UTF_8), selfHash)
+            }
+            return
+        }
+        processIncomingEncryptedEnvelope(String(result.data, Charsets.UTF_8), selfHash)
+    }
+
     private fun handlePropagationLinkPayload(contextByte: Byte, plaintext: ByteArray) {
         if (contextByte == RnsContext.NONE) {
             val list = runCatching { MsgPack.decode(plaintext).first as? List<*> }.getOrNull()
@@ -905,7 +993,7 @@ class ReticulumBridge(
             if (code == LxmfCodec.ERROR_INVALID_STAMP) {
                 val evId = lastDepositEventId
                 if (evId != null) {
-                    cachedPropagationDeposits.remove(evId)
+                    removeCachedDeposit(evId)
                     emitEvent(BridgeEvent.Delivery(evId, "FAILED", "ERROR_INVALID_STAMP"))
                 }
                 android.util.Log.w("PulseSync", "LXMF propagation node odmítl stamp (ERROR_INVALID_STAMP)")
@@ -914,14 +1002,35 @@ class ReticulumBridge(
         }
         if (contextByte == RnsContext.RESPONSE) { // RNS Link RESPONSE [requestId, responseData]
             val decoded = runCatching { MsgPack.decode(plaintext).first }.getOrNull() as? List<*> ?: return
+            val respReqId = decoded.getOrNull(0) as? ByteArray
             val responseData = decoded.getOrNull(1) as? List<*>
             synchronized(getRequestLock) {
-                pendingGetResponse?.complete(responseData ?: emptyList<Any?>())
+                val expectedId = pendingGetRequestId
+                if (expectedId == null || (respReqId != null && MessageDigest.isEqual(expectedId, respReqId))) {
+                    pendingGetResponse?.complete(responseData ?: emptyList<Any?>())
+                }
             }
         }
     }
 
+    internal fun requestPathIfNeeded(
+        destHashHex: String,
+        force: Boolean = false,
+        nowMs: Long = System.currentTimeMillis(),
+    ): Boolean {
+        val pkt = routingState.buildPathRequestIfNeeded(
+            destHashHex = destHashHex,
+            isGatewayOnline = isGatewayOnline,
+            force = force,
+            nowMs = nowMs,
+        ) ?: return false
+        return sendRawRnsPacket(pkt).also { sent ->
+            if (sent) routingState.markPathRequested(destHashHex, nowMs)
+        }
+    }
+
     private fun sendRawRnsPacket(rawPacket: ByteArray): Boolean {
+        rawPacketSenderOverride?.let { return it(rawPacket) }
         val writer = tcpWriter ?: return false
         val s = tcpSocket ?: return false
         if (!s.isConnected || s.isClosed) return false
@@ -937,20 +1046,40 @@ class ReticulumBridge(
         }
     }
 
+    private fun tearDownPropagationLink(link: RnsLinkSession? = null) {
+        synchronized(propagationLinkLock) {
+            val current = propagationLink ?: return
+            if (link != null && current !== link) return
+            current.close()
+            propagationLink = null
+            propagationLinkConnecting = false
+        }
+        resourceCoordinator.clear()
+        propagationKeepaliveJob?.cancel()
+        propagationKeepaliveJob = null
+    }
+
     private fun startPropagationKeepalive(link: RnsLinkSession) {
+        lastPropagationInboundMs = System.currentTimeMillis()
         propagationKeepaliveJob?.cancel()
         propagationKeepaliveJob = scope.launch {
             while (isActive && link.state == RnsLinkSession.State.ACTIVE && propagationLink === link) {
+                val now = System.currentTimeMillis()
                 val intervalMs = link.keepaliveIntervalMs.coerceAtLeast(5_000L)
-                val idleMs = System.currentTimeMillis() - link.lastActivityMs
-                if (idleMs > intervalMs * 2 + 10_000L) {
-                    link.close()
-                    synchronized(propagationLinkLock) {
-                        if (propagationLink === link) propagationLink = null
-                    }
+                val inboundIdleMs = now - lastPropagationInboundMs
+                if (inboundIdleMs > intervalMs * 2 + 10_000L) {
+                    tearDownPropagationLink(link)
                     break
                 }
-                if (idleMs >= intervalMs) {
+                // NEW-4: tear down link if an outbound deposit PROOF is missing beyond 30s
+                val staleProof = pendingLinkProofs.entries.firstOrNull { now - it.value.sentAtMs > 30_000L }
+                if (staleProof != null) {
+                    pendingLinkProofs.remove(staleProof.key)
+                    emitEvent(BridgeEvent.Delivery(staleProof.value.eventId, "FAILED", "PROOF_TIMEOUT"))
+                    tearDownPropagationLink(link)
+                    break
+                }
+                if (now - link.lastActivityMs >= intervalMs) {
                     link.buildKeepalivePacket()?.let { sendRawRnsPacket(it) }
                 }
                 delay(minOf(intervalMs / 2, 10_000L).coerceAtLeast(1_000L))
@@ -962,14 +1091,12 @@ class ReticulumBridge(
         val propHash = settings.propagationNode.trim().lowercase()
         if (propHash.length != 32 || !isGatewayOnline) return null
 
-        var propPubKey = synchronized(discoveredDestinations) { discoveredDestinations[propHash] }
+        var propPubKey = routingState.getDiscoveredPublicKey(propHash)
         if (propPubKey == null) {
-            runCatching {
-                sendRawRnsPacket(RnsCrypto.buildPathRequestPacket(hexToBytes(propHash), gatewayTransportId))
-            }
+            requestPathIfNeeded(propHash, force = true)
             val pathDeadline = System.currentTimeMillis() + 2000L
             while (System.currentTimeMillis() < pathDeadline) {
-                propPubKey = synchronized(discoveredDestinations) { discoveredDestinations[propHash] }
+                propPubKey = routingState.getDiscoveredPublicKey(propHash)
                 if (propPubKey != null) break
                 Thread.sleep(50)
             }
@@ -1039,6 +1166,7 @@ class ReticulumBridge(
         if (!s.isConnected || s.isClosed) return false
 
         return try {
+            requestPathIfNeeded(destHashHex)
             val destBytes = hexToBytes(destHashHex)
             if (destBytes.size != 16) return false
             val tId = gatewayTransportId
@@ -1140,6 +1268,7 @@ class ReticulumBridge(
             tcpSocket = null
             tcpWriter = null
             isGatewayOnline = false
+            routingState.onConnectionChanged(clearEndpoint = true)
             _gatewayHealth.value = GatewayHealth(state = GatewayHealthState.UNCONFIGURED)
             return
         }
@@ -1151,6 +1280,7 @@ class ReticulumBridge(
             tcpSocket = null
             tcpWriter = null
             isGatewayOnline = false
+            routingState.onConnectionChanged(clearEndpoint = true)
             _gatewayHealth.value = GatewayHealth(state = GatewayHealthState.UNCONFIGURED)
         }
     }
@@ -1186,24 +1316,13 @@ class ReticulumBridge(
 
     /** Registruje kontakt (veřejný klíč z QR) a vrací odvozenou adresu lxmf.delivery */
     fun addContact(publicKeyB64: String): String {
-        val pubBytes = runCatching { Base64.getDecoder().decode(publicKeyB64) }.getOrNull()
-            ?: publicKeyB64.toByteArray(Charsets.UTF_8)
-        val sha256 = MessageDigest.getInstance("SHA-256")
-        val pub64 = if (pubBytes.size >= 64) pubBytes.copyOf(64) else {
-            val padded = ByteArray(64)
-            System.arraycopy(pubBytes, 0, padded, 0, minOf(pubBytes.size, 64))
-            padded
-        }
-        val identHash = sha256.digest(pub64).copyOf(16)
-        val nameHash = sha256.digest(LxmfCodec.DELIVERY_APP_NAME.toByteArray(Charsets.UTF_8)).copyOf(10)
-        val destHash = sha256.digest(nameHash + identHash).copyOf(16)
-        val destHex = bytesToHex(destHash)
+        val (destHex, legacyDestHex) = deriveDeliveryHashes(publicKeyB64)
         registeredContacts[destHex] = publicKeyB64
-
-        val legacyNameHash = sha256.digest(LxmfCodec.LEGACY_DELIVERY_APP_NAME.toByteArray(Charsets.UTF_8)).copyOf(10)
-        val legacyDestHex = bytesToHex(sha256.digest(legacyNameHash + identHash).copyOf(16))
         registeredContacts[legacyDestHex] = publicKeyB64
         legacyToPrimaryContact[legacyDestHex] = destHex
+        if (isGatewayOnline && settings.networkMode != NetworkMode.LOCAL_ONLY) {
+            requestPathIfNeeded(destHex)
+        }
         return destHex
     }
 
@@ -1231,6 +1350,9 @@ class ReticulumBridge(
             localPeerMap.remove(destHash, localEndpoint)
         }
         if (settings.networkMode == NetworkMode.LOCAL_ONLY) return false
+        if (isGatewayOnline) {
+            requestPathIfNeeded(destHash)
+        }
         val propReady = usePropagation && settings.propagationNode.trim().length == 32
         return isGatewayOnline && (propReady || registeredContacts.containsKey(destHash))
     }
@@ -1243,7 +1365,7 @@ class ReticulumBridge(
     fun send(destHash: String, content: String, propagated: Boolean, eventId: String, forceGateway: Boolean = false) {
         val selfInfo = ensureStarted()
         val encryptedEnvelope = encryptPayload(selfInfo.deliveryHash, destHash, content, eventId)
-        val jsonPayload = json.encodeToString(encryptedEnvelope)
+        val jsonPayload = BridgeEnvelopeCrypto.encode(encryptedEnvelope)
 
         // 1. Zkouška přímého přenosu po lokální Wi-Fi (raw Socket, nepodléhá Android cleartext HTTP omezení)
         val localEndpoint = if (forceGateway) null else localPeerMap[destHash]
@@ -1302,46 +1424,104 @@ class ReticulumBridge(
         }.getOrDefault(false)
     }
 
-    private fun sendViaLxmfPropagation(destHash: String, payloadBytes: ByteArray, eventId: String): Boolean = runCatching {
-        val selfInfo = info ?: return false
-        val edPriv = ed25519PrivKey ?: return false
-        val recPub64B64 = registeredContacts[destHash] ?: return false
+    private fun depositCacheFile(eventId: String): java.io.File {
+        val dir = java.io.File(context.filesDir, "rns_deposit_cache").apply { mkdirs() }
+        val key = bytesToHex(MessageDigest.getInstance("SHA-256").digest(eventId.toByteArray(Charsets.UTF_8)))
+        return java.io.File(dir, "$key.lxd")
+    }
+
+    private fun getCachedDeposit(eventId: String): ByteArray? {
+        cachedPropagationDeposits[eventId]?.let { return it }
+        val f = runCatching { depositCacheFile(eventId) }.getOrNull() ?: return null
+        if (!f.exists()) return null
+        return runCatching { f.readBytes() }.getOrNull()?.also {
+            cachedPropagationDeposits[eventId] = it
+        }
+    }
+
+    private fun putCachedDeposit(eventId: String, bytes: ByteArray) {
+        if (cachedPropagationDeposits.size > 256) {
+            cachedPropagationDeposits.clear()
+        }
+        cachedPropagationDeposits[eventId] = bytes
+        runCatching { depositCacheFile(eventId).writeBytes(bytes) }
+    }
+
+    private fun removeCachedDeposit(eventId: String) {
+        cachedPropagationDeposits.remove(eventId)
+        runCatching { depositCacheFile(eventId).delete() }
+    }
+
+    /**
+     * Pre-computes encrypted LXMF + PoW stamp for [eventId] outside `pumpLock` (NEW-5, NEW-7).
+     */
+    fun preparePropagationDeposit(destHash: String, content: String, eventId: String) {
+        if (getCachedDeposit(eventId) != null) return
+        val selfInfo = info ?: return
+        val primaryDestHash = legacyToPrimaryContact[destHash] ?: destHash
+        val encryptedEnvelope = runCatching { encryptPayload(selfInfo.deliveryHash, primaryDestHash, content, eventId) }.getOrNull()
+            ?: return
+        val payloadBytes = BridgeEnvelopeCrypto.encode(encryptedEnvelope).toByteArray(Charsets.UTF_8)
+        buildOrLoadPropagationLxd(primaryDestHash, payloadBytes, eventId)
+    }
+
+    private fun buildOrLoadPropagationLxd(destHash: String, payloadBytes: ByteArray, eventId: String): ByteArray? {
+        val primaryDestHash = legacyToPrimaryContact[destHash] ?: destHash
+        getCachedDeposit(eventId)?.let { return it }
+        val selfInfo = info ?: return null
+        val edPriv = ed25519PrivKey ?: return null
+        val recPub64B64 = registeredContacts[primaryDestHash] ?: return null
         val recPubBytes = Base64.getDecoder().decode(recPub64B64)
-        if (recPubBytes.size < 64) return false
+        if (recPubBytes.size < 64) return null
         val recXPub32 = recPubBytes.copyOfRange(0, 32)
         val recIdent16 = MessageDigest.getInstance("SHA-256").digest(recPubBytes.copyOf(64)).copyOf(16)
 
-        val lxd = cachedPropagationDeposits[eventId] ?: run {
-            val lxmfWire = LxmfCodec.pack(
-                destinationHash = destHash,
-                sourceHash = selfInfo.deliveryHash,
-                edPriv = edPriv,
-                content = payloadBytes,
+        val lxmfWire = LxmfCodec.pack(
+            destinationHash = primaryDestHash,
+            sourceHash = selfInfo.deliveryHash,
+            edPriv = edPriv,
+            content = payloadBytes,
+        )
+        val encrypted = LxmfCodec.encryptPropagationPayload(
+            lxmfWire = lxmfWire,
+            recipientX25519Pub32 = recXPub32,
+            recipientIdentityHash16 = recIdent16,
+        )
+        val transientId = LxmfStamper.transientId(encrypted)
+        val baseCost = propagationFractionalStampCost
+            ?: propagationNodeInfo?.let { maxOf(0, it.stampCost - it.stampCostFlexibility) }
+            ?: 13
+        val targetCost = baseCost.coerceIn(0, 24)
+        val stamp = runBlocking(Dispatchers.Default) {
+            LxmfStamper.generateStamp(
+                material = transientId,
+                targetCost = targetCost,
+                expandRounds = LxmfStamper.PN_WORKBLOCK_ROUNDS,
             )
-            val encrypted = LxmfCodec.encryptPropagationPayload(
-                lxmfWire = lxmfWire,
-                recipientX25519Pub32 = recXPub32,
-                recipientIdentityHash16 = recIdent16,
-            )
-            val transientId = LxmfStamper.transientId(encrypted)
-            val targetCost = propagationNodeInfo?.let { maxOf(0, it.stampCost - it.stampCostFlexibility) } ?: 13
-            val stamp = runBlocking(Dispatchers.Default) {
-                LxmfStamper.generateStamp(
-                    material = transientId,
-                    targetCost = targetCost,
-                    expandRounds = LxmfStamper.PN_WORKBLOCK_ROUNDS,
-                )
-            } ?: return false
-            val built = encrypted + stamp
-            if (cachedPropagationDeposits.size > 256) {
-                cachedPropagationDeposits.clear()
-            }
-            cachedPropagationDeposits[eventId] = built
-            built
-        }
+        } ?: return null
+        return (encrypted + stamp).also { putCachedDeposit(eventId, it) }
+    }
+
+    private fun sendViaLxmfPropagation(destHash: String, payloadBytes: ByteArray, eventId: String): Boolean = runCatching {
+        val primaryDestHash = legacyToPrimaryContact[destHash] ?: destHash
+        val lxd = buildOrLoadPropagationLxd(primaryDestHash, payloadBytes, eventId) ?: return false
 
         val depositEnvelope = LxmfCodec.packPropagationDepositRaw(lxd)
         val link = ensurePropagationLink() ?: return false
+        if (depositEnvelope.size > link.mdu) {
+            val resHashHex = resourceCoordinator.startOutbound(
+                link = link,
+                data = depositEnvelope,
+                eventId = eventId,
+                sendPacket = ::sendRawRnsPacket,
+            ) ?: return false
+            lastDepositEventId = eventId
+            android.util.Log.i(
+                "PulseSync",
+                "Zahájen RNS Resource deposit pro $primaryDestHash (${depositEnvelope.size}B > MDU ${link.mdu}B, res=${resHashHex.take(8)})"
+            )
+            return true
+        }
         val pkt = link.buildEncryptedLinkPacket(context = RnsContext.NONE, plaintext = depositEnvelope) ?: return false
         val pktHash = RnsCrypto.packetHash(pkt)
         val pktHashHex = bytesToHex(pktHash)
@@ -1349,22 +1529,30 @@ class ReticulumBridge(
         lastDepositEventId = eventId
         sendRawRnsPacket(pkt).also { ok ->
             if (ok) {
-                android.util.Log.i("PulseSync", "Odeslán LXMF deposit pro $destHash (${depositEnvelope.size}B, čeká na PROOF)")
+                android.util.Log.i("PulseSync", "Odeslán LXMF deposit pro $primaryDestHash (${depositEnvelope.size}B, čeká na PROOF)")
             } else {
                 pendingLinkProofs.remove(pktHashHex)
             }
         }
     }.getOrDefault(false)
 
-    private fun awaitGetResponse(link: RnsLinkSession, reqData: List<Any?>, timeoutMs: Long = 5_000L): List<Any?>? {
+    private fun awaitGetResponse(link: RnsLinkSession, reqData: List<Any?>, timeoutMs: Long = 15_000L): List<Any?>? {
         val future = CompletableFuture<List<Any?>>()
+        val (reqId, reqPkt) = link.buildRequestPacket(LxmfCodec.MESSAGE_GET_PATH, reqData) ?: return null
         synchronized(getRequestLock) {
             pendingGetResponse?.cancel(false)
             pendingGetResponse = future
+            pendingGetRequestId = reqId
         }
-        val (_, reqPkt) = link.buildRequestPacket(LxmfCodec.MESSAGE_GET_PATH, reqData) ?: return null
-        if (!sendRawRnsPacket(reqPkt)) return null
-        return runCatching { future.get(timeoutMs, TimeUnit.MILLISECONDS) }.getOrNull()
+        if (!sendRawRnsPacket(reqPkt)) {
+            tearDownPropagationLink(link)
+            return null
+        }
+        val result = runCatching { future.get(timeoutMs, TimeUnit.MILLISECONDS) }.getOrNull()
+        if (result == null) {
+            tearDownPropagationLink(link)
+        }
+        return result
     }
 
     /** Vyzvedne čekající zašifrované zprávy z LXMF propagation uzlu přes aktivní RNS Link (dvoufázový /get + purge). */
@@ -1398,8 +1586,9 @@ class ReticulumBridge(
         }
         if (wants.isEmpty() && haves.isEmpty()) return
 
-        // Fáze 2: [wants, haves] -> stažení nových zpráv a purge již zpracovaných
-        val responseMessages = awaitGetResponse(link, LxmfCodec.buildGetMessagesRequest(wants, haves)) ?: return
+        // Fáze 2: [wants, haves, limit] -> stažení nových zpráv a purge již zpracovaných
+        val transferLimitBytes = ((propagationNodeInfo?.perTransferLimitKb ?: 256L).coerceIn(64L, 2048L) * 1024L).toInt()
+        val responseMessages = awaitGetResponse(link, listOf(wants, haves, transferLimitBytes)) ?: return
         if (haves.isNotEmpty()) {
             synchronized(pendingPurgeIds) {
                 haves.forEach { pendingPurgeIds.remove(bytesToHex(it)) }
@@ -1437,21 +1626,24 @@ class ReticulumBridge(
     }
 
     private fun decodeIncomingEncryptedEnvelope(rawJson: String, selfHash: String): BridgeEvent.Message? {
-        val env = runCatching { json.decodeFromString<EncryptedEnvelope>(rawJson) }
-            .onFailure { android.util.Log.w("PulseSync", "Chyba dekódování JSON obálky: ${it.message}") }
-            .getOrNull() ?: return null
-        if (env.recipient != selfHash && env.recipient != legacyDeliveryHash) {
-            android.util.Log.w("PulseSync", "Příjemce v obálce nesouhlasí: ${env.recipient} != $selfHash")
-            return null
+        val xPriv = x25519PrivKey ?: return null
+        val expectedRecipients = buildSet {
+            add(selfHash)
+            legacyDeliveryHash?.let(::add)
         }
-
-        val decrypted = decryptPayload(env)
-        val normalizedSource = legacyToPrimaryContact[env.sender] ?: env.sender
-        return if (decrypted != null) {
-            android.util.Log.i("PulseSync", "Úspěšně dešifrována zpráva od $normalizedSource (v=${env.v}, len=${decrypted.length})")
-            BridgeEvent.Message(source = normalizedSource, validated = true, content = decrypted)
+        val result = BridgeEnvelopeCrypto.decryptToBridgeMessage(
+            rawJson = rawJson,
+            xPriv = xPriv,
+            expectedRecipients = expectedRecipients,
+            lookupContactPubKeyB64 = { sender -> registeredContacts[sender] },
+            normalizeSource = { sender -> legacyToPrimaryContact[sender] ?: sender },
+        )
+        return if (result != null) {
+            val (dec, msg) = result
+            android.util.Log.i("PulseSync", "Úspěšně dešifrována zpráva od ${msg.source} (v=${dec.version}, len=${msg.content.length})")
+            msg
         } else {
-            android.util.Log.w("PulseSync", "Dešifrování nebo ověření podpisu selhalo pro zprávu od $normalizedSource")
+            android.util.Log.w("PulseSync", "Dešifrování nebo ověření podpisu příchozí obálky selhalo")
             null
         }
     }
@@ -1468,85 +1660,35 @@ class ReticulumBridge(
         X25519PublicKeyParameters(raw, 0) to Ed25519PublicKeyParameters(raw, 32)
     }.getOrNull()
 
-    private fun deriveE2eeAesKey(sharedSecret: ByteArray, sender: String, recipient: String): ByteArray {
-        val (a, b) = if (sender <= recipient) sender to recipient else recipient to sender
-        val md = MessageDigest.getInstance("SHA-256")
-        md.update(sharedSecret)
-        md.update("pulse4-e2ee-v2".toByteArray(Charsets.UTF_8))
-        md.update(a.toByteArray(Charsets.UTF_8))
-        md.update(b.toByteArray(Charsets.UTF_8))
-        return md.digest()
-    }
-
-    private fun canonicalSignatureInput(sender: String, recipient: String, ivB64: String, ciphertextB64: String, eventId: String?): ByteArray =
-        "pulse4-v2:$sender:$recipient:$ivB64:$ciphertextB64:${eventId ?: ""}".toByteArray(Charsets.UTF_8)
-
     internal fun encryptPayload(sender: String, recipient: String, content: String, eventId: String): EncryptedEnvelope {
-        val recipientPub = registeredContacts[recipient]?.let { decodeContactPubKey64(it) }
-        val xPriv = x25519PrivKey
+        val recPubKeyB64 = registeredContacts[recipient]
+            ?: throw IllegalStateException("Unknown recipient public key for E2EE v3")
         val edPriv = ed25519PrivKey
-        if (recipientPub == null || xPriv == null || edPriv == null) {
-            throw IllegalStateException("Unknown recipient public key for E2EE v2")
-        }
-        val agreement = X25519Agreement()
-        agreement.init(xPriv)
-        val sharedSecret = ByteArray(agreement.agreementSize)
-        agreement.calculateAgreement(recipientPub.first, sharedSecret, 0)
-        val aesBytes = deriveE2eeAesKey(sharedSecret, sender, recipient)
-        val key = SecretKeySpec(aesBytes, "AES")
-
-        val iv = ByteArray(12).also { SecureRandom().nextBytes(it) }
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(128, iv))
-        val ciphertext = cipher.doFinal(content.toByteArray(Charsets.UTF_8))
-        val ivB64 = Base64.getEncoder().encodeToString(iv)
-        val ctB64 = Base64.getEncoder().encodeToString(ciphertext)
-
-        val sigInput = canonicalSignatureInput(sender, recipient, ivB64, ctB64, eventId)
-        val signer = Ed25519Signer()
-        signer.init(true, edPriv)
-        signer.update(sigInput, 0, sigInput.size)
-        val sigBytes = signer.generateSignature()
-
-        return EncryptedEnvelope(
-            v = 2,
+            ?: throw IllegalStateException("Missing Ed25519 identity key for E2EE v3")
+        return BridgeEnvelopeCrypto.encrypt(
             sender = sender,
             recipient = recipient,
-            iv = ivB64,
-            ciphertext = ctB64,
-            mac = bytesToHex(sigBytes),
-            eventId = eventId
+            content = content,
+            eventId = eventId,
+            edPriv = edPriv,
+            recipientPubKeyB64 = recPubKeyB64,
         )
     }
 
     internal fun decryptPayload(env: EncryptedEnvelope): String? = runCatching {
-        when (env.v) {
-            2 -> {
-                val senderPub = registeredContacts[env.sender]?.let { decodeContactPubKey64(it) } ?: return null
-                val xPriv = x25519PrivKey ?: return null
-                val sigBytes = hexToBytes(env.mac)
-                if (sigBytes.size != 64) return null
-                val sigInput = canonicalSignatureInput(env.sender, env.recipient, env.iv, env.ciphertext, env.eventId)
-                val verifier = Ed25519Signer()
-                verifier.init(false, senderPub.second)
-                verifier.update(sigInput, 0, sigInput.size)
-                if (!verifier.verifySignature(sigBytes)) return null
-
-                val agreement = X25519Agreement()
-                agreement.init(xPriv)
-                val sharedSecret = ByteArray(agreement.agreementSize)
-                agreement.calculateAgreement(senderPub.first, sharedSecret, 0)
-                val aesBytes = deriveE2eeAesKey(sharedSecret, env.sender, env.recipient)
-                val key = SecretKeySpec(aesBytes, "AES")
-
-                val iv = Base64.getDecoder().decode(env.iv)
-                val cipherBytes = Base64.getDecoder().decode(env.ciphertext)
-                val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-                cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, iv))
-                String(cipher.doFinal(cipherBytes), Charsets.UTF_8)
+        val xPriv = x25519PrivKey ?: return null
+        val expectedRecipients = info?.deliveryHash?.let { selfHash ->
+            buildSet {
+                add(selfHash)
+                legacyDeliveryHash?.let(::add)
             }
-            else -> null
         }
+        BridgeEnvelopeCrypto.decrypt(
+            envelope = env,
+            xPriv = xPriv,
+            expectedRecipients = expectedRecipients,
+            lookupContactPubKeyB64 = { sender -> registeredContacts[sender] },
+        )?.content
     }.getOrNull()
 
     fun drainEvents(): List<BridgeEvent> {

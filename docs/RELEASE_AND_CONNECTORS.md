@@ -43,10 +43,11 @@ Veškerá komunikace probíhá přímo mezi telefonem a servery Withings (`accou
 * **Trvalý šifrovaný Cookie Vault ([`WithingsDirectAuth.kt`](../app/src/main/kotlin/app/pulse4/android/di/WithingsDirectAuth.kt)):**
   * Kompletní cookies (včetně dlouhodobých důvěryhodných cookies zařízení a SSO) se ukládají do `SecretStore` (`withings.web.cookiejar`, šifrováno Android Keystore).
   * Při obnově se maže pouze expirovaný `session_key` a dočasné workflow cookies; důvěryhodné cookies zůstávají zachovány.
-* **3stupňové tiché obnovení v `renewSession()` ([`WeightServices.kt`](../app/src/main/kotlin/app/pulse4/android/di/WeightServices.kt)):**
+* **2stupňové tiché obnovení v `renewSession()` ([`WeightServices.kt`](../app/src/main/kotlin/app/pulse4/android/di/WeightServices.kt), [`WithingsSessionCoordinator.kt`](../app/src/main/kotlin/app/pulse4/android/di/WithingsSessionCoordinator.kt)):**
   1. `webClient.extendSession(...)` (rychlé prodloužení přes `scalews.withings.com`).
-  2. `directAuth.trySilentSsoRefresh()` (tiché SSO přes dlouhodobé cookies na `account.withings.com` – funguje i bez hesla pro účty přihlášené 8místným kódem / Google / Apple).
-  3. `directAuth.loginPassword(...)` se zachováním důvěryhodných cookies (bez opětovného vyžadování 2FA).
+  2. `directAuth.trySilentSsoRefresh()` (tiché SSO přes dlouhodobé cookies na `account.withings.com` – bez odesílání hesla).
+  * `loginPassword(...)` se na pozadí **nikdy** nevolá a heslo se neukládá ani při 2FA (`resumeDirectMfa`). Při selhání SSO se auto-obnova pozastaví (circuit-breaker), dokud se uživatel nepřihlásí ručně.
+  * Tombstoning (`idsInForAccount`) je omezen jen na aktivní `accountId` a vynechává CSV a rodinné váhy.
   * Celý proces je chráněn zámkem `renewLock` a napojen i do `WithingsWebFetcher.refreshSession()`.
 
 ---
@@ -59,8 +60,9 @@ Veškerá komunikace probíhá přímo mezi telefonem a servery Withings (`accou
   * Podpora nativních `GarminExtTokens` i Garth Base64 dumpů (`W3...`).
 * **Synchronizace metrik a aktivit ([`Services.kt`](../app/src/main/kotlin/app/pulse4/android/di/Services.kt), [`garmin_endpoints.json`](../app/src/main/assets/garmin_endpoints.json)):**
   * `maxRangeDays: 27` u endpointů s 28denním limitem (`STEPS`, `STRESS`, atd.), aby rozsah `{from}..{to}` nikdy nepřekročil 28 kalendářních dní včetně.
-  * `smartHttp.get` předává reálné HTTP stavy (`401`, `403`, `429`, síťové výjimky) a `404`/`204` převádí na čistou prázdnou odpověď.
-  * Dvoufázový import aktivit: rychlé uložení až 1000 souhrnů v jedné Room transakci + okamžité stažení FIT tras pro posledních 15 aktivit; starší trasy se dotahují na vyžádání (`ensureActivityTrack`).
+  * Spánek a dech (`/sleep-service/sleep/dailySleep?date={from}`) sdílí jednu HTTP odpověď na den a extrahují délku, skóre, fáze (`SLEEP_DEEP`, `SLEEP_LIGHT`, `SLEEP_REM`, `SLEEP_AWAKE`), počet probuzení (`SLEEP_AWAKE_COUNT`), zdřímnutí (`SLEEP_NAP`) a noční dechovou frekvenci (`RESPIRATION`). `ResponseMapper` prefixuje `externalId` názvem metriky a rozbaluje i kořenové `JsonArray`.
+  * `smartHttp.get` převádí `404`/`204` na prázdnou odpověď před případným fallbackem a při `429` nespouští duplicitní dotaz.
+  * Dvoufázový import aktivit: rychlé uložení až 1000 souhrnů v jedné Room transakci + okamžité stažení FIT tras pro nové aktivity; již uložené ne-GPS aktivity se při inkrementálním syncu nestahují znovu.
 
 ---
 

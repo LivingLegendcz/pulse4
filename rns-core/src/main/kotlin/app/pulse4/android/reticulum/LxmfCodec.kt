@@ -18,16 +18,41 @@ data class LxmfMessage(
     val signatureValid: Boolean,
 )
 
+/**
+ * Propagation node announce (LXMRouter.py:387-398 `get_propagation_node_app_data`).
+ * Limity `[3]`/`[4]` jsou v kilobajtech (×1000) a uzel je může ohlásit jako float
+ * (např. `propagation_limit=0.5`), proto [Double] – nikdy `.toLong()` (R4-8).
+ */
 data class LxmfPropagationNodeInfo(
     val timebaseSec: Long,
     val acceptingMessages: Boolean,
-    val perTransferLimitKb: Long,
-    val perSyncLimitKb: Long,
+    val perTransferLimitKb: Double,
+    val perSyncLimitKb: Double,
     val stampCost: Int,
     val stampCostFlexibility: Int,
     val peeringCost: Int,
     val metadata: Map<Any?, Any?>,
-)
+) {
+    /**
+     * Největší deposit (data Resource), který uzel přijme. Uzel odmítá příchozí propagation Resource
+     * podle `propagation_per_sync_limit*1000` (LXMRouter.py:2555-2559: `size > limit` → RESOURCE_RCL),
+     * ne podle per-transfer limitu `[3]`. Uzel sám drží `sync >= transfer` (LXMRouter.py:185-186);
+     * když `[4]` chybí / je 0, použije se `[3]`. Vrací `null`, pokud uzel limit neohlásil.
+     *
+     * `size > kb*1000` (float) je pro celočíselné `size` totéž jako `size > floor(kb*1000)`.
+     */
+    fun maxDepositBytes(): Long? {
+        val kb = perSyncLimitKb.takeIf { it > 0.0 } ?: perTransferLimitKb.takeIf { it > 0.0 } ?: return null
+        return kotlin.math.floor(kb * 1000.0).toLong()
+    }
+
+    /**
+     * Per-message limit `[3]` v bajtech. Uzel ho používá při synchronizaci s peery
+     * (LXMPeer.py:375 – větší zprávy dál nepropaguje), deposit klienta jím ale neodmítá.
+     */
+    fun perTransferLimitBytes(): Long? =
+        perTransferLimitKb.takeIf { it > 0.0 }?.let { kotlin.math.floor(it * 1000.0).toLong() }
+}
 
 object LxmfCodec {
     const val PROPAGATION_APP_NAME = "lxmf.propagation"
@@ -142,8 +167,8 @@ object LxmfCodec {
         if (list.size < 6) return null
         val timebase = (list[1] as? Number)?.toLong() ?: 0L
         val accepting = (list[2] as? Boolean) ?: false
-        val transferKb = (list[3] as? Number)?.toLong() ?: 0L
-        val syncKb = (list[4] as? Number)?.toLong() ?: 0L
+        val transferKb = (list[3] as? Number)?.toDouble() ?: 0.0
+        val syncKb = (list[4] as? Number)?.toDouble() ?: 0.0
         val costs = list[5] as? List<*> ?: emptyList<Any?>()
         val extCosts = list.getOrNull(7) as? List<*> ?: emptyList<Any?>()
         val rawStampCost = (extCosts.getOrNull(0) as? Number)?.toDouble()

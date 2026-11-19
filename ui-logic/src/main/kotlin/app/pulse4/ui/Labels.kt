@@ -21,6 +21,17 @@ object Labels {
         DeliveryState.CANCELLED -> "Zrušeno"
         DeliveryState.SUPERSEDED -> "Nahrazeno novější verzí"
         DeliveryState.EXPIRED_NEEDS_SNAPSHOT -> "Vypršelo / odmítnuto – pošle se nový snapshot"
+        DeliveryState.FAILED_PERMANENT -> "Neodesláno – odmítnuto propagation uzlem (neopakuje se)"
+    }
+
+    /** Čitelný důvod chyby doručení (kódy z transportní vrstvy přeloží, ostatní nechá). */
+    fun deliveryError(reason: String): String = when {
+        reason.startsWith(app.pulse4.sync.TransportResult.TOO_LARGE) ->
+            "zpráva je větší, než propagation uzel přijímá" +
+                (reason.substringAfter(':', "").trim().takeIf { it.isNotEmpty() }?.let { " ($it)" } ?: "")
+        reason.startsWith(app.pulse4.sync.TransportResult.REJECTED_BY_NODE) ->
+            "propagation uzel zprávu odmítl (nejspíš překročen limit velikosti uzlu)"
+        else -> reason
     }
 
     fun area(s: AreaStatus) = when (s) {

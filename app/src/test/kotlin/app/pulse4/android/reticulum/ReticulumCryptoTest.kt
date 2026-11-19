@@ -269,7 +269,7 @@ class ReticulumCryptoTest {
         val propInfo = LxmfCodec.parsePropagationAnnounceAppData(parsed.appData)
         assertNotNull(propInfo)
         assertTrue(propInfo.acceptingMessages)
-        assertEquals(512L, propInfo.perTransferLimitKb)
+        assertEquals(512.0, propInfo.perTransferLimitKb)
         assertEquals(12, propInfo.stampCost)
         assertEquals("xali", propInfo.metadata["name"])
     }

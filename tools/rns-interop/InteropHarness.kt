@@ -348,9 +348,15 @@ fun main(args: Array<String>) {
     val smallPnInfo = checkNotNull(LxmfCodec.parsePropagationAnnounceAppData(smallAppData)) {
         "Failed to parse small-limit PN announce appData"
     }
-    check(smallPnInfo.perTransferLimitKb == 32L && smallPnInfo.perSyncLimitKb == 32L) {
+    // R4-8: float limit (32.5 KB) must be parsed exactly, the deposit limit is the per-sync limit [4]
+    // (LXMRouter.py:2555-2559), not min([3], [4]).
+    check(smallPnInfo.perTransferLimitKb == 16.0 && smallPnInfo.perSyncLimitKb == 32.5) {
         "Unexpected small-limit PN limits: transfer=${smallPnInfo.perTransferLimitKb} sync=${smallPnInfo.perSyncLimitKb}"
     }
+    check(smallPnInfo.maxDepositBytes() == 32_500L) {
+        "Unexpected max deposit bytes for small-limit PN: ${smallPnInfo.maxDepositBytes()}"
+    }
+    println("[3d-0] PASS: Float PN limits parsed exactly (transfer=16.0 KB, sync=32.5 KB -> max deposit 32500 B)")
     val overLimitWire = LxmfCodec.pack(
         destinationHash = aliceDestHex,
         sourceHash = selfDestHex,
@@ -360,7 +366,7 @@ fun main(args: Array<String>) {
     )
     val overLimitEnc = LxmfCodec.encryptPropagationPayload(overLimitWire, aliceXPub, aliceIdHash)
     val overLimitDeposit = LxmfCodec.packPropagationDepositRaw(overLimitEnc + ByteArray(32))
-    val announcedLimitBytes = minOf(smallPnInfo.perTransferLimitKb, smallPnInfo.perSyncLimitKb) * 1000L
+    val announcedLimitBytes = checkNotNull(smallPnInfo.maxDepositBytes())
     check(overLimitDeposit.size.toLong() > announcedLimitBytes) {
         "Expected deposit (${overLimitDeposit.size}B) > limit (${announcedLimitBytes}B)"
     }
@@ -390,7 +396,51 @@ fun main(args: Array<String>) {
         "Expected RESOURCE_RCL from small-limit Python PN, got status=${overLimitSender.status}"
     }
     sendPkt(smallLink.buildLinkClosePacket()!!)
-    println("[3d] PASS: Deposit exceeding PN limit (40KB > 32KB) caught by announce check & rejected via RESOURCE_RCL over wire")
+    println("[3d] PASS: Deposit exceeding PN limit (40KB > 32.5KB) caught by announce check & rejected via RESOURCE_RCL over wire")
+
+    // 3e. R4-8: deposit above the per-transfer limit [3] but below the per-sync limit [4] is ACCEPTED by the PN
+    // (it answers the advertisement with RESOURCE_REQ, not RESOURCE_RCL) -> client must not pre-reject it.
+    val midWire = LxmfCodec.pack(
+        destinationHash = aliceDestHex,
+        sourceHash = selfDestHex,
+        edPriv = edPriv,
+        content = kotlin.random.Random(4242).nextBytes(24_000),
+        title = "mid-limit-deposit",
+    )
+    val midEnc = LxmfCodec.encryptPropagationPayload(midWire, aliceXPub, aliceIdHash)
+    val midDeposit = LxmfCodec.packPropagationDepositRaw(midEnc + ByteArray(32))
+    val transferLimitBytes = checkNotNull(smallPnInfo.perTransferLimitBytes())
+    check(midDeposit.size.toLong() > transferLimitBytes && midDeposit.size.toLong() <= announcedLimitBytes) {
+        "Expected transfer limit ($transferLimitBytes B) < deposit (${midDeposit.size}B) <= sync limit ($announcedLimitBytes B)"
+    }
+    val (smallPub64b, smallTidB, _) = awaitAnnounceFull(smallLimitPropDestHex)
+    val midLink = establishLink(smallLimitPropDestHex, smallPub64b, smallTidB)
+    sendPkt(midLink.buildIdentifyPacket(pub64, edPriv)!!)
+    val midSender = RnsResourceSender(midLink, midDeposit, autoCompress = false)
+    sendPkt(midSender.buildAdvertisementPacket()!!)
+    var midRequested = false
+    var midRejected = false
+    val midDeadline = System.currentTimeMillis() + 8_000L
+    while (System.currentTimeMillis() < midDeadline && !midRequested && !midRejected) {
+        val pkt = pollPacket(200) ?: continue
+        val flags = pkt[0].toInt() and 0xFF
+        val pt = flags and 0x03
+        val h2 = ((flags and 0x40) shr 6) == RnsHeaderType.HEADER_2
+        val destOff = if (h2) 18 else 2
+        val ctxOff = if (h2) 34 else 18
+        if (pkt.size <= ctxOff) continue
+        if (RnsCrypto.bytesToHex(pkt.copyOfRange(destOff, destOff + 16)) != midLink.linkIdHex) continue
+        if (pt != RnsPacketType.DATA) continue
+        when (pkt[ctxOff]) {
+            RnsContext.RESOURCE_REQ -> midRequested = true
+            RnsContext.RESOURCE_RCL -> midRejected = true
+        }
+    }
+    sendPkt(midLink.buildLinkClosePacket()!!)
+    check(midRequested && !midRejected) {
+        "Expected RESOURCE_REQ (accept) for ${midDeposit.size}B deposit between transfer and sync limit, requested=$midRequested rejected=$midRejected"
+    }
+    println("[3e] PASS: Deposit between per-transfer (16KB) and per-sync (32.5KB) limit accepted by PN (RESOURCE_REQ), so client pre-check uses per-sync limit")
 
     // 4. Keepalive test
     val kaDeadline = System.currentTimeMillis() + keepaliveSecs * 1000L

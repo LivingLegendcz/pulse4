@@ -15,6 +15,7 @@ enum class DeliveryState {
     CANCELLED,               // Zrušeno před odesláním (např. odvolání sdílení)
     SUPERSEDED,              // Nahrazeno novější verzí téhož objektu
     EXPIRED_NEEDS_SNAPSHOT,  // Nepotvrzeno déle než TTL; nahradí aktuální snapshot
+    FAILED_PERMANENT,        // Trvale odmítnuto sítí (uzel odmítl / zpráva je nad limit uzlu); neopakuje se
 }
 
 data class OutboxItem(
@@ -57,7 +58,27 @@ sealed interface EnqueueResult {
 sealed interface TransportResult {
     data object Handed : TransportResult
     data object StoredInPropagation : TransportResult
+    /** Přechodná chyba: položka se zkusí znovu s backoffem. */
     data class Failed(val reason: String) : TransportResult
+    /** Trvalé odmítnutí (R4-8): opakování by dopadlo stejně, položka končí ve [DeliveryState.FAILED_PERMANENT]. */
+    data class Rejected(val reason: String) : TransportResult
+
+    companion object {
+        /** Propagation uzel odmítl Resource (RESOURCE_RCL; LXMRouter.py:2555-2559). */
+        const val REJECTED_BY_NODE = "REJECTED_BY_NODE"
+        /** Zpráva je větší než limit propagation uzlu – odmítnuto ještě před odesláním. */
+        const val TOO_LARGE = "TOO_LARGE"
+
+        fun isPermanentFailure(reason: String?): Boolean =
+            reason != null && (reason.startsWith(REJECTED_BY_NODE) || reason.startsWith(TOO_LARGE))
+
+        /** Mapování stavu z transportní vrstvy (`HANDED` / `STORED` / `FAILED` + důvod). */
+        fun fromBridge(state: String, reason: String?): TransportResult = when (state) {
+            "HANDED" -> Handed
+            "STORED" -> StoredInPropagation
+            else -> if (isPermanentFailure(reason)) Rejected(reason!!) else Failed(reason ?: "failed")
+        }
+    }
 }
 
 class OutboxManager(
@@ -160,7 +181,8 @@ class OutboxManager(
     fun onTransportResult(eventId: String, result: TransportResult, nowMs: Long) = synchronized(this) {
         inFlightLocalFastTrackUntil.remove(eventId)
         val it = store.find(eventId) ?: return@synchronized
-        if (it.state == DeliveryState.ACKED) return@synchronized
+        // Konečné stavy: pozdní HANDED / FAILED (souběh vláken transportu) je už nepřepíše.
+        if (it.state == DeliveryState.ACKED || it.state == DeliveryState.FAILED_PERMANENT) return@synchronized
         when (result) {
             TransportResult.Handed -> {
                 val attempts = it.attempts + 1
@@ -177,6 +199,9 @@ class OutboxManager(
                 val attempts = it.attempts + 1
                 store.update(it.copy(state = DeliveryState.QUEUED, attempts = attempts, lastError = result.reason,
                     nextAttemptAtMs = nowMs + backoff(attempts)))
+            }
+            is TransportResult.Rejected -> {
+                store.update(it.copy(state = DeliveryState.FAILED_PERMANENT, attempts = it.attempts + 1, lastError = result.reason))
             }
         }
     }

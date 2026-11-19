@@ -25,7 +25,6 @@ import java.util.Base64
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Semaphore
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.crypto.Cipher
 import javax.crypto.Mac
@@ -267,9 +266,29 @@ class ReticulumBridge internal constructor(
     @Volatile
     private var legacyDeliveryHash: String? = null
 
+    /** Info z announce propagation uzlu + hash uzlu, ke kterému patří (R4-8: při změně PN neplatí). */
     @Volatile
-    var propagationNodeInfo: LxmfPropagationNodeInfo? = null
-        private set
+    private var propagationNodeInfoEntry: Pair<String, LxmfPropagationNodeInfo>? = null
+
+    val propagationNodeInfo: LxmfPropagationNodeInfo?
+        get() {
+            val entry = propagationNodeInfoEntry ?: return null
+            if (entry.first == currentPropagationNode().trim().lowercase()) return entry.second
+            // Uživatel přepnul na jiný uzel: limity / cena stampu starého uzlu už neplatí.
+            clearPropagationNodeInfo()
+            return null
+        }
+
+    private fun clearPropagationNodeInfo() {
+        propagationNodeInfoEntry = null
+        propagationFractionalStampCost = null
+    }
+
+    /** Sekvenční fronta událostí (R4-8): HANDED / FAILED / zprávy se doručí v pořadí vzniku. */
+    private val eventDispatcher = Dispatchers.IO.limitedParallelism(1)
+
+    /** eventId → FAILED emitovaný během aktuálního pokusu o odeslání (pozdní HANDED se pak neemituje). */
+    private val failedDuringSend = ConcurrentHashMap<String, Boolean>()
     @Volatile
     private var propagationLink: RnsLinkSession? = null
     @Volatile
@@ -314,10 +333,15 @@ class ReticulumBridge internal constructor(
     fun localPeerHashes(): Set<String> = localPeerMap.keys.toSet()
     fun hasRegisteredContacts(): Boolean = registeredContacts.isNotEmpty()
 
-    private fun emitEvent(ev: BridgeEvent) {
+    internal fun emitEvent(ev: BridgeEvent) {
+        if (ev is BridgeEvent.Delivery && ev.state == "FAILED") {
+            if (failedDuringSend.size > 4096) failedDuringSend.clear()
+            failedDuringSend[ev.eventId] = true
+        }
         val handler = onEventReceived
         if (handler != null) {
-            scope.launch {
+            // Jedna sekvenční fronta: pořadí emitování = pořadí zpracování (FAILED nepředběhne HANDED).
+            scope.launch(eventDispatcher) {
                 try {
                     handler(ev)
                 } catch (e: Throwable) {
@@ -1004,7 +1028,7 @@ class ReticulumBridge internal constructor(
                 routingState.recordDiscoveredDestination(destLower, parsed.publicKey64)
                 if (destLower == currentPropagationNode().trim().lowercase()) {
                     LxmfCodec.parsePropagationAnnounceAppData(parsed.appData)?.let { info ->
-                        propagationNodeInfo = info
+                        propagationNodeInfoEntry = destLower to info
                         val rawList = runCatching { MsgPack.decode(parsed.appData).first as? List<*> }.getOrNull()
                         val fracList = rawList?.getOrNull(7) as? List<*>
                         val fracCost = (fracList?.getOrNull(0) as? Number)?.toDouble()
@@ -1023,7 +1047,7 @@ class ReticulumBridge internal constructor(
                             )
                         }
                         PLog.i("PulseSync") {
-                            "Aktualizováno info LXMF propagation uzlu: accepting=${info.acceptingMessages}, stampCost=${info.stampCost}, limit=${info.perTransferLimitKb}KB"
+                            "Aktualizováno info LXMF propagation uzlu: accepting=${info.acceptingMessages}, stampCost=${info.stampCost}, transferLimit=${info.perTransferLimitKb}KB, syncLimit=${info.perSyncLimitKb}KB"
                         }
                     }
                 }
@@ -1766,6 +1790,7 @@ class ReticulumBridge internal constructor(
      */
     fun send(destHash: String, content: String, propagated: Boolean, eventId: String, forceGateway: Boolean = false) {
         val selfInfo = ensureStarted()
+        failedDuringSend.remove(eventId)
         val encryptedEnvelope = encryptPayload(selfInfo.deliveryHash, destHash, content, eventId)
         val jsonPayload = BridgeEnvelopeCrypto.encode(encryptedEnvelope)
 
@@ -1799,6 +1824,11 @@ class ReticulumBridge internal constructor(
             val rnsDelivered = sendOverGateway(destHash, payloadBytes)
             // STORED se emituje až po obdržení RNS PROOF paketu od uzlu; zápis na TCP je vždy jen HANDED.
             if (propResult == DepositAttemptResult.STARTED || rnsDelivered) {
+                // R4-8: uzel mohl deposit odmítnout (RCL) dřív, než jsme se sem dostali – pak HANDED neemitovat.
+                if (failedDuringSend.remove(eventId) != null && !rnsDelivered) {
+                    PLog.i("PulseSync") { "LXMF deposit $eventId selhal před HANDED, HANDED se neemituje" }
+                    return
+                }
                 emitEvent(BridgeEvent.Delivery(eventId, "HANDED", null))
                 return
             }
@@ -1985,20 +2015,18 @@ class ReticulumBridge internal constructor(
 
     private enum class DepositAttemptResult { STARTED, SKIPPED, FAILED_EMITTED }
 
-    internal fun maxPropagationEnvelopeBytes(pnInfo: LxmfPropagationNodeInfo? = propagationNodeInfo): Long? {
-        if (pnInfo == null) return null
-        val transferLimitBytes = pnInfo.perTransferLimitKb.takeIf { it > 0L }?.times(1000L)
-        val syncLimitBytes = pnInfo.perSyncLimitKb.takeIf { it > 0L }?.times(1000L)
-        return listOfNotNull(transferLimitBytes, syncLimitBytes).minOrNull()
-    }
+    /** Největší deposit, který uzel přijme: per-sync limit `[4]` (LXMRouter.py:2555-2559), viz [LxmfPropagationNodeInfo.maxDepositBytes]. */
+    internal fun maxPropagationEnvelopeBytes(pnInfo: LxmfPropagationNodeInfo? = propagationNodeInfo): Long? =
+        pnInfo?.maxDepositBytes()
 
     private fun failDepositOverPnLimit(eventId: String, actualBytes: Int, maxBytes: Long): DepositAttemptResult {
         val sizeKb = (actualBytes.toLong() + 999L) / 1000L
         val limitKb = maxBytes / 1000L
-        val reason = "Zpráva překračuje limit propagation uzlu (${sizeKb} KB > ${limitKb} KB)"
+        val detail = "Zpráva překračuje limit propagation uzlu (${sizeKb} KB > ${limitKb} KB)"
         PLog.w("PulseSync") { "LXMF deposit $eventId překročil limit uzlu: ${actualBytes}B > ${maxBytes}B" }
-        _propagationStatus.value = _propagationStatus.value.copy(detail = reason)
-        emitEvent(BridgeEvent.Delivery(eventId, "FAILED", reason))
+        _propagationStatus.value = _propagationStatus.value.copy(detail = detail)
+        // TOO_LARGE = trvalé selhání: outbox položku neopakuje (FAILED_PERMANENT) a UI ukáže důvod.
+        emitEvent(BridgeEvent.Delivery(eventId, "FAILED", "${app.pulse4.sync.TransportResult.TOO_LARGE}: ${sizeKb} KB > ${limitKb} KB"))
         return DepositAttemptResult.FAILED_EMITTED
     }
 
@@ -2097,23 +2125,12 @@ class ReticulumBridge internal constructor(
             return null
         }
 
-        val startMs = System.currentTimeMillis()
-        var lastProgressMs = startMs
-        val hardCapMs = 60_000L
-        var result: GetResponse? = null
-        while (System.currentTimeMillis() - startMs < hardCapMs) {
-            result = runCatching { future.get(500L, TimeUnit.MILLISECONDS) }.getOrNull()
-            if (result != null || future.isDone || future.isCancelled) break
-            val now = System.currentTimeMillis()
-            val resActivity = runOnResourceDispatcher { resourceCoordinator.activeResponseLastActivityMs(reqId) }
-            if (resActivity != null && resActivity > lastProgressMs) {
-                lastProgressMs = resActivity
-            }
-            val effectiveIdleLimit = if (resActivity != null) maxOf(timeoutMs, 30_000L) else timeoutMs
-            if (now - lastProgressMs >= effectiveIdleLimit) {
-                break
-            }
-        }
+        // R4-8: místo pevného 60s stropu idle timeout – postupující stahování (až 2 MB) se neutne.
+        val result: GetResponse? = IdleTimeoutWaiter.await(
+            future = future,
+            lastActivityMs = { runOnResourceDispatcher { resourceCoordinator.activeResponseLastActivityMs(reqId) } },
+            responseTimeoutMs = timeoutMs,
+        )
         synchronized(getRequestLock) {
             if (pendingGetResponse === future) {
                 pendingGetResponse = null
@@ -2217,8 +2234,8 @@ class ReticulumBridge internal constructor(
         if (wants.isEmpty() && haves.isEmpty()) return
 
         // Fáze 2: [wants, haves, limit] -> stažení nových zpráv (limit v KB dle LXMRouter.py:1746) a purge již zpracovaných
-        val nodeLimitKb = propagationNodeInfo?.perTransferLimitKb?.takeIf { it > 0L } ?: 256L
-        val transferLimitKb = minOf(nodeLimitKb, 2048L).coerceAtLeast(32L).toInt()
+        val nodeLimitKb = propagationNodeInfo?.perTransferLimitKb?.takeIf { it > 0.0 } ?: 256.0
+        val transferLimitKb = kotlin.math.floor(minOf(nodeLimitKb, 2048.0).coerceAtLeast(32.0)).toInt()
         val phase2 = executeGetWithErrorHandling(
             link = link,
             reqData = LxmfCodec.buildGetMessagesRequest(wants, haves, transferLimitKb),

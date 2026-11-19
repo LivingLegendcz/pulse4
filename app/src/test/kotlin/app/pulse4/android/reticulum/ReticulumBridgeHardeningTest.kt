@@ -75,6 +75,7 @@ class ReticulumBridgeHardeningTest {
         transferLimitKb: Long,
         stampCost: Int,
         stampFlex: Int,
+        syncLimitKb: Long = 1024L,
     ): ByteArray {
         val sha = MessageDigest.getInstance("SHA-256")
         val ident = sha.digest(peerPub64).copyOf(16)
@@ -88,7 +89,7 @@ class ReticulumBridgeHardeningTest {
                 1700000000L,
                 true,
                 transferLimitKb,
-                1024L,
+                syncLimitKb,
                 listOf(stampCost, stampFlex, 16),
                 emptyMap<Any?, Any?>(),
                 listOf(stampCost.toDouble(), stampFlex, 16),
@@ -426,7 +427,8 @@ class ReticulumBridgeHardeningTest {
 
     @Test
     fun depositExceedingPnLimitFailsImmediatelyAndNeverEmitsHanded() {
-        val announcePkt = buildPnAnnouncePacket(transferLimitKb = 32L, stampCost = 1, stampFlex = 0)
+        // R4-8: the PN rejects deposits above its per-sync limit [4] (LXMRouter.py:2555-2559).
+        val announcePkt = buildPnAnnouncePacket(transferLimitKb = 32L, stampCost = 1, stampFlex = 0, syncLimitKb = 32L)
         bridge.handleIncomingRnsPacketForTest(announcePkt)
         activateLinkWithPeer()
         val contactPubB64 = Base64.getEncoder().encodeToString(peerPub64)
@@ -437,7 +439,7 @@ class ReticulumBridgeHardeningTest {
         bridge.send(contactDest, bigContent, propagated = true, eventId = "evt-over-limit")
 
         val events = bridge.drainEvents().filterIsInstance<BridgeEvent.Delivery>()
-        assertTrue(events.any { it.eventId == "evt-over-limit" && it.state == "FAILED" && it.reason?.contains("limit", ignoreCase = true) == true })
+        assertTrue(events.any { it.eventId == "evt-over-limit" && it.state == "FAILED" && it.reason?.startsWith(app.pulse4.sync.TransportResult.TOO_LARGE) == true })
         assertTrue(events.none { it.eventId == "evt-over-limit" && it.state == "HANDED" })
         assertTrue(bridge.propagationStatus.value.detail?.contains("limit", ignoreCase = true) == true)
     }

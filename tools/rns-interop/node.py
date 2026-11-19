@@ -53,13 +53,15 @@ restricted_router.auth_required = True
 restricted_router.allowed_list = []
 restricted_prop_dest = restricted_router.propagation_destination
 
-# Small-limit PN (propagation_limit=32 KB, sync_limit=32 KB) for testing PN size limit / RESOURCE_RCL
+# Small-limit PN for testing PN size limits / RESOURCE_RCL (R4-8):
+# per-transfer limit 16 KB, per-sync limit 32.5 KB (a float, announced as msgpack float64).
+# The PN rejects an incoming propagation Resource only above the per-sync limit (LXMRouter.py:2555-2559).
 small_limit_id = RNS.Identity()
 small_limit_router = LXMF.LXMRouter(
     identity=small_limit_id,
     storagepath=os.path.join(work, "lxmf_small_limit"),
-    propagation_limit=32,
-    sync_limit=32,
+    propagation_limit=16,
+    sync_limit=32.5,
 )
 small_limit_router.enable_propagation()
 small_limit_prop_dest = small_limit_router.propagation_destination

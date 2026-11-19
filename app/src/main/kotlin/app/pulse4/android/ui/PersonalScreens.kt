@@ -1676,12 +1676,14 @@ data class SegmentalBodySnapshot(
     val ffmByPos: Map<Int, Double>,
 )
 
-private val BODY_SEGMENT_DEFS = listOf(
+// Segments are always drawn together: pairwise CIEDE2000 >= SeriesColorAllocator.MIN_DELTA_E
+// (left/right limbs used to be near-identical sky/cyan and purple/pink).
+internal val BODY_SEGMENT_DEFS = listOf(
     Triple(2, "Pravá ruka", Color(0xFF38BDF8)),
-    Triple(3, "Levá ruka", Color(0xFF06B6D4)),
+    Triple(3, "Levá ruka", Color(0xFFEF4444)),
     Triple(12, "Trup (hrudník a břicho)", Color(0xFF10B981)),
     Triple(10, "Pravá noha", Color(0xFFA855F7)),
-    Triple(11, "Levá noha", Color(0xFFEC4899)),
+    Triple(11, "Levá noha", Color(0xFFFCD34D)),
 )
 
 private val HealthGreen = Color(0xFF10B981)
@@ -4018,6 +4020,9 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType? = null) {
 
     var metricsMenuExpanded by remember { mutableStateOf(false) }
     var presetsMenuExpanded by remember { mutableStateOf(false) }
+    // Conflict-free colors for metrics shown together (chart lines, legend, selection chips).
+    val seriesOrder = selectedTypes.toList()
+    val seriesStyles = remember(seriesOrder) { assignSeriesColors(seriesOrder) }
 
     val allAvailableTypes = listOf(
         MetricType.HRV,
@@ -4703,7 +4708,7 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType? = null) {
                             }
                         },
                         leadingIcon = {
-                            Icon(c.icon, contentDescription = null, tint = c.color, modifier = Modifier.size(14.dp))
+                            Icon(c.icon, contentDescription = null, tint = seriesStyles[t]?.color ?: c.color, modifier = Modifier.size(14.dp))
                         },
                         trailingIcon = {
                             Icon(Icons.Outlined.Close, contentDescription = "Odebrat", modifier = Modifier.size(14.dp))
@@ -4811,11 +4816,9 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType? = null) {
                 SeriesItem(
                     id = entry.type.name,
                     label = c.shortLabel,
-                    color = c.color,
+                    color = seriesStyles[entry.type]?.color ?: c.color,
                     values = displayVals,
                     unit = seriesUnit,
-                    // Fat-type series are dashed so they never read like the solid muscle line.
-                    dashed = entry.type == MetricType.BODY_FAT || entry.type == MetricType.VISCERAL_FAT
                 )
             }
 

@@ -2173,6 +2173,9 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                 }
 
                 Spacer(Modifier.height(12.dp))
+                WithingsDiagnosticsCard(sl = sl, refreshKey = tick)
+
+                Spacer(Modifier.height(12.dp))
 
                 // ───────────────────────── RODINA & DĚTSKÝ PROFIL ─────────────────────────
                 val childUid = wCfg?.childWithingsUserId

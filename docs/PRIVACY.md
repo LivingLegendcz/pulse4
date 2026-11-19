@@ -10,7 +10,7 @@
 | Data | Odkud | Kde jsou uložena |
 |---|---|---|
 | Zdravotní a sportovní data (váha, složení těla, tep, HRV, spánek, aktivity, GPS trasy) | Garmin, Withings, Health Connect, ruční zadání, import FIT/CSV | Šifrovaná databáze v telefonu |
-| Přihlašovací relace Withings (cookies důvěryhodného zařízení, e-mail, seznam rodinných profilů se jménem a datem narození) | Po přihlášení v nativním dialogu | Šifrované úložiště Android Keystore v telefonu; **heslo se nikdy neukládá** |
+| Přihlašovací relace Withings (cookies důvěryhodného zařízení, e-mail, seznam rodinných profilů se jménem a datem narození) | Po přihlášení v nativním dialogu | Šifrované úložiště Android Keystore v telefonu. Heslo se ukládá šifrovaně v Android Keystore jen v telefonu a slouží k automatickému obnovení spojení, když vyprší relace; lze vypnout. (volba „Pamatovat heslo pro automatické obnovení“) |
 | Tokeny / API klíč Garmin | Zadáte vy | Šifrované úložiště Android Keystore v telefonu |
 
 ### Komu se data posílají
@@ -37,7 +37,7 @@ pepe.kocourek@gmail.com
 **Pulse4 has no server of its own.** All data stays on your phone.
 
 - **Health & fitness data** (weight, body composition, heart rate, HRV, sleep, activities, GPS tracks) from Garmin, Withings, Health Connect, manual entry or FIT/CSV import are stored in an encrypted on-device database.
-- **Withings session**: your password is **never stored** (used once during login only). Only encrypted trusted-device cookies, your e-mail, and family profile metadata (names, birthdates) are stored on the device using Android Keystore. **Garmin tokens** are stored encrypted on the device and used solely to download *your* data directly from Garmin/Withings.
+- **Withings session**: if "Remember password for automatic renewal" is enabled (default), your Withings password is stored encrypted with Android Keystore on the phone only and is used solely to re-establish the connection when the session expires (at most once per 6 hours in the background); it can be turned off in the login dialog and is deleted on disconnect or when Withings rejects it. Encrypted trusted-device cookies, your e-mail, and family profile metadata (names, birthdates) are also stored on the device using Android Keystore. The password is never written to the database, settings, backups or logs. **Garmin tokens** are stored encrypted on the device and used solely to download *your* data directly from Garmin/Withings.
 - **Health Connect**: read-only access to weight and body fat.
 - **Group / family sharing (P2P)** happens only if you enable it (including explicit parent opt-in for child profile forwarding), only with contacts you choose, end-to-end encrypted.
 - **No ads, no analytics, no trackers.** Data is never sold or shared with third parties.

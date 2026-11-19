@@ -102,7 +102,7 @@ odkazované webem Withings. Statický kód neprokazuje úspěšné přihlášen�
 
 ### Návrh uživatelského průchodu
 
-1. „Připojit Withings“ otevře nativní přihlašovací dialog P4 (bez WebView; OkHttp HTML/form tok proti `account.withings.com`), včetně podpory 2FA kódu. P4 nikdy neukládá heslo – použije se pouze jednorázově pro přihlášení.
+1. „Připojit Withings“ otevře nativní přihlašovací dialog P4 (bez WebView; OkHttp HTML/form tok proti `account.withings.com`), včetně podpory 2FA kódu. Heslo se ukládá šifrovaně v Android Keystore jen v telefonu a slouží k automatickému obnovení spojení, když vyprší relace; lze vypnout. (zaškrtávátko „Pamatovat heslo pro automatické obnovení“, výchozí zapnuto). E-mail účtu se pamatuje vždy.
 2. Po dokončení přihlášení konektor ověří relaci čtením účtu a nabídne seznam profilů. Uživatel vybere svůj
    profil a případně profil dítěte. Data se přiřazují podle `userid`, nikoli odhadem podle váhy.
 3. Relace (šifrované cookies důvěryhodného zařízení a `session_token`) zůstane pouze na daném telefonu v úložišti šifrovaném pomocí Android Keystore a nevstupuje do záloh ani logů.
@@ -272,8 +272,9 @@ Snímky: `vault/attachments/settings_accounts_*.png`.
 
 **Rizika a mitigace:**
 - *Změny HTML / rozhraní Withings a ToS:* třída `WithingsDirectAuth` klasifikuje neznámé stavy odděleně a neopakuje chybné pokusy.
-- *Zablokování účtu (lockout / 429):* `WithingsSessionCoordinator` obsahuje perzistovaný circuit-breaker a exponenciální backoff při síťových chybách; při chybě hesla / 429 / 2FA okamžitě zastaví automatické pokusy.
-- *Bezpečnost hesla:* heslo se nikdy neukládá (pouze jednorázový vstup při ručním přihlášení, při startu aplikace se případné staré heslo maže). Ukládají se pouze šifrované cookies důvěryhodného zařízení.
+- *Zablokování účtu (lockout / 429):* `WithingsSessionCoordinator` obsahuje perzistovaný circuit-breaker a exponenciální backoff při síťových chybách; při chybě hesla / 429 / 2FA okamžitě zastaví automatické pokusy. Když tiché SSO selže a heslo je zapamatované, zkusí se na pozadí jedno přihlášení heslem nejvýše jednou za 6 h (odmítnuté heslo se smaže; 2FA / 429 pozastaví obnovu do ručního přihlášení).
+- *Bezpečnost hesla:* Heslo se ukládá šifrovaně v Android Keystore jen v telefonu a slouží k automatickému obnovení spojení, když vyprší relace; lze vypnout. Ukládá se výhradně v šifrovaném SecretStore (nikdy v Room DB, nastavení, zálohách ani logu) a maže se při odpojení účtu nebo při odmítnutí heslem.
+- *Diagnostika:* Nastavení → Withings → „Diagnostika Withings“ ukazuje redigovaný průběh posledních pokusů (cesty URL bez parametrů, HTTP stav, výsledek; max. 30 záznamů) s tlačítkem „Zkopírovat“.
 - *OAuth režim:* zůstává pouze jako volitelná záložní cesta pro pokročilé uživatele s vlastním developer účtem.
 
 ## Zvažované alternativy

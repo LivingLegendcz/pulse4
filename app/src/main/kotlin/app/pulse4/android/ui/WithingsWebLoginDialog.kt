@@ -1,6 +1,8 @@
 package app.pulse4.android.ui
 
 import android.accounts.AccountManager
+import android.content.ClipData
+import android.content.ClipboardManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
@@ -16,6 +18,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -24,11 +28,18 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.outlined.CheckCircle
+import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Visibility
+import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -52,11 +63,22 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -64,8 +86,119 @@ import app.pulse4.android.di.ServiceLocator
 import app.pulse4.android.di.WithingsLoginResult
 import app.pulse4.withings.WithingsUserProfile
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+/** Druh inline zpětné vazby pod tlačítkem přihlášení. */
+internal enum class WithingsFeedbackKind { Progress, Info, Success, Error }
+
+/** Inline výsledek / průběh přihlášení zobrazený přímo pod akčním tlačítkem. */
+internal data class WithingsFeedback(val text: String, val kind: WithingsFeedbackKind)
+
+internal const val WITHINGS_PASSWORD_FEEDBACK_TAG = "withings_password_feedback"
+internal const val WITHINGS_CODE_FEEDBACK_TAG = "withings_code_feedback"
+internal const val WITHINGS_CODE_FIELD_TAG = "withings_code_field"
+
+internal const val WITHINGS_WAITING_TEXT = "Čekám na dokončení synchronizace…"
+
+internal fun WithingsLoginResult.toFeedback(): WithingsFeedback = when (this) {
+    is WithingsLoginResult.Ok -> WithingsFeedback("Přihlášeno k Withings. Stahuji data…", WithingsFeedbackKind.Success)
+    is WithingsLoginResult.NeedsMfa -> WithingsFeedback(message, WithingsFeedbackKind.Info)
+    is WithingsLoginResult.Error -> WithingsFeedback(message, WithingsFeedbackKind.Error)
+}
+
+internal const val WITHINGS_PASSWORD_INFO_TEXT =
+    "Pulse4 se přihlašuje jako webový prohlížeč. Heslo se ukládá šifrovaně v Android Keystore jen v telefonu a slouží k automatickému obnovení spojení, když vyprší relace; lze vypnout. Pokud se k Withings přihlašujete přes Google nebo Apple, založte si nejdřív heslo přes „Zapomenuté heslo“ na account.withings.com."
+
+/** „Očičko“ pro zobrazení / skrytí hesla v poli hesla Withings. */
+@Composable
+internal fun WithingsPasswordVisibilityToggle(visible: Boolean, onChange: (Boolean) -> Unit) {
+    IconButton(onClick = { onChange(!visible) }) {
+        Icon(
+            imageVector = if (visible) Icons.Outlined.VisibilityOff else Icons.Outlined.Visibility,
+            contentDescription = if (visible) "Skrýt heslo" else "Zobrazit heslo",
+            tint = Color(0xFF94A3B8)
+        )
+    }
+}
+
+/** Přepínač „Pamatovat heslo pro automatické obnovení“ (výchozí zapnuto). */
+@Composable
+internal fun WithingsRememberPasswordRow(checked: Boolean, enabled: Boolean, onChange: (Boolean) -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(enabled = enabled) { onChange(!checked) },
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Checkbox(
+            checked = checked,
+            onCheckedChange = onChange,
+            enabled = enabled,
+            colors = CheckboxDefaults.colors(checkedColor = Color(0xFF0284C7))
+        )
+        Text(
+            "Pamatovat heslo pro automatické obnovení",
+            style = MaterialTheme.typography.bodySmall,
+            color = Color(0xFFCBD5E1)
+        )
+    }
+}
+
+internal fun isPlausibleEmail(email: String): Boolean {
+    val e = email.trim()
+    return e.length >= 3 && e.contains('@') && !e.startsWith('@') && !e.endsWith('@')
+}
+
+/**
+ * Výsledek / průběh přihlášení přímo pod tlačítkem. Při každé změně se karta posune do viditelné
+ * oblasti dialogu (i když je otevřená klávesnice a uživatel je odscrollovaný dolů).
+ */
+@Composable
+internal fun WithingsInlineFeedback(feedback: WithingsFeedback?, tag: String) {
+    if (feedback == null) return
+    val requester = remember { BringIntoViewRequester() }
+    LaunchedEffect(feedback) {
+        // Počkat na layout karty, pak ji vysunout do viditelné oblasti scrollovaného dialogu.
+        delay(60)
+        runCatching { requester.bringIntoView() }
+    }
+    val (container, border, textColor) = when (feedback.kind) {
+        WithingsFeedbackKind.Error -> Triple(Color(0xFF450A0A), Color(0xFFEF4444), Color(0xFFFCA5A5))
+        WithingsFeedbackKind.Info -> Triple(Color(0xFF0B1928), Color(0xFF06B6D4), Color(0xFFBAE6FD))
+        WithingsFeedbackKind.Success -> Triple(Color(0xFF064E3B), Color(0xFF10B981), Color(0xFFA7F3D0))
+        WithingsFeedbackKind.Progress -> Triple(Color(0xFF0F1E2E), Color(0xFF0284C7), Color(0xFFCBD5E1))
+    }
+    Card(
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = container),
+        border = BorderStroke(1.dp, border.copy(alpha = 0.8f)),
+        modifier = Modifier
+            .fillMaxWidth()
+            .bringIntoViewRequester(requester)
+            .testTag(tag)
+            .semantics { liveRegion = LiveRegionMode.Polite }
+    ) {
+        Row(
+            modifier = Modifier.padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            when (feedback.kind) {
+                WithingsFeedbackKind.Progress -> CircularProgressIndicator(
+                    strokeWidth = 2.dp,
+                    color = border,
+                    modifier = Modifier.size(18.dp)
+                )
+                WithingsFeedbackKind.Error -> Icon(Icons.Outlined.ErrorOutline, contentDescription = null, tint = border, modifier = Modifier.size(20.dp))
+                WithingsFeedbackKind.Success -> Icon(Icons.Outlined.CheckCircle, contentDescription = null, tint = border, modifier = Modifier.size(20.dp))
+                WithingsFeedbackKind.Info -> Icon(Icons.Outlined.Info, contentDescription = null, tint = border, modifier = Modifier.size(20.dp))
+            }
+            Text(feedback.text, style = MaterialTheme.typography.bodySmall, color = textColor)
+        }
+    }
+}
 
 /**
  * Nativní přihlašovací formulář Withings: Jméno (e-mail) a heslo.
@@ -78,13 +211,31 @@ fun WithingsNativeLoginForm(
     onNotice: (String) -> Unit
 ) {
     val scope = rememberCoroutineScope()
+    val keyboard = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
     val savedEmail = sl.secrets.getString("withings.web.email") ?: sl.withings.loadWebSession()?.email ?: sl.withings.pendingEmail()
     var email by rememberSaveable { mutableStateOf(savedEmail ?: "") }
-    var password by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf(sl.withings.rememberedPassword().orEmpty()) }
+    var rememberPassword by rememberSaveable { mutableStateOf(true) }
+    var passwordVisible by rememberSaveable { mutableStateOf(false) }
     var code by rememberSaveable { mutableStateOf("") }
     var awaitingCode by rememberSaveable { mutableStateOf(sl.withings.isAwaitingCode()) }
-    var busy by remember { mutableStateOf(false) }
+    var loggingIn by remember { mutableStateOf(false) }
+    var verifying by remember { mutableStateOf(false) }
+    var waitingForSync by remember { mutableStateOf(false) }
+    var loginFeedback by remember { mutableStateOf<WithingsFeedback?>(null) }
+    var codeFeedback by remember { mutableStateOf<WithingsFeedback?>(null) }
+    var focusCodeTick by remember { mutableStateOf(0) }
+    val codeFocus = remember { FocusRequester() }
+    val busy = loggingIn || verifying
     val pausedMsg = remember { sl.withings.authPausedMessage() }
+
+    LaunchedEffect(focusCodeTick) {
+        if (focusCodeTick > 0) {
+            delay(120)
+            runCatching { codeFocus.requestFocus() }
+        }
+    }
 
     val accountPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
@@ -117,7 +268,7 @@ fun WithingsNativeLoginForm(
             onValueChange = { email = it },
             label = { Text("E-mail účtu Withings") },
             placeholder = { Text("např. jmeno@gmail.com") },
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email, imeAction = ImeAction.Next),
             singleLine = true,
             enabled = !busy,
             modifier = Modifier.fillMaxWidth()
@@ -141,29 +292,44 @@ fun WithingsNativeLoginForm(
             }
         }
 
-        val doLogin: () -> Unit = {
-            if (!busy && email.isNotBlank() && password.isNotBlank()) {
-                busy = true
-                scope.launch {
-                    val res = withContext(Dispatchers.IO) {
-                        sl.withings.loginDirectPassword(email, password)
+        val doLogin: () -> Unit = doLogin@{
+            if (busy || password.isBlank()) return@doLogin
+            if (!isPlausibleEmail(email)) {
+                loginFeedback = WithingsFeedback("Zadejte platný e-mail účtu Withings.", WithingsFeedbackKind.Error)
+                return@doLogin
+            }
+            keyboard?.hide()
+            focusManager.clearFocus()
+            loggingIn = true
+            waitingForSync = false
+            codeFeedback = null
+            loginFeedback = WithingsFeedback("Přihlašuji se k Withings…", WithingsFeedbackKind.Progress)
+            val em = email.trim()
+            val pw = password
+            scope.launch {
+                val res = withContext(Dispatchers.IO) {
+                    sl.withings.loginDirectPassword(em, pw, rememberPassword = rememberPassword, onWaiting = {
+                        scope.launch {
+                            waitingForSync = true
+                            loginFeedback = WithingsFeedback(WITHINGS_WAITING_TEXT, WithingsFeedbackKind.Progress)
+                        }
+                    })
+                }
+                loggingIn = false
+                waitingForSync = false
+                loginFeedback = res.toFeedback()
+                when (res) {
+                    is WithingsLoginResult.Ok -> {
+                        password = ""
+                        code = ""
+                        awaitingCode = false
+                        onLoggedIn(res)
                     }
-                    busy = false
-                    when (res) {
-                        is WithingsLoginResult.Ok -> {
-                            password = ""
-                            code = ""
-                            awaitingCode = false
-                            onLoggedIn(res)
-                        }
-                        is WithingsLoginResult.NeedsMfa -> {
-                            awaitingCode = true
-                            onNotice(res.message)
-                        }
-                        is WithingsLoginResult.Error -> {
-                            onNotice(res.message)
-                        }
+                    is WithingsLoginResult.NeedsMfa -> {
+                        awaitingCode = true
+                        focusCodeTick++
                     }
+                    is WithingsLoginResult.Error -> Unit
                 }
             }
         }
@@ -174,13 +340,15 @@ fun WithingsNativeLoginForm(
             onValueChange = { password = it },
             label = { Text("Heslo Withings") },
             placeholder = { Text("Zadejte heslo k účtu Withings") },
-            visualTransformation = PasswordVisualTransformation(),
+            visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+            trailingIcon = { WithingsPasswordVisibilityToggle(passwordVisible) { passwordVisible = it } },
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
             keyboardActions = KeyboardActions(onDone = { doLogin() }),
             singleLine = true,
             enabled = !busy,
             modifier = Modifier.fillMaxWidth()
         )
+        WithingsRememberPasswordRow(rememberPassword, enabled = !busy) { rememberPassword = it }
 
         // Důležitá poznámka pro účty Google / Apple
         Card(
@@ -208,7 +376,7 @@ fun WithingsNativeLoginForm(
                         color = Color(0xFF38BDF8)
                     )
                     Text(
-                        "Pulse4 se přihlašuje jako webový prohlížeč. Heslo se použije jen jednou a nikdy se neukládá. Ukládá se pouze šifrovaná relace (cookies) pro automatické obnovení spojení. Pokud se k Withings přihlašujete přes Google nebo Apple, založte si nejdřív heslo přes „Zapomenuté heslo“ na account.withings.com.",
+                        WITHINGS_PASSWORD_INFO_TEXT,
                         style = MaterialTheme.typography.bodySmall,
                         color = Color(0xFFCBD5E1)
                     )
@@ -216,52 +384,70 @@ fun WithingsNativeLoginForm(
             }
         }
 
-        val canSubmit = !busy && email.isNotBlank() && password.isNotBlank()
-
         Button(
-            enabled = canSubmit,
+            enabled = !busy && password.isNotBlank(),
             onClick = doLogin,
             modifier = Modifier.fillMaxWidth().height(48.dp),
             shape = RoundedCornerShape(12.dp),
             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0284C7))
         ) {
-            if (busy && !awaitingCode) {
+            if (loggingIn) {
                 CircularProgressIndicator(strokeWidth = 2.dp, color = Color.White, modifier = Modifier.size(20.dp))
                 Spacer(Modifier.width(8.dp))
-                Text("Přihlašuji se k Withings…", fontWeight = FontWeight.Bold)
+                Text(if (waitingForSync) WITHINGS_WAITING_TEXT else "Přihlašuji se k Withings…", fontWeight = FontWeight.Bold)
             } else {
                 Text("Přihlásit se heslem", fontWeight = FontWeight.Bold)
             }
         }
 
-        val doVerifyMfa: () -> Unit = {
-            if (!busy && code.isNotBlank() && email.isNotBlank()) {
-                busy = true
-                scope.launch {
-                    val res = withContext(Dispatchers.IO) {
-                        sl.withings.resumeDirectMfa(code, emailFallback = email)
+        // Výsledek přihlášení přímo pod tlačítkem (chyba / výzva k zadání kódu / průběh)
+        WithingsInlineFeedback(loginFeedback, WITHINGS_PASSWORD_FEEDBACK_TAG)
+
+        val doVerifyMfa: () -> Unit = doVerify@{
+            if (busy || code.isBlank()) return@doVerify
+            if (!isPlausibleEmail(email)) {
+                codeFeedback = WithingsFeedback("Zadejte platný e-mail účtu Withings.", WithingsFeedbackKind.Error)
+                return@doVerify
+            }
+            keyboard?.hide()
+            focusManager.clearFocus()
+            verifying = true
+            waitingForSync = false
+            codeFeedback = WithingsFeedback("Ověřuji kód u Withings…", WithingsFeedbackKind.Progress)
+            val em = email.trim()
+            val c = code
+            val pw = password
+            val remember = rememberPassword
+            scope.launch {
+                val res = withContext(Dispatchers.IO) {
+                    sl.withings.resumeDirectMfa(c, emailFallback = em, password = pw, rememberPassword = remember, onWaiting = {
+                        scope.launch {
+                            waitingForSync = true
+                            codeFeedback = WithingsFeedback(WITHINGS_WAITING_TEXT, WithingsFeedbackKind.Progress)
+                        }
+                    })
+                }
+                verifying = false
+                waitingForSync = false
+                codeFeedback = res.toFeedback()
+                when (res) {
+                    is WithingsLoginResult.Ok -> {
+                        password = ""
+                        code = ""
+                        awaitingCode = false
+                        onLoggedIn(res)
                     }
-                    busy = false
-                    when (res) {
-                        is WithingsLoginResult.Ok -> {
-                            password = ""
-                            code = ""
-                            awaitingCode = false
-                            onLoggedIn(res)
-                        }
-                        is WithingsLoginResult.NeedsMfa -> {
-                            awaitingCode = true
-                            onNotice(res.message)
-                        }
-                        is WithingsLoginResult.Error -> {
-                            onNotice(res.message)
-                        }
+                    is WithingsLoginResult.NeedsMfa -> {
+                        awaitingCode = true
+                        code = ""
+                        focusCodeTick++
                     }
+                    is WithingsLoginResult.Error -> Unit
                 }
             }
         }
 
-        // Pokud Withings vyžaduje 2FA kód (např. e-mail OTP nebo SMS)
+        // Pokud Withings vyžaduje 2FA kód (např. e-mail OTP nebo SMS) – pole hned pod výsledkem přihlášení
         if (awaitingCode || code.isNotBlank()) {
             Card(
                 shape = RoundedCornerShape(14.dp),
@@ -289,24 +475,26 @@ fun WithingsNativeLoginForm(
                         keyboardActions = KeyboardActions(onDone = { doVerifyMfa() }),
                         singleLine = true,
                         enabled = !busy,
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier.fillMaxWidth().focusRequester(codeFocus).testTag(WITHINGS_CODE_FIELD_TAG)
                     )
 
                     Button(
-                        enabled = !busy && code.isNotBlank() && email.isNotBlank(),
+                        enabled = !busy && code.isNotBlank(),
                         onClick = doVerifyMfa,
                         modifier = Modifier.fillMaxWidth().height(48.dp),
                         shape = RoundedCornerShape(12.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))
                     ) {
-                        if (busy) {
+                        if (verifying) {
                             CircularProgressIndicator(strokeWidth = 2.dp, color = Color.White, modifier = Modifier.size(20.dp))
                             Spacer(Modifier.width(8.dp))
-                            Text("Ověřuji kód…", fontWeight = FontWeight.Bold)
+                            Text(if (waitingForSync) WITHINGS_WAITING_TEXT else "Ověřuji kód…", fontWeight = FontWeight.Bold)
                         } else {
                             Text("Potvrdit ověřovací kód", fontWeight = FontWeight.Bold)
                         }
                     }
+
+                    WithingsInlineFeedback(codeFeedback, WITHINGS_CODE_FEEDBACK_TAG)
                 }
             }
         }
@@ -333,19 +521,39 @@ enum class WithingsDialogMode {
 fun WithingsReconnectForm(
     sl: ServiceLocator,
     onLoggedIn: (WithingsLoginResult.Ok) -> Unit,
-    onNotice: (String) -> Unit
+    @Suppress("UNUSED_PARAMETER") onNotice: (String) -> Unit
 ) {
     val scope = rememberCoroutineScope()
-    val savedEmail = sl.secrets.getString("withings.web.email")
-        ?: sl.withings.loadWebSession()?.email
-        ?: sl.withings.pendingEmail()
-        ?: ""
-    var password by remember { mutableStateOf("") }
+    val keyboard = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
+    val savedEmail = remember {
+        sl.secrets.getString("withings.web.email")?.takeIf { it.isNotBlank() }
+            ?: sl.withings.loadWebSession()?.email?.takeIf { it.isNotBlank() }
+            ?: sl.withings.pendingEmail()
+            ?: ""
+    }
+    var email by rememberSaveable { mutableStateOf(savedEmail) }
+    var password by remember { mutableStateOf(sl.withings.rememberedPassword().orEmpty()) }
+    var rememberPassword by rememberSaveable { mutableStateOf(true) }
+    var passwordVisible by rememberSaveable { mutableStateOf(false) }
     var code by rememberSaveable { mutableStateOf("") }
     var codeSent by rememberSaveable { mutableStateOf(sl.withings.isAwaitingCode()) }
     var verifyingCode by remember { mutableStateOf(false) }
     var loggingInByPassword by remember { mutableStateOf(false) }
+    var waitingForSync by remember { mutableStateOf(false) }
+    var loginFeedback by remember { mutableStateOf<WithingsFeedback?>(null) }
+    var codeFeedback by remember { mutableStateOf<WithingsFeedback?>(null) }
+    var focusCodeTick by remember { mutableStateOf(0) }
+    val codeFocus = remember { FocusRequester() }
+    val busy = loggingInByPassword || verifyingCode
     val pausedMsg = remember { sl.withings.authPausedMessage() }
+
+    LaunchedEffect(focusCodeTick) {
+        if (focusCodeTick > 0) {
+            delay(120)
+            runCatching { codeFocus.requestFocus() }
+        }
+    }
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         if (!pausedMsg.isNullOrBlank()) {
@@ -389,12 +597,6 @@ fun WithingsReconnectForm(
                         color = Color(0xFF38BDF8)
                     )
                     Text(
-                        savedEmail,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White
-                    )
-                    Text(
                         "Původní nastavení profilů zůstane zachováno",
                         style = MaterialTheme.typography.bodySmall,
                         color = Color(0xFF94A3B8)
@@ -402,6 +604,19 @@ fun WithingsReconnectForm(
                 }
             }
         }
+
+        // E-mail účtu (předvyplněný, lze opravit)
+        OutlinedTextField(
+            value = email,
+            onValueChange = { email = it },
+            label = { Text("E-mail účtu Withings") },
+            placeholder = { Text("např. jmeno@gmail.com") },
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email, imeAction = ImeAction.Next),
+            singleLine = true,
+            enabled = !busy,
+            isError = email.isNotEmpty() && !isPlausibleEmail(email),
+            modifier = Modifier.fillMaxWidth()
+        )
 
         // Informační poznámka pro účty Google / Apple
         Card(
@@ -429,7 +644,7 @@ fun WithingsReconnectForm(
                         color = Color(0xFF38BDF8)
                     )
                     Text(
-                        "Pulse4 se přihlašuje jako webový prohlížeč. Heslo se použije jen jednou a nikdy se neukládá. Ukládá se pouze šifrovaná relace (cookies) pro automatické obnovení spojení. Pokud se k Withings přihlašujete přes Google nebo Apple, založte si heslo přes „Zapomenuté heslo“ na account.withings.com.",
+                        WITHINGS_PASSWORD_INFO_TEXT,
                         style = MaterialTheme.typography.bodySmall,
                         color = Color(0xFFCBD5E1)
                     )
@@ -437,22 +652,42 @@ fun WithingsReconnectForm(
             }
         }
 
-        val doPasswordLogin: () -> Unit = {
-            if (!loggingInByPassword && !verifyingCode && password.isNotBlank()) {
-                loggingInByPassword = true
-                scope.launch {
-                    val res = withContext(Dispatchers.IO) {
-                        sl.withings.loginDirectPassword(savedEmail, password)
-                    }
-                    loggingInByPassword = false
-                    when (res) {
-                        is WithingsLoginResult.Ok -> onLoggedIn(res)
-                        is WithingsLoginResult.NeedsMfa -> {
-                            codeSent = true
-                            onNotice(res.message)
+        val doPasswordLogin: () -> Unit = doLogin@{
+            if (busy || password.isBlank()) return@doLogin
+            if (!isPlausibleEmail(email)) {
+                loginFeedback = WithingsFeedback("Zadejte platný e-mail účtu Withings.", WithingsFeedbackKind.Error)
+                return@doLogin
+            }
+            keyboard?.hide()
+            focusManager.clearFocus()
+            loggingInByPassword = true
+            waitingForSync = false
+            codeFeedback = null
+            loginFeedback = WithingsFeedback("Obnovuji spojení heslem…", WithingsFeedbackKind.Progress)
+            val em = email.trim()
+            val pw = password
+            scope.launch {
+                val res = withContext(Dispatchers.IO) {
+                    sl.withings.loginDirectPassword(em, pw, rememberPassword = rememberPassword, onWaiting = {
+                        scope.launch {
+                            waitingForSync = true
+                            loginFeedback = WithingsFeedback(WITHINGS_WAITING_TEXT, WithingsFeedbackKind.Progress)
                         }
-                        is WithingsLoginResult.Error -> onNotice(res.message)
+                    })
+                }
+                loggingInByPassword = false
+                waitingForSync = false
+                loginFeedback = res.toFeedback()
+                when (res) {
+                    is WithingsLoginResult.Ok -> {
+                        password = ""
+                        onLoggedIn(res)
                     }
+                    is WithingsLoginResult.NeedsMfa -> {
+                        codeSent = true
+                        focusCodeTick++
+                    }
+                    is WithingsLoginResult.Error -> Unit
                 }
             }
         }
@@ -463,16 +698,18 @@ fun WithingsReconnectForm(
             onValueChange = { password = it },
             label = { Text("Heslo Withings") },
             placeholder = { Text("Zadejte heslo k účtu") },
-            visualTransformation = PasswordVisualTransformation(),
+            visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+            trailingIcon = { WithingsPasswordVisibilityToggle(passwordVisible) { passwordVisible = it } },
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
             keyboardActions = KeyboardActions(onDone = { doPasswordLogin() }),
             singleLine = true,
-            enabled = !loggingInByPassword && !verifyingCode,
+            enabled = !busy,
             modifier = Modifier.fillMaxWidth()
         )
+        WithingsRememberPasswordRow(rememberPassword, enabled = !busy) { rememberPassword = it }
 
         Button(
-            enabled = !loggingInByPassword && !verifyingCode && password.isNotBlank(),
+            enabled = !busy && password.isNotBlank(),
             onClick = doPasswordLogin,
             modifier = Modifier.fillMaxWidth().height(48.dp),
             shape = RoundedCornerShape(12.dp),
@@ -481,13 +718,16 @@ fun WithingsReconnectForm(
             if (loggingInByPassword) {
                 CircularProgressIndicator(strokeWidth = 2.dp, color = Color.White, modifier = Modifier.size(20.dp))
                 Spacer(Modifier.width(8.dp))
-                Text("Obnovuji spojení heslem…", fontWeight = FontWeight.Bold)
+                Text(if (waitingForSync) WITHINGS_WAITING_TEXT else "Obnovuji spojení heslem…", fontWeight = FontWeight.Bold)
             } else {
                 Text("Obnovit spojení heslem", fontWeight = FontWeight.Bold)
             }
         }
 
-        // Pokud uživatel ještě heslo nemá nebo server vyžádal 2FA kód
+        // Výsledek přihlášení přímo pod tlačítkem (chyba / výzva k zadání kódu / průběh)
+        WithingsInlineFeedback(loginFeedback, WITHINGS_PASSWORD_FEEDBACK_TAG)
+
+        // Pokud server vyžádal 2FA kód – pole hned pod výsledkem přihlášení
         if (codeSent || code.isNotBlank()) {
             Card(
                 shape = RoundedCornerShape(14.dp),
@@ -506,19 +746,40 @@ fun WithingsReconnectForm(
                         color = Color(0xFF38BDF8)
                     )
 
-                    val doVerifyCode: () -> Unit = {
-                        if (!verifyingCode && code.length >= 6) {
-                            verifyingCode = true
-                            scope.launch {
-                                val res = withContext(Dispatchers.IO) {
-                                    sl.withings.resumeDirectMfa(code, emailFallback = savedEmail)
+                    val doVerifyCode: () -> Unit = doVerify@{
+                        if (busy || code.length < 6) return@doVerify
+                        if (!isPlausibleEmail(email)) {
+                            codeFeedback = WithingsFeedback("Zadejte platný e-mail účtu Withings.", WithingsFeedbackKind.Error)
+                            return@doVerify
+                        }
+                        keyboard?.hide()
+                        focusManager.clearFocus()
+                        verifyingCode = true
+                        waitingForSync = false
+                        codeFeedback = WithingsFeedback("Ověřuji kód u Withings…", WithingsFeedbackKind.Progress)
+                        val em = email.trim()
+                        val c = code
+                        val pw = password
+                        val remember = rememberPassword
+                        scope.launch {
+                            val res = withContext(Dispatchers.IO) {
+                                sl.withings.resumeDirectMfa(c, emailFallback = em, password = pw, rememberPassword = remember, onWaiting = {
+                                    scope.launch {
+                                        waitingForSync = true
+                                        codeFeedback = WithingsFeedback(WITHINGS_WAITING_TEXT, WithingsFeedbackKind.Progress)
+                                    }
+                                })
+                            }
+                            verifyingCode = false
+                            waitingForSync = false
+                            codeFeedback = res.toFeedback()
+                            when (res) {
+                                is WithingsLoginResult.Ok -> onLoggedIn(res)
+                                is WithingsLoginResult.NeedsMfa -> {
+                                    code = ""
+                                    focusCodeTick++
                                 }
-                                verifyingCode = false
-                                when (res) {
-                                    is WithingsLoginResult.Ok -> onLoggedIn(res)
-                                    is WithingsLoginResult.NeedsMfa -> onNotice(res.message)
-                                    is WithingsLoginResult.Error -> onNotice(res.message)
-                                }
+                                is WithingsLoginResult.Error -> Unit
                             }
                         }
                     }
@@ -534,12 +795,12 @@ fun WithingsReconnectForm(
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
                         keyboardActions = KeyboardActions(onDone = { doVerifyCode() }),
                         singleLine = true,
-                        enabled = !verifyingCode,
-                        modifier = Modifier.fillMaxWidth()
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth().focusRequester(codeFocus).testTag(WITHINGS_CODE_FIELD_TAG)
                     )
 
                     Button(
-                        enabled = !verifyingCode && code.length >= 6,
+                        enabled = !busy && code.length >= 6,
                         onClick = doVerifyCode,
                         modifier = Modifier.fillMaxWidth().height(48.dp),
                         shape = RoundedCornerShape(12.dp),
@@ -548,11 +809,13 @@ fun WithingsReconnectForm(
                         if (verifyingCode) {
                             CircularProgressIndicator(strokeWidth = 2.dp, color = Color.White, modifier = Modifier.size(20.dp))
                             Spacer(Modifier.width(8.dp))
-                            Text("Ověřuji kód u Withings…", fontWeight = FontWeight.Bold)
+                            Text(if (waitingForSync) WITHINGS_WAITING_TEXT else "Ověřuji kód u Withings…", fontWeight = FontWeight.Bold)
                         } else {
                             Text("Potvrdit kód a obnovit", fontWeight = FontWeight.Bold, color = Color.White)
                         }
                     }
+
+                    WithingsInlineFeedback(codeFeedback, WITHINGS_CODE_FEEDBACK_TAG)
                 }
             }
         }
@@ -1058,6 +1321,67 @@ fun WithingsWebLoginDialog(
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Karta „Diagnostika Withings“ v Nastavení: redigovaný záznam posledních pokusů o přihlášení
+ * a tichého obnovení (cesty URL bez parametrů, HTTP stav, výsledek). Neobsahuje cookies, hesla,
+ * tokeny ani e-mail, takže ji lze bezpečně zkopírovat a poslat.
+ */
+@Composable
+fun WithingsDiagnosticsCard(sl: ServiceLocator, refreshKey: Any? = null) {
+    val ctx = LocalContext.current
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    var reload by remember { mutableStateOf(0) }
+    var text by remember { mutableStateOf("") }
+    var copied by remember { mutableStateOf(false) }
+    LaunchedEffect(expanded, reload, refreshKey) {
+        if (expanded) text = withContext(Dispatchers.IO) { sl.withings.authDiagnosticsText() }
+    }
+    Card(
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF0A101B)),
+        border = BorderStroke(1.dp, Color(0xFF334155)),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                Modifier.fillMaxWidth().clickable { expanded = !expanded; copied = false },
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("Diagnostika Withings", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = Color.White)
+                    Text(
+                        "Průběh posledních pokusů o přihlášení a tiché obnovení (bez hesla, cookies a e-mailu).",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xFF94A3B8)
+                    )
+                }
+                Text(if (expanded) "Skrýt" else "Zobrazit", style = MaterialTheme.typography.labelMedium, color = Color(0xFF38BDF8))
+            }
+            if (expanded) {
+                Text(
+                    text.ifBlank { "Načítám…" },
+                    style = MaterialTheme.typography.labelSmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = Color(0xFFCBD5E1)
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = {
+                        val cm = ctx.getSystemService(ClipboardManager::class.java)
+                        copied = cm != null && runCatching {
+                            cm.setPrimaryClip(ClipData.newPlainText("Diagnostika Withings", text.ifBlank { sl.withings.authDiagnosticsText() }))
+                        }.isSuccess
+                    }) {
+                        Icon(Icons.Outlined.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(if (copied) "Zkopírováno" else "Zkopírovat")
+                    }
+                    TextButton(onClick = { reload++; copied = false }) { Text("Obnovit") }
                 }
             }
         }

@@ -13,9 +13,9 @@ interface WithingsAuthStateStore {
  * Řídí obnovování webové relace Withings, circuit-breaker při chybách autentizace
  * a exponenciální backoff při síťových výpadcích.
  *
- * Zajišťuje, že při chybném heslu, rate-limitu / lockoutu nebo vyžádání 2FA kódu
- * se na pozadí už nikdy opakovaně nevolá `loginPassword(...)`, dokud se uživatel
- * znovu úspěšně nepřihlásí ručně.
+ * Pokud tiché SSO selže a uživatel si nechal zapamatovat heslo, zkusí se na pozadí jedno přihlášení
+ * uloženým heslem nejvýše jednou za 6 h. Při chybném heslu (heslo se smaže), rate-limitu / lockoutu
+ * nebo vyžádání 2FA kódu se auto-relogin pozastaví, dokud se uživatel znovu úspěšně nepřihlásí ručně.
  */
 class WithingsSessionCoordinator(
     private val store: WithingsAuthStateStore,
@@ -30,6 +30,8 @@ class WithingsSessionCoordinator(
     private val onSilentRefreshOk: (WithingsLoginResult.Ok, emailFallback: String?) -> Unit,
     private val onAuthPaused: (reason: String, message: String) -> Unit = { _, _ -> },
     private val onLog: (String) -> Unit = {},
+    /** True when a manual (user) login is waiting; background renewal then stops between HTTP calls. */
+    private val shouldAbort: () -> Boolean = { false },
 ) {
     fun pausedReason(): String? = store.getString(KEY_PAUSED_REASON)?.takeIf { it.isNotBlank() }
 
@@ -136,19 +138,20 @@ class WithingsSessionCoordinator(
             }
         }
 
-        if (store.getString(KEY_PASSWORD) != null) {
-            store.delete(KEY_PASSWORD)
+        if (shouldAbort()) {
+            onLog("renewSession aborted: manual login pending")
+            return false
         }
-        if (hasUsableCookies()) {
-            return tryAutoReLogin()
-        }
-        return false
+        return tryAutoReLogin()
     }
 
+    /**
+     * Tiché obnovení relace na pozadí:
+     * 1. Tiché SSO přes dlouhodobé cookies `account.withings.com`.
+     * 2. Pokud SSO selže (ne síťově) a uživatel si nechal zapamatovat heslo, jeden pokus o přihlášení
+     *    uloženým heslem – nejvýše jednou za [PASSWORD_FALLBACK_INTERVAL_MS], nikdy ve smyčce.
+     */
     fun tryAutoReLogin(): Boolean {
-        if (store.getString(KEY_PASSWORD) != null) {
-            store.delete(KEY_PASSWORD)
-        }
         if (isAutoReloginPaused()) {
             onLog("tryAutoReLogin skipped: paused (${pausedReason()})")
             return false
@@ -160,51 +163,117 @@ class WithingsSessionCoordinator(
             return false
         }
 
-        val email = store.getString(KEY_EMAIL)
+        val email = store.getString(KEY_EMAIL)?.takeIf { it.isNotBlank() }
+        var ssoOtherFailure: WithingsLoginResult.Error? = null
 
-        if (!hasUsableCookies()) {
-            return false
+        if (hasUsableCookies()) {
+            if (shouldAbort()) {
+                onLog("tryAutoReLogin aborted: manual login pending")
+                return false
+            }
+            val ssoRes = try {
+                trySilentSsoRefresh()
+            } catch (e: Exception) {
+                WithingsLoginResult.Error(e.message ?: "Network error", WithingsAuthFailureKind.NETWORK)
+            }
+            onLog("tryAutoReLogin SSO result: ${ssoRes::class.simpleName}")
+            if (ssoRes !is WithingsLoginResult.Ok && shouldAbort()) {
+                // Přerušeno kvůli ručnímu přihlášení – nepočítat jako selhání (circuit-breaker / backoff).
+                onLog("tryAutoReLogin aborted after SSO attempt: manual login pending")
+                return false
+            }
+            when (ssoRes) {
+                is WithingsLoginResult.Ok -> {
+                    clearAuthPauseAndBackoff()
+                    onSilentRefreshOk(ssoRes, email)
+                    return true
+                }
+                is WithingsLoginResult.NeedsMfa -> {
+                    pauseAutoRelogin(REASON_MFA_REQUIRED, ssoRes.message)
+                    return false
+                }
+                is WithingsLoginResult.Error -> when (ssoRes.kind) {
+                    WithingsAuthFailureKind.NETWORK -> {
+                        recordNetworkFailure(now)
+                        return false
+                    }
+                    WithingsAuthFailureKind.RATE_LIMITED -> {
+                        pauseAutoRelogin(REASON_RATE_LIMITED, ssoRes.message)
+                        return false
+                    }
+                    WithingsAuthFailureKind.INVALID_CREDENTIALS -> {
+                        pauseAutoRelogin(REASON_INVALID_CREDENTIALS, ssoRes.message)
+                        return false
+                    }
+                    WithingsAuthFailureKind.OTHER -> ssoOtherFailure = ssoRes
+                }
+            }
         }
 
-        val ssoRes = try {
-            trySilentSsoRefresh()
+        tryPasswordFallback(now, email)?.let { return it }
+
+        val other = ssoOtherFailure ?: return false
+        countOtherFailure(other.message)
+        return false
+    }
+
+    private fun countOtherFailure(message: String) {
+        val failures = (store.getString(KEY_OTHER_AUTH_FAILURES)?.toIntOrNull() ?: 0) + 1
+        store.putString(KEY_OTHER_AUTH_FAILURES, failures.toString())
+        if (failures >= MAX_CONSECUTIVE_OTHER_FAILURES) {
+            pauseAutoRelogin(REASON_AUTH_ERROR, message)
+        } else {
+            onLog("Non-network auth failure #$failures/$MAX_CONSECUTIVE_OTHER_FAILURES, not pausing yet")
+        }
+    }
+
+    /**
+     * Jeden pokus o přihlášení zapamatovaným heslem. Vrací `null`, pokud se pokus neprovedl
+     * (chybí heslo / e-mail, throttle 6 h, ruční přihlášení čeká), jinak výsledek obnovy.
+     */
+    private fun tryPasswordFallback(now: Long, email: String?): Boolean? {
+        val password = store.getString(KEY_PASSWORD)?.takeIf { it.isNotEmpty() } ?: return null
+        if (email == null) {
+            onLog("password fallback skipped: no stored email")
+            return null
+        }
+        val last = store.getString(KEY_LAST_PASSWORD_ATTEMPT_MS)?.toLongOrNull() ?: 0L
+        if (last > 0L && now - last in 0 until PASSWORD_FALLBACK_INTERVAL_MS) {
+            onLog("password fallback skipped: throttled (last attempt ${(now - last) / 60_000L} min ago)")
+            return null
+        }
+        if (shouldAbort()) {
+            onLog("password fallback skipped: manual login pending")
+            return false
+        }
+        store.putString(KEY_LAST_PASSWORD_ATTEMPT_MS, now.toString())
+        val res = try {
+            loginPassword(email, password)
         } catch (e: Exception) {
             WithingsLoginResult.Error(e.message ?: "Network error", WithingsAuthFailureKind.NETWORK)
         }
-        onLog("tryAutoReLogin SSO result: ${ssoRes::class.simpleName}")
-        return when (ssoRes) {
+        onLog("password fallback result: ${res::class.simpleName}")
+        return when (res) {
             is WithingsLoginResult.Ok -> {
                 clearAuthPauseAndBackoff()
-                onSilentRefreshOk(ssoRes, email)
+                onSilentRefreshOk(res, email)
                 true
             }
             is WithingsLoginResult.NeedsMfa -> {
-                pauseAutoRelogin(REASON_MFA_REQUIRED, ssoRes.message)
+                pauseAutoRelogin(REASON_MFA_REQUIRED, MSG_FALLBACK_MFA)
                 false
             }
-            is WithingsLoginResult.Error -> when (ssoRes.kind) {
-                WithingsAuthFailureKind.NETWORK -> {
-                    recordNetworkFailure(now)
-                    false
-                }
-                WithingsAuthFailureKind.RATE_LIMITED -> {
-                    pauseAutoRelogin(REASON_RATE_LIMITED, ssoRes.message)
-                    false
-                }
-                WithingsAuthFailureKind.INVALID_CREDENTIALS -> {
-                    pauseAutoRelogin(REASON_INVALID_CREDENTIALS, ssoRes.message)
-                    false
-                }
-                WithingsAuthFailureKind.OTHER -> {
-                    val failures = (store.getString(KEY_OTHER_AUTH_FAILURES)?.toIntOrNull() ?: 0) + 1
-                    store.putString(KEY_OTHER_AUTH_FAILURES, failures.toString())
-                    if (failures >= MAX_CONSECUTIVE_OTHER_FAILURES) {
-                        pauseAutoRelogin(REASON_AUTH_ERROR, ssoRes.message)
-                    } else {
-                        onLog("Non-network auth failure #$failures/$MAX_CONSECUTIVE_OTHER_FAILURES, not pausing yet")
+            is WithingsLoginResult.Error -> {
+                when (res.kind) {
+                    WithingsAuthFailureKind.INVALID_CREDENTIALS -> {
+                        store.delete(KEY_PASSWORD)
+                        pauseAutoRelogin(REASON_INVALID_CREDENTIALS, MSG_FALLBACK_INVALID)
                     }
-                    false
+                    WithingsAuthFailureKind.RATE_LIMITED -> pauseAutoRelogin(REASON_RATE_LIMITED, res.message)
+                    WithingsAuthFailureKind.NETWORK -> recordNetworkFailure(now)
+                    WithingsAuthFailureKind.OTHER -> countOtherFailure(res.message)
                 }
+                false
             }
         }
     }
@@ -217,6 +286,12 @@ class WithingsSessionCoordinator(
         const val KEY_NET_FAILURES = "withings.auth.net_failures"
         const val KEY_NET_BACKOFF_UNTIL_MS = "withings.auth.net_backoff_until_ms"
         const val KEY_OTHER_AUTH_FAILURES = "withings.auth.other_failures"
+        const val KEY_LAST_PASSWORD_ATTEMPT_MS = "withings.auth.last_password_attempt_ms"
+        const val PASSWORD_FALLBACK_INTERVAL_MS = 6 * 60 * 60 * 1000L
+        const val MSG_FALLBACK_MFA =
+            "Withings při automatickém přihlášení uloženým heslem vyžaduje ověřovací kód. Přihlaste se prosím ručně a zadejte kód."
+        const val MSG_FALLBACK_INVALID =
+            "Withings odmítl uložené heslo. Uložené heslo bylo smazáno – přihlaste se prosím ručně."
         const val MAX_CONSECUTIVE_OTHER_FAILURES = 3
 
         const val REASON_INVALID_CREDENTIALS = "INVALID_CREDENTIALS"

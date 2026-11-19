@@ -164,6 +164,10 @@ android {
         buildConfig = true
     }
 
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
+
     // Nativni knihovny zustavaji v APK nekomprimovane.
     // 16KB page compatibility je nutne overit i u samotnych .so.
     packaging {
@@ -249,6 +253,7 @@ dependencies {
     // Testy.
     testImplementation(kotlin("test-junit"))
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.xerial:sqlite-jdbc:3.41.2.2")
 
     // Instrumentovane emulator testy.
     androidTestImplementation(compose)

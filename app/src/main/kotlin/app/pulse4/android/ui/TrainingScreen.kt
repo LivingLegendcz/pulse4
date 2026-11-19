@@ -79,6 +79,7 @@ import androidx.compose.ui.unit.sp
 import app.pulse4.android.R
 import app.pulse4.android.data.RoomPlanStore
 import app.pulse4.android.di.ServiceLocator
+import app.pulse4.android.di.ServiceMigrations
 import app.pulse4.android.ui.theme.JetBrainsMonoFamily
 import app.pulse4.domain.Sport
 import app.pulse4.provider.ProviderError
@@ -137,7 +138,12 @@ fun TrainingScreen(sl: ServiceLocator) {
     var status by remember { mutableStateOf<String?>(null) }
     var dateText by remember { mutableStateOf(LocalDate.now().plusDays(1).toString()) }
 
-    val planId by io(Unit) { "plan-" + sl.bridge.ensureStarted().deliveryHash.take(8) }
+    val planId by io(Unit) {
+        ServiceMigrations.runOnce(sl)
+        val info = sl.bridge.ensureStarted()
+        val (_, legacy) = ServiceMigrations.deriveDeliveryHashes(info.publicKeyB64)
+        sl.settings.ownPlanId(info.deliveryHash, legacy)
+    }
     val head by io(planId to refresh) { planId?.let { id -> RoomPlanStore(sl.db).head(id) } }
     val proposals by sl.db.plans().openProposals().collectAsState(emptyList())
     val date = DateInput.parse(dateText, LocalDate.now())

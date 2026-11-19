@@ -40,6 +40,7 @@ interface ActivityDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE) fun upsertTrack(row: TrackRow)
     @Query("SELECT * FROM activity ORDER BY startUtcMs DESC") fun all(): Flow<List<ActivityRow>>
     @Query("SELECT * FROM activity ORDER BY startUtcMs DESC") fun allNow(): List<ActivityRow>
+    @Query("SELECT id FROM activity ORDER BY startUtcMs DESC") fun allIds(): List<String>
     @Query("SELECT * FROM activity ORDER BY startUtcMs DESC LIMIT 1") fun latest(): ActivityRow?
     @Query("SELECT id, startUtcMs, sport, title, distanceM, movingTimeS, ascentM, avgHeartRate, maxHeartRate, caloriesKcal, aerobicTe, anaerobicTe, trainingLoad, avgPowerW, avgCadence, zoneId, (CASE WHEN title IS NULL THEN json ELSE NULL END) AS json FROM activity ORDER BY startUtcMs DESC") fun allSummaries(): Flow<List<ActivitySummaryRow>>
     @Query("SELECT id, startUtcMs, sport, title, distanceM, movingTimeS, ascentM, avgHeartRate, maxHeartRate, caloriesKcal, aerobicTe, anaerobicTe, trainingLoad, avgPowerW, avgCadence, zoneId, (CASE WHEN title IS NULL THEN json ELSE NULL END) AS json FROM activity ORDER BY startUtcMs DESC") fun allSummariesNow(): List<ActivitySummaryRow>
@@ -121,6 +122,7 @@ interface InboxDao {
     @Query("SELECT contentHash FROM receipt WHERE eventId = :id") fun receiptHash(id: String): String?
     @Insert(onConflict = OnConflictStrategy.ABORT) fun insertReceipt(row: ReceiptRow)
     @Query("SELECT version FROM received_object WHERE author = :a AND objectType = :t AND objectId = :i") fun version(a: String, t: String, i: String): Long?
+    @Query("SELECT * FROM received_object WHERE author = :a AND objectType = :t AND objectId = :i") fun received(a: String, t: String, i: String): ReceivedRow?
     @Insert(onConflict = OnConflictStrategy.REPLACE) fun putObject(row: ReceivedRow)
     @Query("DELETE FROM received_object WHERE author = :a AND objectType = :t AND objectId = :i") fun removeObject(a: String, t: String, i: String)
     @Query("SELECT * FROM received_object WHERE objectType = :t ORDER BY objectId DESC") fun objects(t: String): Flow<List<ReceivedRow>>
@@ -143,6 +145,7 @@ interface InboxDao {
 interface PlanDao {
     @Insert(onConflict = OnConflictStrategy.ABORT) fun insertRevision(row: PlanRevisionRow)
     @Insert(onConflict = OnConflictStrategy.IGNORE) fun restoreRevision(row: PlanRevisionRow)
+    @Insert(onConflict = OnConflictStrategy.REPLACE) fun replaceRevision(row: PlanRevisionRow)
     @Query("SELECT * FROM plan_revision ORDER BY planId, revision") fun allRevisions(): List<PlanRevisionRow>
     @Query("SELECT * FROM plan_revision WHERE planId = :id ORDER BY revision DESC LIMIT 1") fun head(id: String): PlanRevisionRow?
     @Query("SELECT * FROM plan_revision WHERE planId = :id ORDER BY revision") fun revisions(id: String): List<PlanRevisionRow>

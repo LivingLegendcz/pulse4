@@ -2040,12 +2040,10 @@ internal fun buildFamilyAndWeightHandlers(
         if (env.objectType != "own_weight") {
             return@KindHandler HandlerResult.Rejected(RejectReason.INVALID_PAYLOAD)
         }
-        val isVerifiedChild = data.familyLinks().allNow().any { row ->
-            row.status == FamilyLinkStatus.VERIFIED.name &&
-                row.parentId == env.recipient &&
-                row.childId == env.author
-        } || settings.childRecipientIdentity == env.author
-        if (!isVerifiedChild) {
+        // R4-6: snapshot obsloužíme jen aktuálně nastavenému dítěti – data (Withings profil, cache) jsou vázaná na něj;
+        // jiné (i VERIFIED) dítě by jinak dostalo váhy sourozence.
+        val configuredChild = settings.childRecipientIdentity
+        if (configuredChild.isBlank() || configuredChild != env.author) {
             return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
         }
         for (sent in data.inbox().allSentNow()) {
@@ -2459,11 +2457,14 @@ class ShareService internal constructor(
         nowMs: Long,
         extraRecipients: Set<String> = emptySet(),
         selfOverride: String? = null,
+        recipients: Set<String>? = null,
     ) {
         val self = selfOverride ?: selfIdProvider()
         val builder = MessageBuilder(self)
+        // R4-2: payload je vždy CELÝ kruh; `recipients` jen zúží, komu se pošle (re-emit chybějícím příjemcům).
         val payload = json.encodeToString(Group.serializer(), group)
-        for (r in (group.members + extraRecipients) - self) {
+        val targets = recipients ?: (group.members + extraRecipients)
+        for (r in targets - self) {
             val msg = builder.build(
                 recipient = r,
                 kind = Kinds.MEMBERSHIP_UPDATE,
@@ -2721,7 +2722,10 @@ class ShareService internal constructor(
      * Odvolání: zruší čekající položky, odešle požadavek na odstranění už doručených kopií a vrátí plán s popisem omezení,
      * který UI musí uživateli ukázat přesně (doručená data nelze vzít zpět).
      */
-    fun revoke(grantId: String, nowMs: Long): RevocationPlan? {
+    fun revoke(grantId: String, nowMs: Long): RevocationPlan? = synchronized(planLock) { revokeLocked(grantId, nowMs) }
+
+    // R4-7: běží výhradně pod `planLock` – souběžný `planAndEnqueue` nesmí přepsat ledger `(R, "")` zpět na hash.
+    private fun revokeLocked(grantId: String, nowMs: Long): RevocationPlan? {
         val row = data.grants().get(grantId) ?: return null
         val g = json.decodeFromString(ShareGrant.serializer(), row.json)
         val self = selfIdProvider()
@@ -3182,6 +3186,30 @@ object ServiceMigrations {
     }
 
     /**
+     * R4-2: Produkční napojení R3-5 re-emitu na [ShareService]. `MEMBERSHIP_UPDATE` nese vždy celý aktuální kruh
+     * (stejná verze), ale posílá se jen příjemcům bez aktivní zprávy – nikdy ne zkrácený `members`.
+     */
+    internal fun reemitPendingControlMessages(
+        db: AppDatabase,
+        selfId: String,
+        shareService: ShareService,
+        nowMs: Long = System.currentTimeMillis(),
+    ): Int = reemitPendingControlMessages(
+        db = db,
+        selfId = selfId,
+        nowMs = nowMs,
+        emitFamilyLinkRequest = { link, ts ->
+            shareService.emitFamilyLinkRequest(link, ts, selfOverride = selfId)
+        },
+        emitAdminHandoverRequest = { group, target, ts ->
+            shareService.emitAdminHandoverRequest(group, target, ts, selfOverride = selfId)
+        },
+        broadcastMembershipUpdate = { group, missingRecipients, ts ->
+            shareService.broadcastMembershipUpdate(group, ts, selfOverride = selfId, recipients = missingRecipients)
+        },
+    )
+
+    /**
      * R3-5: Po migraci znovu zařadí čekající nebo dříve zrušené jednorázové řídicí zprávy
      * (`FAMILY_LINK_REQUEST`, `ADMIN_HANDOVER_REQUEST`, `MEMBERSHIP_UPDATE`) s novou adresou.
      */
@@ -3604,25 +3632,7 @@ object ServiceMigrations {
                             reemitPendingControlMessages(
                                 db = sl.db,
                                 selfId = selfLxmf,
-                                emitFamilyLinkRequest = { link, ts ->
-                                    sl.shareService.emitFamilyLinkRequest(link, ts, selfOverride = selfLxmf)
-                                },
-                                emitAdminHandoverRequest = { group, target, ts ->
-                                    sl.shareService.emitAdminHandoverRequest(group, target, ts, selfOverride = selfLxmf)
-                                },
-                                broadcastMembershipUpdate = { group, missingRecipients, ts ->
-                                    val otherMembers = (group.members - selfLxmf) - missingRecipients
-                                    if (otherMembers.isEmpty()) {
-                                        sl.shareService.broadcastMembershipUpdate(group, ts, selfOverride = selfLxmf)
-                                    } else {
-                                        // Pošleme pouze příjemcům, kteří nemají aktivní MEMBERSHIP_UPDATE.
-                                        sl.shareService.broadcastMembershipUpdate(
-                                            group = group.copy(members = missingRecipients + selfLxmf),
-                                            nowMs = ts,
-                                            selfOverride = selfLxmf,
-                                        )
-                                    }
-                                },
+                                shareService = sl.shareService,
                             )
                             sl.settings.put(KEY_R3_5_REEMIT_V1, "1")
                         }

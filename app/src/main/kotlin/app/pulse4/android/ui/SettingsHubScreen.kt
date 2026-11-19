@@ -2321,6 +2321,8 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                                             onClick = {
                                                 scope.launch(Dispatchers.IO) {
                                                     sl.settings.childRecipientIdentity = if (isSelected) "" else c.identity
+                                                    // R4-6: výběr dítěte = spárování s aktuálním dětským Withings profilem.
+                                                    if (!isSelected) runCatching { sl.withings.bindChildToCurrentWithingsProfile(c.identity) }
                                                     tick++
                                                 }
                                             },

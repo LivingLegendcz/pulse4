@@ -200,6 +200,18 @@ internal fun filterTopLevelActivities(
         ImportService.isMultisportLegId(row.id) || hasMultisportChildTagInJson(row.json)
     }
 
+/**
+ * Přijaté (sdílené) aktivity bez samostatných úseků multisportu `-sN` (R3-6 zbytek): úsek se sdílí jen jako
+ * součást rodiče, starší verze aplikace ho ale mohly poslat samostatně. Filtr platí pro seznam i týdenní souhrn.
+ */
+internal fun isSharedMultisportLeg(objectId: String, projectionActivityId: String? = null): Boolean =
+    ImportService.isMultisportLegId(objectId) ||
+        (projectionActivityId != null && ImportService.isMultisportLegId(projectionActivityId))
+
+internal fun filterTopLevelReceivedActivities(
+    rows: List<app.pulse4.android.data.ReceivedRow>,
+): List<app.pulse4.android.data.ReceivedRow> = rows.filterNot { isSharedMultisportLeg(it.objectId) }
+
 private fun hasMultisportChildTagInJson(rawJson: String?): Boolean {
     if (rawJson.isNullOrBlank()) return false
     val act = runCatching { Wire.json.decodeFromString(Activity.serializer(), rawJson) }.getOrNull() ?: return false
@@ -6043,8 +6055,9 @@ fun ActivitiesScreen(
                     avgCadence = row.avgCadence
                 )
             }
-            val shared = sharedRows.mapNotNull { r ->
+            val shared = filterTopLevelReceivedActivities(sharedRows).mapNotNull { r ->
                 val p = runCatching { Wire.json.decodeFromString(ActivityProjection.serializer(), r.payload) }.getOrNull() ?: return@mapNotNull null
+                if (isSharedMultisportLeg(r.objectId, p.activityId)) return@mapNotNull null
                 val sp = runCatching { Sport.valueOf(p.sport) }.getOrDefault(Sport.OTHER)
                 val cName = contactsMap[r.author] ?: r.author.take(8)
                 UnifiedActivityItem(

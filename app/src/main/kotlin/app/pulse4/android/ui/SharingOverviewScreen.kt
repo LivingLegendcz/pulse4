@@ -97,7 +97,8 @@ fun SharingOverviewScreen(
     val groups by sl.db.grants().groups().collectAsState(emptyList())
     val grants by sl.db.grants().all().collectAsState(emptyList())
     val receivedDaily by sl.db.inbox().objects("daily").collectAsState(emptyList())
-    val receivedActs by sl.db.inbox().objects("activity").collectAsState(emptyList())
+    val receivedActsRaw by sl.db.inbox().objects("activity").collectAsState(emptyList())
+    val receivedActs = remember(receivedActsRaw) { filterTopLevelReceivedActivities(receivedActsRaw) }
     val pendingRows by sl.db.pendingRequests().all().collectAsState(emptyList())
 
     val selfHash by io(Unit) { sl.bridge.ensureStarted().deliveryHash }

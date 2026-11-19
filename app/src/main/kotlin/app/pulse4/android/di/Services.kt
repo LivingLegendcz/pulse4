@@ -310,6 +310,25 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
 
         fun isMultisportLegId(id: String): Boolean = MULTISPORT_LEG_REGEX.matches(id)
 
+        /** R3-7 zbytek: oprava legacy multisportu se síťovým dotazem na Garmin summary běží jednou, ne při každém syncu. */
+        internal const val MULTISPORT_NET_REPAIR_FLAG = "migration.multisport_repair_net_v1"
+
+        /**
+         * Spustí [block] jen tehdy, když [flag] ještě není nastaven; po úspěchu flag nastaví.
+         * Výjimka z [block] flag nenastaví (zkusí se při další synchronizaci).
+         */
+        internal inline fun runOnceWithFlag(
+            getFlag: (String) -> String?,
+            setFlag: (String, String) -> Unit,
+            flag: String,
+            block: () -> Unit,
+        ): Boolean {
+            if (getFlag(flag) == "true") return false
+            block()
+            setFlag(flag, "true")
+            return true
+        }
+
         fun parentIdFromLegId(id: String): String? =
             if (isMultisportLegId(id)) id.substringBeforeLast("-s") else null
 
@@ -1720,33 +1739,35 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
                 throttleMs = 80L,
             )
 
-            repairLegacyMultisportActivities(
-                store = roomActivityImportStore(),
-                findSealedFitForParent = { parentAct, legPairs -> findSealedFitInDir(parentAct, legPairs) },
-                fetchGarminSummary = { actId ->
-                    val summaryPath = "/activity-service/activity/$actId"
-                    val body = runCatching {
-                        if (authHeader != null) {
-                            val req = okhttp3.Request.Builder()
-                                .url("${cfg.baseUrl.trimEnd('/')}$summaryPath")
-                                .header(cfg.authHeader, authHeader)
-                                .get()
-                                .build()
-                            client.newCall(req).execute().use { resp ->
-                                if (resp.isSuccessful) resp.body?.string().orEmpty() else ""
-                            }
-                        } else ""
-                    }.getOrDefault("").ifBlank {
-                        if (hasExt) runCatching { sl.garminExt.connectApiJson(summaryPath) }.getOrDefault("") else ""
-                    }
-                    body.takeIf { it.isNotBlank() }?.let { raw ->
-                        runCatching { kotlinx.serialization.json.Json.parseToJsonElement(raw) as? kotlinx.serialization.json.JsonObject }.getOrNull()
-                    }
-                },
-                nowMs = nowMs,
-                accountId = sl.settings.accountId,
-                zoneId = sl.settings.zoneId,
-            )
+            runOnceWithFlag(sl.settings::getRaw, sl.settings::put, MULTISPORT_NET_REPAIR_FLAG) {
+                repairLegacyMultisportActivities(
+                    store = roomActivityImportStore(),
+                    findSealedFitForParent = { parentAct, legPairs -> findSealedFitInDir(parentAct, legPairs) },
+                    fetchGarminSummary = { actId ->
+                        val summaryPath = "/activity-service/activity/$actId"
+                        val body = runCatching {
+                            if (authHeader != null) {
+                                val req = okhttp3.Request.Builder()
+                                    .url("${cfg.baseUrl.trimEnd('/')}$summaryPath")
+                                    .header(cfg.authHeader, authHeader)
+                                    .get()
+                                    .build()
+                                client.newCall(req).execute().use { resp ->
+                                    if (resp.isSuccessful) resp.body?.string().orEmpty() else ""
+                                }
+                            } else ""
+                        }.getOrDefault("").ifBlank {
+                            if (hasExt) runCatching { sl.garminExt.connectApiJson(summaryPath) }.getOrDefault("") else ""
+                        }
+                        body.takeIf { it.isNotBlank() }?.let { raw ->
+                            runCatching { kotlinx.serialization.json.Json.parseToJsonElement(raw) as? kotlinx.serialization.json.JsonObject }.getOrNull()
+                        }
+                    },
+                    nowMs = nowMs,
+                    accountId = sl.settings.accountId,
+                    zoneId = sl.settings.zoneId,
+                )
+            }
 
             val cursor = latestTimestampMs ?: prevState?.cursorMs ?: nowMs
             sl.db.areaStates().put(AreaStateRow(SyncArea.ACTIVITIES.name, cursor, nowMs, nowMs, null, null))

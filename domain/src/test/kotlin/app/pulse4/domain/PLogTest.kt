@@ -4,6 +4,7 @@ import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class PLogTest {
@@ -34,33 +35,75 @@ class PLogTest {
     }
 
     @Test
-    fun `release mode suppresses d and i and redacts w and e`() {
-        val captured = mutableListOf<Triple<PLog.Level, String, String>>()
+    fun `redact scrubs JSON tokens, camelCase secrets, service tickets, and cookies`() {
+        val jsonRaw = """{"access_token":"tok-secret-1","refreshToken":"ref-secret-2","sessionToken":"sess-secret-3","authTicket":"auth-secret-4"}"""
+        val jsonOut = PLog.redact(jsonRaw)
+        assertFalse(jsonOut.contains("tok-secret-1"), "access_token leaked: $jsonOut")
+        assertFalse(jsonOut.contains("ref-secret-2"), "refreshToken leaked: $jsonOut")
+        assertFalse(jsonOut.contains("sess-secret-3"), "sessionToken leaked: $jsonOut")
+        assertFalse(jsonOut.contains("auth-secret-4"), "authTicket leaked: $jsonOut")
+        assertTrue(jsonOut.contains(""""access_token":"<redacted>""""), jsonOut)
+        assertTrue(jsonOut.contains(""""refreshToken":"<redacted>""""), jsonOut)
+
+        val kvRaw = "https://sso.garmin.com/sso/embed?ticket=ST-998877-AbCdEf_12&foo=ok sessionToken=cam1 refreshToken=cam2 authTicket=cam3"
+        val kvOut = PLog.redact(kvRaw)
+        assertFalse(kvOut.contains("ST-998877"), "ticket leaked: $kvOut")
+        assertFalse(kvOut.contains("cam1"), "sessionToken leaked: $kvOut")
+        assertFalse(kvOut.contains("cam2"), "refreshToken leaked: $kvOut")
+        assertFalse(kvOut.contains("cam3"), "authTicket leaked: $kvOut")
+        assertTrue(kvOut.contains("ticket=<redacted>&foo=ok"), kvOut)
+
+        val cookieRaw = "Cookie: session_key=secret-cookie-val; w_uuid=12345\nSet-Cookie: JSESSIONID=xyz987; HttpOnly"
+        val cookieOut = PLog.redact(cookieRaw)
+        assertFalse(cookieOut.contains("secret-cookie-val"), "Cookie leaked: $cookieOut")
+        assertFalse(cookieOut.contains("xyz987"), "Set-Cookie leaked: $cookieOut")
+        assertTrue(cookieOut.contains("Cookie: <redacted>"), cookieOut)
+        assertTrue(cookieOut.contains("Set-Cookie: <redacted>"), cookieOut)
+    }
+
+    @Test
+    fun `release mode suppresses d and i, redacts w and e, and redacts throwable without stacktrace`() {
+        val captured = mutableListOf<Triple<PLog.Level, String, Pair<String, Throwable?>>>()
         PLog.isDebug = false
-        PLog.sink = PLog.Sink { level, tag, message, _ ->
-            captured += Triple(level, tag, message)
+        PLog.sink = PLog.Sink { level, tag, message, throwable ->
+            captured += Triple(level, tag, message to throwable)
         }
 
         PLog.d("Tag") { "debug secret user@example.com" }
         PLog.i("Tag") { "info secret user@example.com" }
-        PLog.w("Tag") { "warn user@example.com" }
-        PLog.e("Tag", IllegalStateException("boom")) { "err token=secret123" }
+        PLog.w("Tag", IllegalArgumentException("bad Cookie: sid=secret-cookie")) { "warn user@example.com" }
+        PLog.e("Tag", IllegalStateException("failed for alice@example.com with ticket=ST-12345-xyz")) { "err token=secret123" }
 
         assertEquals(2, captured.size)
         assertEquals(PLog.Level.WARN, captured[0].first)
-        assertEquals("warn <email>", captured[0].third)
+        assertEquals("warn <email> (IllegalArgumentException: bad Cookie: <redacted>)", captured[0].third.first)
+        assertNull(captured[0].third.second, "release mode must not forward raw throwable to sink")
+
         assertEquals(PLog.Level.ERROR, captured[1].first)
-        assertEquals("err token=<redacted>", captured[1].third)
+        assertFalse(captured[1].third.first.contains("alice@example.com"), captured[1].third.first)
+        assertFalse(captured[1].third.first.contains("ST-12345"), captured[1].third.first)
+        assertTrue(captured[1].third.first.contains("err token=<redacted>"), captured[1].third.first)
+        assertTrue(captured[1].third.first.contains("IllegalStateException: failed for <email> with ticket=<redacted>"), captured[1].third.first)
+        assertNull(captured[1].third.second, "release mode must not forward raw throwable to sink")
     }
 
     @Test
-    fun `debug mode emits d and i without redaction`() {
-        val captured = mutableListOf<PLog.Level>()
+    fun `debug mode emits d and i without redaction and forwards throwable`() {
+        val captured = mutableListOf<Pair<PLog.Level, Throwable?>>()
         PLog.isDebug = true
-        PLog.sink = PLog.Sink { level, _, _, _ -> captured += level }
+        PLog.sink = PLog.Sink { level, _, _, throwable -> captured += level to throwable }
 
+        val err = IllegalStateException("debug details")
         PLog.d("Tag") { "dbg" }
         PLog.i("Tag") { "inf" }
-        assertEquals(listOf(PLog.Level.DEBUG, PLog.Level.INFO), captured)
+        PLog.w("Tag", err) { "wrn" }
+        assertEquals(
+            listOf<Pair<PLog.Level, Throwable?>>(
+                PLog.Level.DEBUG to null,
+                PLog.Level.INFO to null,
+                PLog.Level.WARN to err,
+            ),
+            captured,
+        )
     }
 }

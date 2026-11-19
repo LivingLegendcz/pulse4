@@ -310,7 +310,7 @@ class DebugCommandReceiver : BroadcastReceiver() {
         val spdPoints = (0 until 60).map { s -> (s * 30_000L) to (3.3 + cos(s / 6.0) * 0.35) }
         val elePoints = (0 until 60).map { s -> (s * 30_000L) to (215.0 + s * 1.4) }
         val routePoints = (0 until 60).map { s ->
-            RoutePoint(45.0755 + s * 0.00045, 15.0378 + sin(s / 8.0) * 0.0006)
+            RoutePoint(45.0200 + s * 0.00045, 15.0200 + sin(s / 8.0) * 0.0006)
         }
         val actProj = ActivityProjection(
             activityId = "p2p-run-1",

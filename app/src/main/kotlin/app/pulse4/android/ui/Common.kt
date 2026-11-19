@@ -62,6 +62,7 @@ import app.pulse4.android.ui.theme.MineralOutlineDark
 import app.pulse4.android.ui.theme.MineralSurfaceDark
 import app.pulse4.android.ui.theme.MineralSurfaceVariantDark
 import app.pulse4.android.ui.theme.drawMetricMotifIllustration
+import app.pulse4.domain.PLog
 import app.pulse4.domain.Reading
 import app.pulse4.provider.AreaStatus
 import app.pulse4.sync.DeliveryState
@@ -79,7 +80,7 @@ fun <T> io(key: Any?, block: () -> T): State<T?> = produceState<T?>(null, key) {
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Throwable) {
-            android.util.Log.e("Pulse4", "io() failed: ${e.javaClass.simpleName}", e)
+            PLog.e("Pulse4", e) { "io() failed: ${e.javaClass.simpleName}" }
             null
         }
     }

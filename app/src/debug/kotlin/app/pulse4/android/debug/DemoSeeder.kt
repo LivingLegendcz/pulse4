@@ -453,7 +453,7 @@ object DemoSeeder {
             val spdPoints = (0 until 40).map { s -> (s * 30_000L) to (3.45 + cos(s / 5.0) * 0.3) }
             val elePoints = (0 until 40).map { s -> (s * 30_000L) to (210.0 + s * 1.1) }
             val routePoints = (0 until 40).map { s ->
-                RoutePoint(45.0825 + s * 0.00035, 15.0280 + sin(s / 6.0) * 0.0005)
+                RoutePoint(45.0100 + s * 0.00035, 15.0100 + sin(s / 6.0) * 0.0005)
             }
             val actProj = ActivityProjection(
                 activityId = "tereza-trail-run",
@@ -549,8 +549,8 @@ object DemoSeeder {
         val baseEle = act.avgElevationM ?: act.minElevationM ?: 200.0
         val baseCad = act.avgCadence ?: 172.0
         val basePwr = act.avgPowerW ?: 260.0
-        val startLat = 45.0947
-        val startLon = 15.0439
+        val startLat = 45.0000
+        val startLon = 15.0000
         return (0 until count).map { i ->
             val frac = i.toDouble() / (count - 1)
             val t = act.startUtcMs + (frac * durMs).toLong()

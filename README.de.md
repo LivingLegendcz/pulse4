@@ -51,7 +51,7 @@ Die freiwillige Weitergabe ausgewählter Werte zwischen Familienmitgliedern oder
 
 ### 4. Dezentrales Teilen über Reticulum Mesh
 - **Keine Cloud:** Direkte Peer-to-Peer-Übertragung ohne zwischengeschaltete Firmenserver.
-- **Ende-zu-Ende-Verschlüsselung:** Asymmetrische Ed25519-Kryptografie sichert jede Nachricht.
+- **Ende-zu-Ende-Verschlüsselung (E2EE v3):** Asymmetrische Curve25519/Ed25519-Identitätsschlüssel mit einem ephemeren X25519-Schlüssel des Absenders pro Nachricht (ephemeral-static ECIES, Schutz vergangener Nachrichten bei Kompromittierung des Absenderschlüssels) und minimierten Metadaten im inneren Umschlag.
 - **Granulare Freigaben:** Präzise Steuerung, welche Metriken für wen sichtbar sind.
 
 ---

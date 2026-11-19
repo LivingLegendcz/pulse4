@@ -44,6 +44,7 @@ import app.pulse4.sync.Outcome
 import app.pulse4.sync.Receiver
 import app.pulse4.sync.RejectReason
 import app.pulse4.sync.Wire
+import app.pulse4.withings.WithingsUserProfile
 import app.pulse4.withings.WithingsWebSession
 import java.io.File
 import java.nio.file.Files
@@ -154,17 +155,20 @@ class PackageMSharingFamilyTest {
     // ---------------------------------------------------------------- R4-6
 
     @Test
-    fun `M2 M4 R4-6 SNAPSHOT_REQUEST is served only to the configured child and DB deletion beats the cache`() {
+    fun `M2 M4 R4-6 SNAPSHOT_REQUEST is served only to the configured child with its bound profile and DB deletion beats the cache`() {
         val parent = "pp00pp00pp00pp00pp00pp00pp00pp00"
         val childA = "ca11ca11ca11ca11ca11ca11ca11ca11"
         val childB = "cb22cb22cb22cb22cb22cb22cb22cb22"
-        val env = newParentEnv(parent, childWithingsUid = 2002L)
+        val env = newParentEnv(parent, selectedChildUid = 3003L)
         val db = env.db
         listOf(childA, childB).forEach { c ->
             db.contacts().upsert(ContactRow(c, "Child $c", "pub", "fp", verifiedAtMs = 1_000L))
             insertVerifiedLink(db, parent, c)
         }
-        env.sl.settings.childRecipientIdentity = childA
+        // Pairing: B <-> 3003, A <-> 2002 (A added last = configured recipient).
+        assertTrue(env.withings.addChild(childB, "3003"))
+        assertTrue(env.withings.addChild(childA, "2002"))
+        assertEquals(childA, env.sl.settings.childRecipientIdentity)
 
         val today = LocalDate.now(ZoneId.of(env.sl.settings.zoneId))
         db.observations().upsert(
@@ -172,7 +176,7 @@ class PackageMSharingFamilyTest {
                 childWeight("w-keep", 30.5, today.minusDays(1), accountId = "2002"),
                 childWeight("w-tomb", 31.0, today.minusDays(2), accountId = "2002"),
                 childWeight("w-excl", 29.9, today.minusDays(3), accountId = "2002"),
-                // Different Withings profile (sibling) in the same parent DB: never goes to child A.
+                // Sibling's profile (currently SELECTED in Withings settings): never goes to child A.
                 childWeight("w-sibling", 22.0, today.minusDays(1), accountId = "3003"),
             ),
         )
@@ -183,12 +187,12 @@ class PackageMSharingFamilyTest {
         val receiver = parentReceiver(env, parent)
         val t1 = System.currentTimeMillis()
 
-        // Sibling B is VERIFIED but not the configured child -> NOT_PERMITTED, nothing queued for B.
+        // Sibling B is VERIFIED and even bound, but not the configured child -> NOT_PERMITTED, nothing queued for B.
         val fromB = receiver.receive(childB, snapshotRequest(childB, parent, t1), t1)
         assertEquals(RejectReason.NOT_PERMITTED, (fromB as? Outcome.Rejected)?.reason, "got $fromB")
         assertTrue(familyPushes(db).none { it.recipient == childB }, "sibling must not receive any weights")
 
-        // Configured child A gets exactly its own measurements.
+        // Configured child A gets exactly the data of ITS bound profile 2002, although 3003 is selected in Withings.
         val fromA = receiver.receive(childA, snapshotRequest(childA, parent, t1 + 1), t1 + 1)
         assertTrue(fromA is Outcome.Applied, "got $fromA")
         assertEquals(setOf("w-keep", "w-tomb", "w-excl"), pushedIds(db, childA, sinceMs = t1))
@@ -205,36 +209,99 @@ class PackageMSharingFamilyTest {
     }
 
     @Test
-    fun `M2 R4-6 child is bound to its Withings uid and a switched child profile is not forwarded until re-paired`() {
+    fun `M2 R4-6 fixed binding survives a Withings profile switch and changes only by remove plus re-add`() {
         val parent = "pp00pp00pp00pp00pp00pp00pp00pp00"
         val childA = "ca11ca11ca11ca11ca11ca11ca11ca11"
-        val env = newParentEnv(parent, childWithingsUid = 2002L)
-        env.sl.settings.childRecipientIdentity = childA
+        val env = newParentEnv(parent, selectedChildUid = 2002L)
         env.sl.settings.childWeightAutoForward = false
         val now = System.currentTimeMillis()
 
-        // First use binds child A to Withings profile 2002 and fetches it through (fake) HTTP.
-        val first = env.withings.syncAndForwardChildWeights(now)
-        assertEquals(1, first)
-        assertEquals("2002", env.withings.boundChildWebUid(childA))
+        // Not added yet -> nothing is bound, fetched or forwarded (no implicit binding on use).
+        env.sl.settings.put("migration.child_withings_uid_v1", "1")
+        env.sl.settings.childRecipientIdentity = childA
+        assertEquals(0, env.withings.syncAndForwardChildWeights(now))
+        assertNull(env.withings.boundChildWebUid(childA))
+        assertTrue(env.http.measureUserIds.isEmpty())
+        assertFalse(env.withings.selectChildRecipient(childA), "unbound child cannot be selected without adding")
+
+        assertTrue(env.withings.addChild(childA, "2002"))
+        assertEquals(1, env.withings.syncAndForwardChildWeights(now))
         assertEquals(listOf("2002"), env.http.measureUserIds.toList())
-        assertEquals(listOf(childA), familyPushes(env.db).map { it.recipient }.distinct())
 
-        // The parent's Withings child profile switches to the sibling (3003) while A stays configured.
-        env.saveSession(childUserId = 3003L)
+        // Parent switches the selected Withings child profile to the sibling: A still gets ONLY 2002.
+        env.saveSession(selectedChildUid = 3003L)
         env.http.measureUserIds.clear()
-        val countBefore = familyPushes(env.db).size
-        assertEquals(0, env.withings.syncAndForwardChildWeights(now + 1_000L))
-        assertTrue(env.http.measureUserIds.isEmpty(), "sibling profile must not even be fetched for child A")
-        assertEquals(countBefore, familyPushes(env.db).size)
-        assertNull(env.withings.childWebUidFor(childA))
+        env.withings.syncAndForwardChildWeights(now + 1_000L)
+        assertEquals(listOf("2002"), env.http.measureUserIds.toList(), "fetch follows the binding, not the selection")
+        assertEquals("2002", env.withings.boundChildWebUid(childA))
+        assertFalse(env.withings.addChild(childA, "3003"), "an existing binding is never overwritten")
+        assertEquals("2002", env.withings.boundChildWebUid(childA))
 
-        // Explicit re-pairing (UI child selection) allows the new profile.
-        env.withings.bindChildToCurrentWithingsProfile(childA)
+        // Remove: binding gone, recipient cleared, nothing forwarded any more.
+        env.withings.removeChild(childA)
+        assertNull(env.withings.boundChildWebUid(childA))
+        assertEquals("", env.sl.settings.childRecipientIdentity)
+        assertEquals(
+            app.pulse4.android.di.WithingsService.ChildBindingStatus.UNBOUND,
+            env.withings.childBinding(childA).status,
+        )
+        env.sl.settings.childRecipientIdentity = childA
+        env.http.measureUserIds.clear()
+        assertEquals(0, env.withings.syncAndForwardChildWeights(now + 2_000L))
+        assertTrue(env.http.measureUserIds.isEmpty())
+
+        // Re-add with a different profile.
+        assertTrue(env.withings.addChild(childA, "3003"))
         assertEquals("3003", env.withings.boundChildWebUid(childA))
-        assertEquals(1, env.withings.syncAndForwardChildWeights(now + 2_000L))
+        assertEquals(1, env.withings.syncAndForwardChildWeights(now + 3_000L))
         assertEquals(listOf("3003"), env.http.measureUserIds.toList())
     }
+
+    @Test
+    fun `M2 R4-6 bound profile missing from the Withings account forwards nothing and reports a warning`() {
+        val parent = "pp00pp00pp00pp00pp00pp00pp00pp00"
+        val childA = "ca11ca11ca11ca11ca11ca11ca11ca11"
+        val env = newParentEnv(parent, selectedChildUid = 2002L)
+        assertTrue(env.withings.addChild(childA, "2002"))
+        val binding = env.withings.childBinding(childA)
+        assertEquals(app.pulse4.android.di.WithingsService.ChildBindingStatus.OK, binding.status)
+        assertEquals("Child 2002", binding.profileName)
+
+        val today = LocalDate.now(ZoneId.of(env.sl.settings.zoneId))
+        env.db.observations().upsert(listOf(childWeight("w-a", 30.0, today.minusDays(1), accountId = "2002")))
+        // Profile 2002 is removed from the Withings account.
+        env.saveSession(selectedChildUid = 3003L, profileIds = listOf(3003L))
+        val missing = env.withings.childBinding(childA)
+        assertEquals(app.pulse4.android.di.WithingsService.ChildBindingStatus.PROFILE_MISSING, missing.status)
+        assertEquals("2002", missing.withingsUid)
+
+        val now = System.currentTimeMillis()
+        assertEquals(0, env.withings.syncAndForwardChildWeights(now))
+        assertTrue(env.http.measureUserIds.isEmpty())
+        assertEquals(0, env.withings.onFamilyWeightSnapshotRequest(childA, now))
+        assertTrue(familyPushes(env.db).isEmpty())
+        // Binding is kept (no silent re-binding to another profile).
+        assertEquals("2002", env.withings.boundChildWebUid(childA))
+    }
+
+    @Test
+    fun `M2 R4-6 one-time migration binds the single existing child and never re-binds afterwards`() {
+        val parent = "pp00pp00pp00pp00pp00pp00pp00pp00"
+        val childA = "ca11ca11ca11ca11ca11ca11ca11ca11"
+        val childB = "cb22cb22cb22cb22cb22cb22cb22cb22"
+        val env = newParentEnv(parent, selectedChildUid = 2002L)
+        // Existing install: child configured + child profile selected, no binding yet.
+        env.sl.settings.childRecipientIdentity = childA
+        assertEquals("2002", env.withings.boundChildWebUid(childA))
+
+        // Later changes never bind implicitly.
+        env.saveSession(selectedChildUid = 3003L)
+        env.sl.settings.childRecipientIdentity = childB
+        assertNull(env.withings.boundChildWebUid(childB))
+        assertEquals("2002", env.withings.boundChildWebUid(childA))
+        assertEquals(listOf(3003L, 2002L).map { "Child $it" }.toSet(), env.withings.childProfileCandidates().map { it.displayName }.toSet())
+    }
+
 
     // ---------------------------------------------------------------- R4-7
 
@@ -336,18 +403,20 @@ class PackageMSharingFamilyTest {
         val http: FakeWithingsHttp,
         val withings: WithingsService,
     ) {
-        fun saveSession(childUserId: Long?) {
+        fun saveSession(selectedChildUid: Long?, profileIds: List<Long> = listOf(2002L, 3003L)) {
             val s = WithingsWebSession(
                 cookies = "session_key=abc",
                 primaryUserId = 1001L,
                 primaryUserName = "Parent",
-                childUserId = childUserId,
+                childUserId = selectedChildUid,
+                allProfiles = listOf(WithingsUserProfile(id = 1001L, firstName = "Parent", lastName = "", isPrimary = true)) +
+                    profileIds.map { WithingsUserProfile(id = it, firstName = "Child", lastName = it.toString()) },
             )
             sl.secrets.putString(WithingsService.WEB_SESSION_KEY, Wire.json.encodeToString(WithingsWebSession.serializer(), s))
         }
     }
 
-    private fun newParentEnv(parent: String, childWithingsUid: Long): ParentEnv {
+    private fun newParentEnv(parent: String, selectedChildUid: Long): ParentEnv {
         val dir = Files.createTempDirectory("pulse4-pkg-m-").toFile().also { tempDirs += it }
         val db = newDb()
         val sl = ServiceLocator(testContext(dir), dbOverride = db, sealerOverride = PlainSealer)
@@ -356,7 +425,7 @@ class PackageMSharingFamilyTest {
         sl.settings.childWeightMaxKg = 45.0
         val http = FakeWithingsHttp()
         val withings = WithingsService(sl.context, sl, http) { parent }
-        return ParentEnv(sl, db, http, withings).also { it.saveSession(childWithingsUid) }
+        return ParentEnv(sl, db, http, withings).also { it.saveSession(selectedChildUid) }
     }
 
     private fun parentReceiver(env: ParentEnv, parent: String) = Receiver(

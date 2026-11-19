@@ -115,7 +115,7 @@ class SyncEngine(
     }
 
     private fun fail(area: SyncArea, prev: AreaState, nowMs: Long, e: ProviderError, a: RetryAction, retryAt: Long? = null): AreaResult {
-        states.put(area, prev.copy(lastAttemptMs = nowMs, lastError = e::class.simpleName, retryNotBeforeMs = retryAt))
+        states.put(area, prev.copy(lastAttemptMs = nowMs, lastError = e.errorCode, retryNotBeforeMs = retryAt))
         return when (a) {
             is RetryAction.WaitAndRetry -> AreaResult.Deferred(retryAt!!)
             RetryAction.NeedNewApiKey, RetryAction.PauseForMfa, RetryAction.ShowForbidden, RetryAction.ShowNetworkUnavailable, RetryAction.ShowNotConfigured -> AreaResult.NeedsUser(a)

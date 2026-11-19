@@ -61,16 +61,18 @@ object ResponseMapper {
         for (item in items) {
             val start = parseTime(spec, JsonPath.get(item, spec.timePath))
             val value = JsonPath.double(item, spec.valuePath)
-            if (start == null || value == null) { skipped++; continue }
+            if (start == null || value == null || isUnmeasuredSentinel(spec.metric, value)) { skipped++; continue }
             val end = spec.endTimePath?.let { parseTime(spec, JsonPath.get(item, it)) }?.takeIf { it >= start }
             val zone = JsonPath.string(item, spec.zonePath) ?: defaultZone
             val ext = JsonPath.string(item, spec.externalIdPath)
             val local = JsonPath.string(item, spec.localDatePath) ?: TimeRules.localDate(end ?: start, zone).toString()
             val scopedExt = ext?.let { "${spec.metric.name}:$it" }
-            val stableFields = if (spec.metric == app.pulse4.domain.MetricType.BODY_BATTERY) {
-                listOf(spec.metric.name, local)
-            } else {
-                listOf(spec.metric.name, start.toString(), end?.toString() ?: "")
+            val stableFields = when (spec.metric) {
+                app.pulse4.domain.MetricType.BODY_BATTERY,
+                app.pulse4.domain.MetricType.RESTING_HEART_RATE,
+                app.pulse4.domain.MetricType.STEPS,
+                app.pulse4.domain.MetricType.STRESS -> listOf(spec.metric.name, local)
+                else -> listOf(spec.metric.name, start.toString(), end?.toString() ?: "")
             }
             val key = ImportKey.of(Provider.GARMIN_PERSONAL, accountId, scopedExt, stableFields)
             out += MetricObservation(
@@ -80,6 +82,13 @@ object ResponseMapper {
             )
         }
         return MapResult(out, skipped)
+    }
+
+    private fun isUnmeasuredSentinel(metric: app.pulse4.domain.MetricType, value: Double): Boolean = when (metric) {
+        app.pulse4.domain.MetricType.RESTING_HEART_RATE -> value <= 0.0
+        app.pulse4.domain.MetricType.STEPS,
+        app.pulse4.domain.MetricType.STRESS -> value < 0.0
+        else -> false
     }
 
     private fun parseTime(spec: EndpointSpec, e: JsonElement?): Long? {

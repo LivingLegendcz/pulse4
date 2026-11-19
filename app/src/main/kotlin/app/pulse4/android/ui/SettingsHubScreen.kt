@@ -2062,7 +2062,7 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                             }
                             if (!wSyncState?.lastError.isNullOrBlank()) {
                                 Text(
-                                    "Poslední chyba: ${wSyncState?.lastError}",
+                                    "Poslední chyba: ${Labels.syncError(wSyncState?.lastError.orEmpty())}",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = Color(0xFFF87171)
                                 )
@@ -2848,7 +2848,7 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                             }
                             if (hasErr) {
                                 Text(
-                                    "Chyba: ${st?.lastError}",
+                                    "Chyba: ${Labels.syncError(st?.lastError.orEmpty())}",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = Color(0xFFF87171)
                                 )
@@ -2885,7 +2885,7 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
         val wLastError = wAreaState?.lastError?.takeIf {
             it.isNotBlank() && (wAreaState.lastSuccessMs == null || (wAreaState.lastAttemptMs ?: 0L) > (wAreaState.lastSuccessMs ?: 0L))
         }
-        val wErrorText = wFailed?.message ?: wLastError
+        val wErrorText = wFailed?.message ?: wLastError?.let { Labels.syncError(it) }
         val withingsBarColor = when {
             wFailed != null -> Color(0xFFEF4444)
             wLastError != null -> Color(0xFFEF4444)

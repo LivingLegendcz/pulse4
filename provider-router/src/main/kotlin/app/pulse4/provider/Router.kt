@@ -45,17 +45,17 @@ class CapabilityRouter(
 }
 
 // ---------------------------------------------------------------------------------------------
-sealed class ProviderError(message: String) : Exception(message) {
-    class Unauthorized : ProviderError("401")
-    class Forbidden : ProviderError("403")
-    class RateLimited(val retryAfterS: Long?) : ProviderError("429")
-    class Network(cause: String) : ProviderError(cause)
-    class MfaRequired : ProviderError("MFA")
+sealed class ProviderError(message: String, val errorCode: String) : Exception(message) {
+    class Unauthorized : ProviderError("401", "Unauthorized")
+    class Forbidden : ProviderError("403", "Forbidden")
+    class RateLimited(val retryAfterS: Long?) : ProviderError("429", "RateLimited")
+    class Network(cause: String) : ProviderError(cause, "Network")
+    class MfaRequired : ProviderError("MFA", "MfaRequired")
     /** Endpoint nebo přihlášení není nakonfigurováno/ověřeno podle oficiální specifikace; nic se nevolá. */
-    class NotConfigured(val what: String) : ProviderError("not configured: $what")
-    class Server(val code: Int) : ProviderError("HTTP $code")
+    class NotConfigured(val what: String) : ProviderError("not configured: $what", "NotConfigured")
+    class Server(val code: Int) : ProviderError("HTTP $code", "Server")
     /** Odpověď po zápisu se nedoručila: výsledek je nejistý, nelze slepě opakovat. */
-    class Timeout : ProviderError("timeout")
+    class Timeout : ProviderError("timeout", "Timeout")
 }
 
 sealed interface RetryAction {

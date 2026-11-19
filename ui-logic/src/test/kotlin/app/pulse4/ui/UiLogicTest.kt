@@ -81,6 +81,9 @@ class FormatLabelsTest {
         assertTrue(Labels.result(AreaResult.NeedsUser(RetryAction.NeedNewApiKey)).contains("klíč"))
         listOf(RetryAction.RefreshTokenOnce, RetryAction.NeedNewApiKey, RetryAction.WaitAndRetry(5000), RetryAction.ShowForbidden, RetryAction.PauseForMfa, RetryAction.ShowNetworkUnavailable, RetryAction.ShowNotConfigured)
             .forEach { assertTrue(Labels.action(it).isNotBlank()) }
+        assertTrue(Labels.syncError("NotConfigured").contains("konfigurace"))
+        assertTrue(Labels.syncError("Unauthorized").contains("přihlaste", ignoreCase = true))
+        assertEquals("Vlastní zpráva", Labels.syncError("Vlastní zpráva"))
     }
 
     @Test fun `revocation text lists exactly the limits that apply, never promises recall`() {

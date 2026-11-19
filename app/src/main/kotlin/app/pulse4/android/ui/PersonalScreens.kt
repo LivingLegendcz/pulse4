@@ -673,7 +673,7 @@ fun TodayScreen(
                     syncing = false
                     syncTriggeredAtMs = null
                     val recentError = states.firstOrNull { (it.lastAttemptMs ?: 0L) >= triggeredAt && !it.lastError.isNullOrBlank() }?.lastError
-                    syncMessage = if (recentError != null) "Synchronizace s chybou: $recentError" else "Synchronizace dokončena."
+                    syncMessage = if (recentError != null) "Synchronizace s chybou: ${app.pulse4.ui.Labels.syncError(recentError)}" else "Synchronizace dokončena."
                 }
                 else -> Unit
             }

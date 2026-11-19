@@ -231,7 +231,7 @@ private fun SourceStatus(prefix: String, states: List<app.pulse4.android.data.Ar
     val row = states.firstOrNull { it.area == prefix + SyncArea.WEIGHT.name }
     val st = row?.let { AreaState(it.cursorMs, it.lastSuccessMs, it.lastAttemptMs, it.lastError, it.retryNotBeforeMs) } ?: AreaState()
     val status: AreaStatus = Freshness.statusOf(SyncArea.WEIGHT, st, System.currentTimeMillis())
-    Text("${status.label()} · poslední úspěch ${fmt.time(st.lastSuccessMs)}" + (st.lastError?.let { " · chyba $it" } ?: ""), style = MaterialTheme.typography.bodySmall)
+    Text("${status.label()} · poslední úspěch ${fmt.time(st.lastSuccessMs)}" + (st.lastError?.let { " · chyba ${app.pulse4.ui.Labels.syncError(it)}" } ?: ""), style = MaterialTheme.typography.bodySmall)
 }
 
 @Composable

@@ -116,6 +116,19 @@ object Labels {
         else -> "Přihlášení se nezdařilo. Zkontrolujte údaje a připojení a zkuste to znovu."
     }
 
+    /** Převod stabilního kódu chyby synchronizace uloženého v `AreaState.lastError` na čitelný český text. */
+    fun syncError(code: String): String = when (code) {
+        "Unauthorized" -> "Přihlášení nebo klíč už neplatí – přihlaste se znovu."
+        "Forbidden" -> "Služba odmítla přístup (403)."
+        "RateLimited" -> "Limit požadavků služby, zkusí se později."
+        "Network" -> "Síť není dostupná."
+        "MfaRequired" -> "Vyžadováno dvoufázové ověření (MFA)."
+        "NotConfigured" -> "Chybí ověřená konfigurace."
+        "Server" -> "Chyba serveru služby."
+        "Timeout" -> "Spojení vypršelo."
+        else -> code
+    }
+
     fun action(a: RetryAction) = when (a) {
         RetryAction.RefreshTokenOnce -> "Obnovuje se přístup"
         RetryAction.NeedNewApiKey -> "Je potřeba nový klíč / nové přihlášení"

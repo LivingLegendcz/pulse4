@@ -209,7 +209,7 @@ fun PrivacyScreen(sl: ServiceLocator) {
         val diag by io(tick) {
             val o = sl.db.outbox().all()
             "Fronta: ${Status.queueSummary(o.map { DeliveryState.valueOf(it.state) })}\n" +
-                SyncArea.entries.joinToString("\n") { a -> sl.db.areaStates().get(a.name).let { "${a.name}: poslední úspěch ${fmt.time(it?.lastSuccessMs)}, chyba ${it?.lastError ?: "—"}" } }
+                SyncArea.entries.joinToString("\n") { a -> sl.db.areaStates().get(a.name).let { "${a.name}: poslední úspěch ${fmt.time(it?.lastSuccessMs)}, chyba ${it?.lastError?.let { err -> app.pulse4.ui.Labels.syncError(err) } ?: "—"}" } }
         }
         Text("Export diagnostiky vynechává zdravotní hodnoty, GPS, přihlašovací údaje i obsah zpráv.", style = MaterialTheme.typography.bodySmall)
         Text(diag ?: "…", style = MaterialTheme.typography.bodySmall)

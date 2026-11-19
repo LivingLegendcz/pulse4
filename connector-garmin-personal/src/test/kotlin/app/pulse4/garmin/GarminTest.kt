@@ -229,11 +229,70 @@ class ShippedConfigTest {
             assertTrue(!ref.isNullOrBlank(), "Ověřený endpoint ${ep.metric} musí mít sampleRef")
             assertTrue(java.io.File("../$ref").exists(), "Vzorek $ref pro ${ep.metric} neexistuje")
         }
-        val unverifiedRefs = cfg.endpoints.filterNot { it.verified }.map { it.sampleRef }.toSet()
-        assertEquals(
-            setOf("docs/samples/heartrate.json", "docs/samples/steps.json", "docs/samples/stress.json"),
-            unverifiedRefs,
-        )
+        assertTrue(cfg.endpoints.all { it.verified }, "Všechny dodané endpointy musí být ověřené proti vzorkům")
+    }
+
+    @Test fun `RESTING_HEART_RATE, STEPS and STRESS map cleanly from real dailysummaries sample and skip sentinels`() {
+        val cfg = GarminEndpointsConfig.parse(file.readText())
+        val sampleJson = java.io.File("../docs/samples/dailysummaries.json").readText()
+        val rhr = ResponseMapper.map(cfg.endpoints.first { it.metric == MetricType.RESTING_HEART_RATE }, sampleJson, "acc", "Europe/Prague")
+        assertEquals(0, rhr.skipped)
+        assertEquals(listOf(60.0, 60.0, 60.0, 60.0), rhr.items.map { it.value })
+
+        val steps = ResponseMapper.map(cfg.endpoints.first { it.metric == MetricType.STEPS }, sampleJson, "acc", "Europe/Prague")
+        assertEquals(0, steps.skipped)
+        assertEquals(listOf(8000.0, 5000.0, 7000.0, 4500.0), steps.items.map { it.value })
+
+        val stressSpec = cfg.endpoints.first { it.metric == MetricType.STRESS }
+        val stress = ResponseMapper.map(stressSpec, sampleJson, "acc", "Europe/Prague")
+        assertEquals(0, stress.skipped)
+        assertEquals(listOf(25.0, 25.0, 25.0, 25.0), stress.items.map { it.value })
+
+        val sentinelJson = """
+            {
+              "data": [
+                {
+                  "calendarDate": "2026-11-18",
+                  "wellnessChronology": {
+                    "startTimestampGmt": "2026-11-17T23:00:00.0",
+                    "endTimestampGmt": "2026-11-18T10:15:00.0"
+                  },
+                  "heartRate": { "restingValue": 0 },
+                  "movement": { "steps": { "value": -1 } },
+                  "stress": { "avgLevel": -1 }
+                }
+              ]
+            }
+        """.trimIndent()
+        assertEquals(1, ResponseMapper.map(cfg.endpoints.first { it.metric == MetricType.RESTING_HEART_RATE }, sentinelJson, "acc", "Europe/Prague").skipped)
+        assertEquals(1, ResponseMapper.map(cfg.endpoints.first { it.metric == MetricType.STEPS }, sentinelJson, "acc", "Europe/Prague").skipped)
+        assertEquals(1, ResponseMapper.map(stressSpec, sentinelJson, "acc", "Europe/Prague").skipped)
+    }
+
+    @Test fun `daily summary metrics keep stable ImportKey across shifting endTimestampGmt`() {
+        val cfg = GarminEndpointsConfig.parse(file.readText())
+        fun body(endGmt: String, rhr: Int, steps: Int, stress: Int) = """
+            {
+              "data": [
+                {
+                  "calendarDate": "2026-11-18",
+                  "wellnessChronology": {
+                    "startTimestampGmt": "2026-11-17T23:00:00.0",
+                    "endTimestampGmt": "$endGmt"
+                  },
+                  "heartRate": { "restingValue": $rhr },
+                  "movement": { "steps": { "value": $steps } },
+                  "stress": { "avgLevel": $stress }
+                }
+              ]
+            }
+        """.trimIndent()
+        for (m in listOf(MetricType.RESTING_HEART_RATE, MetricType.STEPS, MetricType.STRESS)) {
+            val spec = cfg.endpoints.first { it.metric == m }
+            val first = ResponseMapper.map(spec, body("2026-11-18T10:15:00.0", 58, 4200, 21), "acc", "Europe/Prague").items.single()
+            val second = ResponseMapper.map(spec, body("2026-11-18T18:45:00.0", 57, 8900, 26), "acc", "Europe/Prague").items.single()
+            assertEquals(first.id, second.id, "${m.name} klíč nesmí záviset na posouvajícím se endTimestampGmt")
+        }
     }
 
     @Test fun `N-9 body battery uses stable ImportKey by metric and calendarDate across shifting endTimestampGmt`() {

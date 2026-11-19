@@ -40,15 +40,18 @@ import app.pulse4.sharing.PrivacyZone
 import app.pulse4.sharing.ShareGrant
 import app.pulse4.sharing.TimeScope
 import app.pulse4.sync.Ack
+import app.pulse4.sync.AckSink
 import app.pulse4.sync.BuiltInHandlers
 import app.pulse4.sync.DeliveryState
 import app.pulse4.sync.Envelope
 import app.pulse4.sync.HandlerResult
 import app.pulse4.sync.Kinds
 import app.pulse4.sync.MessageBuilder
+import app.pulse4.sync.Outcome
 import app.pulse4.sync.OutboxItem
 import app.pulse4.sync.OutboxManager
 import app.pulse4.sync.OutboxStore
+import app.pulse4.sync.Receiver
 import app.pulse4.sync.ReceiverStore
 import app.pulse4.sync.RejectReason
 import app.pulse4.sync.SentLedger
@@ -260,8 +263,10 @@ class PackageBEProductionTest {
         return OutboxManager(
             store = store,
             onPermissionDenied = { recipient, objectKey ->
-                data.inbox().sent(recipient, objectKey)?.let { row ->
-                    data.inbox().putSent(row.copy(contentHash = ""))
+                if (!objectKey.startsWith("own_weight/")) {
+                    data.inbox().sent(recipient, objectKey)?.let { row ->
+                        data.inbox().putSent(row.copy(contentHash = ""))
+                    }
                 }
             },
         )
@@ -551,7 +556,7 @@ class PackageBEProductionTest {
     }
 
     @Test
-    fun `RE-5 forwardChildObservations filters types and preserves Quality, NOT_PERMITTED clears hash and SNAPSHOT_REQUEST resyncs`() {
+    fun `RE-5 and R3-4 NOT_PERMITTED preserves hash across 3x syncs and SNAPSHOT_REQUEST immediately resends`() {
         val parentData = FakeDataAccess()
         val parentSettings = FakeSettings(zoneId = "UTC", childRecipientIdentity = "child-1")
         val parentOutbox = buildOutbox(parentData)
@@ -576,9 +581,10 @@ class PackageBEProductionTest {
             "m-bad", Provider.WITHINGS_API, "w", "m-bad", MetricType.WEIGHT,
             5_000L, null, 999.0, "UTC", "2026-11-18", Quality.OK,
         )
+        val parentWithingsObservations = listOf(weightSuspect, stepsDisallowed, outOfRangeWeight)
 
         val queued = WithingsService.forwardChildObservations(
-            observations = listOf(weightSuspect, stepsDisallowed, outOfRangeWeight),
+            observations = parentWithingsObservations,
             childRecipient = "child-1",
             selfId = "parent-1",
             outbox = parentOutbox,
@@ -603,50 +609,185 @@ class PackageBEProductionTest {
         assertEquals(HandlerResult.Rejected(RejectReason.NOT_PERMITTED), resDenied)
         assertFalse(childSettings.acceptWeightFromParent)
 
-        // Parent receives NOT_PERMITTED ACK -> CANCELLED and sent_projection.contentHash cleared (version stays 1)
+        // R3-4: Parent receives NOT_PERMITTED ACK -> CANCELLED and sent_projection.contentHash MUST remain intact
         assertTrue(parentOutbox.onAck("child-1", Ack(sentItem.eventId, Ack.Status.REJECTED, RejectReason.NOT_PERMITTED.name)))
         assertEquals(DeliveryState.CANCELLED, DeliveryState.valueOf(parentData.outbox().find(sentItem.eventId)!!.state))
         val sentAfterDeny = parentData.inbox().sent("child-1", "own_weight/m-weight")!!
         assertEquals(1L, sentAfterDeny.version)
-        assertEquals("", sentAfterDeny.contentHash)
+        assertTrue(sentAfterDeny.contentHash.isNotEmpty(), "R3-4: contentHash must stay non-empty on NOT_PERMITTED")
         assertTrue(parentOutbox.expireStale(12_000L).isEmpty())
+
+        // R3-4: 3x Withings syncs while child opt-in is OFF -> 0 new outbound messages
+        repeat(3) { idx ->
+            val syncQueued = WithingsService.forwardChildObservations(
+                observations = parentWithingsObservations,
+                childRecipient = "child-1",
+                selfId = "parent-1",
+                outbox = parentOutbox,
+                lastSent = { r, k -> parentData.inbox().sent(r, k)?.let { SentRecord(it.version, it.contentHash) } },
+                recordSent = { r, k, v, h -> parentData.inbox().putSent(SentRow(r, k, v, h)) },
+                nowMs = 12_100L + idx * 1_000L,
+            )
+            assertEquals(0, syncQueued, "R3-4: sync #${idx + 1} with child opt-in OFF must emit 0 new messages")
+        }
+        assertTrue(parentOutbox.due(15_000L).isEmpty())
 
         // Child turns toggle ON -> sends SNAPSHOT_REQUEST to verified parent
         childSettings.acceptWeightFromParent = true
         val childOutbox = buildOutbox(childData)
         val childService = buildShareService(childData, childSettings, childOutbox, selfId = "child-1")
-        assertEquals(1, childService.sendFamilyWeightResyncRequests(13_000L))
-        val reqMsg = Wire.decode(childOutbox.due(13_000L).single().wire)!!
+        assertEquals(1, childService.sendFamilyWeightResyncRequests(16_000L))
+        val reqMsg = Wire.decode(childOutbox.due(16_000L).single().wire)!!
 
-        // Parent handles SNAPSHOT_REQUEST -> clears own_weight/* hashes (if any remain); rejects stranger
-        val parentHandlers = buildFamilyAndWeightHandlers(parentData, parentSettings)
+        // R3-4: Parent handles SNAPSHOT_REQUEST -> clears own_weight/* hashes AND immediately triggers forwardChildObservations
+        val parentHandlers = buildFamilyAndWeightHandlers(
+            data = parentData,
+            settings = parentSettings,
+            onSnapshotRequest = { childId, ts ->
+                WithingsService.forwardChildObservations(
+                    observations = parentWithingsObservations,
+                    childRecipient = childId,
+                    selfId = "parent-1",
+                    outbox = parentOutbox,
+                    lastSent = { r, k -> parentData.inbox().sent(r, k)?.let { SentRecord(it.version, it.contentHash) } },
+                    recordSent = { r, k, v, h -> parentData.inbox().putSent(SentRow(r, k, v, h)) },
+                    nowMs = ts,
+                )
+            },
+        )
         parentData.inbox().putSent(SentRow("child-1", "own_weight/m-old", 3L, "oldhash"))
         assertEquals(
             HandlerResult.Applied,
-            parentHandlers.getValue(Kinds.SNAPSHOT_REQUEST).handle(reqMsg.envelope, reqMsg.payload, dummyReceiverStore, 13_500L),
+            parentHandlers.getValue(Kinds.SNAPSHOT_REQUEST).handle(reqMsg.envelope, reqMsg.payload, dummyReceiverStore, 16_500L),
         )
         assertEquals("", parentData.inbox().sent("child-1", "own_weight/m-old")!!.contentHash)
 
-        // Next forwardChildObservations resends m-weight at version 2; child applies and preserves Quality.SUSPECT
-        val reQueued = WithingsService.forwardChildObservations(
-            observations = listOf(weightSuspect),
-            childRecipient = "child-1",
-            selfId = "parent-1",
-            outbox = parentOutbox,
-            lastSent = { r, k -> parentData.inbox().sent(r, k)?.let { SentRecord(it.version, it.contentHash) } },
-            recordSent = { r, k, v, h -> parentData.inbox().putSent(SentRow(r, k, v, h)) },
-            nowMs = 14_000L,
-        )
-        assertEquals(1, reQueued)
-        val resendItem = parentOutbox.due(14_000L).single()
+        // Immediately enqueued at version 2 without waiting for next Withings sync; child applies and preserves Quality.SUSPECT
+        val resendItem = parentOutbox.due(16_500L).single()
         assertEquals(2L, resendItem.objectVersion)
         val resendMsg = Wire.decode(resendItem.wire)!!
         val resApplied = childHandlers.getValue(WithingsService.FAMILY_WEIGHT_PUSH_KIND)
-            .handle(resendMsg.envelope, resendMsg.payload, dummyReceiverStore, 14_500L)
+            .handle(resendMsg.envelope, resendMsg.payload, dummyReceiverStore, 17_000L)
         assertEquals(HandlerResult.Applied, resApplied)
         val savedObs = childData.observations().latest(MetricType.WEIGHT.name)!!.toDomain()
         assertEquals(41.2, savedObs.value)
         assertEquals(Quality.SUSPECT, savedObs.quality)
+    }
+
+    @Test
+    fun `R3-3 revoke then re-grant before REMOVE is sent keeps monotonic version and real receiver accepts new content`() {
+        val aliceData = FakeDataAccess()
+        val aliceSettings = FakeSettings(zoneId = "UTC")
+        val aliceOutbox = buildOutbox(aliceData)
+        val aliceService = buildShareService(aliceData, aliceSettings, aliceOutbox, selfId = "alice")
+
+        val bobData = FakeDataAccess()
+        val bobStore = object : ReceiverStore {
+            override fun <T> inTransaction(block: () -> T): T = block()
+            override fun isVerifiedContact(identity: String) = identity == "alice"
+            override fun receiptHash(eventId: String) = bobData.inbox().receiptHash(eventId)
+            override fun recordReceipt(eventId: String, contentHash: String, author: String, appliedAtMs: Long) =
+                bobData.inbox().insertReceipt(ReceiptRow(eventId, contentHash, author, appliedAtMs))
+            override fun objectVersion(author: String, objectType: String, objectId: String) =
+                bobData.inbox().version(author, objectType, objectId)
+            override fun putObject(author: String, objectType: String, objectId: String, version: Long, payload: String) =
+                bobData.inbox().putObject(ReceivedRow(author, objectType, objectId, version, payload))
+            override fun removeObject(author: String, objectType: String, objectId: String, version: Long) =
+                bobData.inbox().removeObject(author, objectType, objectId)
+            override fun group(groupId: String): Group? = null
+            override fun putGroup(group: Group) {}
+        }
+        val bobReceiver = Receiver(
+            selfId = "bob",
+            store = bobStore,
+            handlers = BuiltInHandlers.all(),
+            ackSink = AckSink { _, _ -> },
+            builder = MessageBuilder("bob"),
+        )
+
+        val today = LocalDate.now(ZoneId.of("UTC"))
+        val day = today.minusDays(1)
+        val t0 = today.atTime(10, 0).atZone(ZoneId.of("UTC")).toInstant().toEpochMilli()
+        aliceData.observations().upsert(listOf(obsRow("s1", MetricType.SLEEP_DURATION, 24_000.0, day)))
+
+        val g1 = ShareGrant(
+            id = "g1", ownerId = "alice", recipients = setOf("bob"),
+            fields = setOf(Field.SLEEP_DURATION), scope = TimeScope.continuousFrom(today.minusDays(7)), createdAtMs = t0,
+        )
+        aliceService.saveGrantWithPolicy(g1).getOrThrow()
+        aliceService.planAndEnqueue(t0)
+
+        // Deliver v1 -> Bob has v1
+        val itemV1 = aliceOutbox.due(t0).single()
+        val outV1 = bobReceiver.receive("alice", itemV1.wire, t0 + 100L)
+        assertTrue(outV1 is Outcome.Applied)
+        aliceOutbox.onAck("bob", Ack(itemV1.eventId, Ack.Status.ACCEPTED))
+
+        // Update sleep -> deliver v2 -> Bob now has v2
+        val t1 = t0 + 5_000L
+        aliceData.observations().upsert(listOf(obsRow("s1", MetricType.SLEEP_DURATION, 25_200.0, day)))
+        aliceService.planAndEnqueue(t1)
+        val itemV2 = aliceOutbox.due(t1).single()
+        assertEquals(2L, itemV2.objectVersion)
+        val outV2 = bobReceiver.receive("alice", itemV2.wire, t1 + 100L)
+        assertTrue(outV2 is Outcome.Applied)
+        aliceOutbox.onAck("bob", Ack(itemV2.eventId, Ack.Status.ACCEPTED))
+        assertEquals(2L, bobData.inbox().version("alice", "daily", day.toString()))
+
+        // Offline: Alice revokes g1 -> PROJECTION_REMOVE is QUEUED (not delivered yet), sent_projection MUST NOT be deleted
+        val tRevoke = t1 + 5_000L
+        aliceService.revoke("g1", tRevoke)
+        val queuedRemove = aliceOutbox.due(tRevoke).single { it.objectKey == "daily/$day" }
+        assertEquals(Kinds.PROJECTION_REMOVE, queuedRemove.kind)
+        val sentAfterRevoke = assertNotNull(aliceData.inbox().sent("bob", "daily/$day"))
+        assertEquals(queuedRemove.objectVersion, sentAfterRevoke.version)
+        assertEquals("", sentAfterRevoke.contentHash)
+
+        // Before REMOVE leaves outbox, Alice updates sleep and re-grants g2
+        val tRegrant = tRevoke + 1_000L
+        aliceData.observations().upsert(listOf(obsRow("s1", MetricType.SLEEP_DURATION, 28_800.0, day)))
+        val g2 = g1.copy(id = "g2", createdAtMs = tRegrant)
+        aliceService.saveGrantWithPolicy(g2).getOrThrow()
+        aliceService.planAndEnqueue(tRegrant)
+
+        // Queued REMOVE was superseded; new UPSERT has removeVersion + 1 (> Bob's v2) and new content
+        assertEquals(
+            DeliveryState.SUPERSEDED,
+            DeliveryState.valueOf(aliceData.outbox().find(queuedRemove.eventId)!!.state),
+        )
+        val regrantUpsert = aliceOutbox.due(tRegrant).single { it.objectKey == "daily/$day" }
+        assertEquals(Kinds.PROJECTION_UPSERT, regrantUpsert.kind)
+        assertEquals(queuedRemove.objectVersion + 1L, regrantUpsert.objectVersion)
+
+        // Real receiver accepts the new version with new content (NOT Stale!)
+        val outRegrant = bobReceiver.receive("alice", regrantUpsert.wire, tRegrant + 100L)
+        assertTrue(outRegrant is Outcome.Applied, "Expected Applied, got $outRegrant")
+        val bobStored = assertNotNull(bobData.inbox().received("alice", "daily", day.toString()))
+        assertEquals(regrantUpsert.objectVersion, bobStored.version)
+        assertTrue(bobStored.payload.contains("28800"))
+    }
+
+    @Test
+    fun `R3-6 filterTopLevelGroupActivities excludes multisport legs by id and parent tag`() {
+        val parent = ActivitySummaryRow(
+            id = "garmin-100", startUtcMs = 1_000L, sport = Sport.OTHER.name, title = "Triatlon",
+            distanceM = 10_000.0, movingTimeS = 3600.0, ascentM = 50.0, avgHeartRate = 150,
+            maxHeartRate = 175, caloriesKcal = 600.0, aerobicTe = 3.5, anaerobicTe = 1.0,
+            trainingLoad = 120.0, avgPowerW = null, avgCadence = null, zoneId = "UTC", json = null,
+        )
+        val legById = parent.copy(id = "garmin-100-s1", sport = Sport.SWIMMING.name, title = "Plavání")
+        val legAct = Activity(
+            id = "custom-leg", provider = Provider.GARMIN_PERSONAL, accountId = "a", externalId = "custom-leg",
+            sport = Sport.CYCLING, startUtcMs = 1_100L, zoneId = "UTC", totalTimeS = 1800.0, tags = setOf("multisport-leg", "parent:garmin-100"),
+        )
+        val legByTag = parent.copy(
+            id = "custom-leg",
+            title = null,
+            json = Wire.json.encodeToString(Activity.serializer(), legAct),
+        )
+
+        val filtered = app.pulse4.android.ui.filterTopLevelGroupActivities(listOf(parent, legById, legByTag))
+        assertEquals(listOf("garmin-100"), filtered.map { it.id })
     }
 
     @Test

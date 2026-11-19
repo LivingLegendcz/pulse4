@@ -254,11 +254,23 @@ class ServicesRegressionTest {
     }
 
     @Test
-    fun `NEW-1 updateSentRowOnRevoke clears hash but keeps monotonic version when covered by another grant`() {
+    fun `NEW-1 and R3-3 updateSentRowOnRevoke clears hash and preserves monotonic version`() {
         val existing = SentRow(recipient = "peer-1", objectKey = "daily/2026-11-18", version = 5L, contentHash = "abc123")
-        val kept = updateSentRowOnRevoke(existing, isCoveredByOtherGrant = true)
+        val kept = updateSentRowOnRevoke(
+            existing = existing,
+            recipient = "peer-1",
+            objectKey = "daily/2026-11-18",
+            isCoveredByOtherGrant = true,
+            removeVersion = 100L,
+        )
         assertEquals(SentRow(recipient = "peer-1", objectKey = "daily/2026-11-18", version = 5L, contentHash = ""), kept)
-        val deleted = updateSentRowOnRevoke(existing, isCoveredByOtherGrant = false)
-        assertNull(deleted)
+        val uncovered = updateSentRowOnRevoke(
+            existing = existing,
+            recipient = "peer-1",
+            objectKey = "daily/2026-11-18",
+            isCoveredByOtherGrant = false,
+            removeVersion = 100L,
+        )
+        assertEquals(SentRow(recipient = "peer-1", objectKey = "daily/2026-11-18", version = 100L, contentHash = ""), uncovered)
     }
 }

@@ -119,4 +119,18 @@ class OutboxDeliveryStateTest {
         assertEquals(listOf("child" to "own_weight/w-1"), denied)
         assertTrue(ob.expireStale(200L).isEmpty())
     }
+
+    @Test
+    fun `R3-4 NOT_PERMITTED on family weight push keeps CANCELLED without invoking onPermissionDenied`() {
+        val store = InMemoryOutboxStore()
+        val denied = mutableListOf<Pair<String, String>>()
+        val ob = OutboxManager(store, onPermissionDenied = { r, k -> denied += r to k })
+        val m = josef.build("child", "family.weight.push", "own_weight", "w-1", 1L, "{}", 100L)
+        ob.enqueue(item(m, at = 100L))
+
+        assertTrue(ob.onAck("child", Ack(m.envelope.eventId, Ack.Status.REJECTED, RejectReason.NOT_PERMITTED.name)))
+        assertEquals(DeliveryState.CANCELLED, store.find(m.envelope.eventId)!!.state)
+        assertTrue(denied.isEmpty())
+        assertTrue(ob.expireStale(200L).isEmpty())
+    }
 }

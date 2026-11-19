@@ -1109,10 +1109,18 @@ private fun GlobalSharingSection(
                     val diff = currentDiff
                     val isMinor = sl.settings.ownAgeProfile == app.pulse4.sharing.AgeProfile.MINOR.name
                     val isRevokingAll = selectedRecipients.isEmpty() || enabledCategories.isEmpty()
-                    val needsGuardianConsent = isMinor && !isRevokingAll && diff.addedByRecipient.isNotEmpty()
+                    val needsWideningConfirm = !isRevokingAll && (diff.scopeWidened || diff.planRightsWidened)
+                    val needsGuardianConsent = isMinor && !isRevokingAll &&
+                        (diff.addedByRecipient.isNotEmpty() || diff.scopeWidened || diff.planRightsWidened)
                     var guardianChecked by remember(showConfirmSaveDialog) { mutableStateOf(false) }
+                    var wideningConfirmed by remember(showConfirmSaveDialog) { mutableStateOf(false) }
                     fun contactName(id: String) = contacts.firstOrNull { it.identity == id }?.displayName ?: id.take(10)
                     fun categoryLabel(cat: Category) = sectionDefs.firstOrNull { it.first == cat }?.second?.first ?: cat.name
+                    fun formatScope(scope: TimeScope): String = when (scope.kind) {
+                        TimeScope.Kind.ONCE -> "Jednorázově (${scope.from ?: "?"}–${scope.to ?: "?"})"
+                        TimeScope.Kind.FROM -> "Od ${scope.from ?: "?"}"
+                        TimeScope.Kind.CONTINUOUS -> "Průběžně od ${scope.from ?: "?"}"
+                    }
                     AlertDialog(
                         onDismissRequest = { showConfirmSaveDialog = false },
                         containerColor = Color(0xFF0A101B),
@@ -1154,11 +1162,24 @@ private fun GlobalSharingSection(
                                         color = Color(0xFF38BDF8)
                                     )
                                 }
-                                if (diff.scopeChanged) {
+                                if (diff.scopeWidened && diff.newScope != null) {
                                     Text(
-                                        "Rozsah historie: ${diff.oldScope?.from ?: "?"} → ${diff.newScope?.from ?: "?"}",
+                                        "Rozšíření časového rozsahu: ${diff.widenedFromScopes.joinToString(", ") { formatScope(it) }} → ${formatScope(diff.newScope!!)}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = Color(0xFFF59E0B)
+                                    )
+                                } else if (diff.scopeChanged) {
+                                    Text(
+                                        "Rozsah historie: ${diff.oldScope?.let(::formatScope) ?: "?"} → ${diff.newScope?.let(::formatScope) ?: "?"}",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = Color(0xFF38BDF8)
+                                    )
+                                }
+                                if (diff.planRightsWidened) {
+                                    Text(
+                                        "Rozšíření oprávnění k tréninkovým plánům (${diff.widenedPlanIds.sorted().joinToString(", ")}) oproti některému slučovanému grantu.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = Color(0xFFF59E0B)
                                     )
                                 }
                                 if (isRevokingAll) {
@@ -1173,6 +1194,17 @@ private fun GlobalSharingSection(
                                         style = MaterialTheme.typography.labelSmall,
                                         color = Color(0xFF94A3B8)
                                     )
+                                }
+                                if (needsWideningConfirm) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Checkbox(checked = wideningConfirmed, onCheckedChange = { wideningConfirmed = it })
+                                        Spacer(Modifier.width(6.dp))
+                                        Text(
+                                            "Potvrzuji rozšíření časového rozsahu nebo práv k tréninkovému plánu při sloučení grantů.",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = Color(0xFFFDE68A)
+                                        )
+                                    }
                                 }
                                 if (needsGuardianConsent) {
                                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1189,7 +1221,7 @@ private fun GlobalSharingSection(
                         },
                         confirmButton = {
                             Button(
-                                enabled = !needsGuardianConsent || guardianChecked,
+                                enabled = (!needsGuardianConsent || guardianChecked) && (!needsWideningConfirm || wideningConfirmed),
                                 onClick = {
                                     showConfirmSaveDialog = false
                                     if (incompatibleDirectGrants || !diff.hasChanges) return@Button
@@ -1310,7 +1342,10 @@ private fun GlobalSharingSection(
                         pendingRevokeGrant = null
                         scope.launch {
                             withContext(Dispatchers.IO) {
-                                sl.shareService.revoke(targetId, System.currentTimeMillis())
+                                val now = System.currentTimeMillis()
+                                sl.shareService.revoke(targetId, now)
+                                sl.shareService.planAndEnqueue(now)
+                                sl.shareService.scheduleShare()
                             }
                             notice = "Sdílení odvoláno."
                         }
@@ -1642,15 +1677,17 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth()
                         )
-                        OutlinedTextField(
-                            value = mfa,
-                            onValueChange = { mfa = it },
-                            label = { Text("Ověřovací kód z e-mailu / SMS / ověřovací aplikace (2FA)") },
-                            placeholder = { Text("Zadejte kód, pokud jej Garmin vyžádal") },
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth()
-                        )
+                        if (needMfa || mfa.isNotBlank() || sl.garminExt.hasPendingMfa()) {
+                            OutlinedTextField(
+                                value = mfa,
+                                onValueChange = { mfa = it },
+                                label = { Text("Ověřovací kód (ověřovací aplikace (TOTP) / e-mail / SMS)") },
+                                placeholder = { Text("Zadejte kód, pokud jej Garmin vyžádal") },
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
                         Button(
                             enabled = !syncing && ((mfa.isNotBlank() && (needMfa || email.isNotBlank())) || (email.isNotBlank() && password.isNotBlank())),
                             onClick = {
@@ -4122,7 +4159,14 @@ private fun PrivacyAndBackupSection(sl: ServiceLocator) {
                     Button(
                         onClick = {
                             scope.launch(Dispatchers.IO) {
-                                val latestAct = sl.db.activities().latest()
+                                val latestAct = sl.db.activities().recentSummariesNow(50).firstOrNull { row ->
+                                    if (app.pulse4.android.di.ImportService.isMultisportLegId(row.id)) return@firstOrNull false
+                                    val fullJson = row.json ?: sl.db.activities().get(row.id)?.json
+                                    val act = fullJson?.let { js ->
+                                        runCatching { Wire.json.decodeFromString(app.pulse4.domain.Activity.serializer(), js) }.getOrNull()
+                                    }
+                                    act == null || ("multisport-leg" !in act.tags && act.tags.none { it.startsWith("parent:") })
+                                }
                                 val pts = latestAct?.let { sl.db.activities().track(it.id) }?.let { tr ->
                                     runCatching {
                                         Wire.json.decodeFromString(

@@ -1249,8 +1249,8 @@ private fun GroupMetricsComparisonSection(
         Color(0xFF38BDF8), // Cyan
         Color(0xFFF59E0B), // Amber
         Color(0xFFEC4899), // Pink
-        Color(0xFFA855F7), // Violet
-        Color(0xFF22D3EE)  // Light Cyan
+        Color(0xFFC4B5FD), // Violet (pairwise CIEDE2000 >= 25 with the rest, see SeriesColorAllocator)
+        Color(0xFF2563EB)  // Royal Blue
     )
 
     val metricTypeForField = when (activeField) {

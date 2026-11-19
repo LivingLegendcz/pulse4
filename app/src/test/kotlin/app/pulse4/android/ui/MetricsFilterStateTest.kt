@@ -96,18 +96,6 @@ class MetricsFilterStateTest {
         }
     }
 
-    @Test
-    fun lineStyleRotatesOnlyAboveFourSeries() {
-        assertEquals(SeriesLineStyle.SOLID, seriesLineStyle(3, 4))
-        assertEquals(SeriesLineStyle.DASHED, seriesLineStyle(3, 4, forceDashed = true))
-        val styles = (0 until 6).map { seriesLineStyle(it, 6) }
-        assertEquals(
-            listOf(SeriesLineStyle.SOLID, SeriesLineStyle.DASHED, SeriesLineStyle.DOTTED,
-                SeriesLineStyle.SOLID, SeriesLineStyle.DASHED, SeriesLineStyle.DOTTED),
-            styles
-        )
-    }
-
     private fun hueDistance(a: Color, b: Color): Double {
         val d = abs(hue(a) - hue(b))
         return min(d, 360.0 - d)

@@ -453,9 +453,10 @@ fun MetricCard(title: String, reading: Reading<String>, modifier: Modifier = Mod
 
 /**
  * Položka datové řady pro společný graf (Grafana styl).
- */
-/**
- * Položka datové řady pro společný graf (Grafana styl).
+ *
+ * Line style and marker are derived inside [MultiSeriesLineChart] from the colors via
+ * [SeriesColorAllocator.assignStylesOnly]: series whose colors are closer than
+ * [SeriesColorAllocator.MIN_DELTA_E] get distinct line styles / markers.
  */
 data class SeriesItem(
     val id: String,
@@ -463,28 +464,10 @@ data class SeriesItem(
     val color: Color,
     val values: List<Double?>,
     val unit: String = "",
-    /** Draw the line dashed – secondary cue for series whose colors may be hard to tell apart. */
-    val dashed: Boolean = false,
 )
 
 /** Line style of a series in [MultiSeriesLineChart]. */
-internal enum class SeriesLineStyle { SOLID, DASHED, DOTTED }
-
-/**
- * With more than 4 visible series color alone is not enough, so styles rotate
- * solid / dashed / dotted. [forceDashed] series are at least dashed.
- */
-internal fun seriesLineStyle(index: Int, seriesCount: Int, forceDashed: Boolean = false): SeriesLineStyle {
-    val rotated = if (seriesCount > 4) SeriesLineStyle.entries[index.coerceAtLeast(0) % 3] else SeriesLineStyle.SOLID
-    return if (forceDashed && rotated == SeriesLineStyle.SOLID) SeriesLineStyle.DASHED else rotated
-}
-
-private fun seriesLinePathEffect(index: Int, seriesCount: Int, forceDashed: Boolean): PathEffect? =
-    when (seriesLineStyle(index, seriesCount, forceDashed)) {
-        SeriesLineStyle.SOLID -> null
-        SeriesLineStyle.DASHED -> PathEffect.dashPathEffect(floatArrayOf(16f, 10f))
-        SeriesLineStyle.DOTTED -> PathEffect.dashPathEffect(floatArrayOf(2f, 9f))
-    }
+internal enum class SeriesLineStyle { SOLID, DASHED, DOTTED, DASH_DOT }
 
 /**
  * Zformátuje změnu metriky:
@@ -569,6 +552,11 @@ fun MultiSeriesLineChart(
         series.filter { it.id !in hiddenIds && it.values.any { v -> v != null } }
     }
     val maxPoints = remember(series) { series.maxOfOrNull { it.values.size } ?: 0 }
+    // Styles depend on all series (not only visible ones) so toggling the legend never restyles lines.
+    val seriesStyles = remember(series) {
+        val styles = SeriesColorAllocator.assignStylesOnly(series.map { it.color })
+        series.mapIndexed { i, s -> s.id to styles[i] }.toMap()
+    }
     val allFinite = remember(visibleSeries) { visibleSeries.flatMap { it.values.filterNotNull() }.filter { it.isFinite() } }
     val rawLo = remember(allFinite) { allFinite.minOrNull() ?: 0.0 }
     val rawHi = remember(allFinite) { allFinite.maxOrNull() ?: 100.0 }
@@ -765,10 +753,9 @@ fun MultiSeriesLineChart(
                                 .padding(horizontal = 9.dp, vertical = 4.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Box(
-                                Modifier
-                                    .size(8.dp)
-                                    .background(if (enabled) s.color else Color.Gray, CircleShape)
+                            SeriesLegendSample(
+                                style = seriesStyles[s.id],
+                                color = if (enabled) s.color else Color.Gray
                             )
                             Spacer(Modifier.width(6.dp))
                             Text(
@@ -863,8 +850,10 @@ fun MultiSeriesLineChart(
                                 s.values.forEachIndexed { idx, v -> if (v != null && v.isFinite()) pts.add(idx to v) }
                                 if (pts.isEmpty()) continue
                                 val count = s.values.size.coerceAtLeast(maxPoints)
+                                val style = seriesStyles[s.id]
+                                val marker = style?.marker ?: SeriesMarker.CIRCLE
                                 if (pts.size == 1) {
-                                    drawCircle(s.color, radius = 6f, center = Offset(x(pts[0].first, count), yVal(pts[0].second)))
+                                    drawSeriesMarker(marker, s.color, Offset(x(pts[0].first, count), yVal(pts[0].second)), 6f)
                                     continue
                                 }
 
@@ -911,18 +900,14 @@ fun MultiSeriesLineChart(
                                         width = 4.5f,
                                         cap = StrokeCap.Round,
                                         join = StrokeJoin.Round,
-                                        pathEffect = seriesLinePathEffect(
-                                            index = visibleSeries.indexOf(s),
-                                            seriesCount = visibleSeries.size,
-                                            forceDashed = s.dashed
-                                        )
+                                        pathEffect = style?.lineStyle?.pathEffect()
                                     )
                                 )
                                 if (pts.size <= 35) {
                                     for (pt in pts) {
                                         val ptCenter = Offset(x(pt.first, count), yVal(pt.second))
-                                        drawCircle(s.color.copy(alpha = 0.30f), radius = 7f, center = ptCenter)
-                                        drawCircle(s.color, radius = 4f, center = ptCenter)
+                                        drawSeriesMarker(marker, s.color.copy(alpha = 0.30f), ptCenter, 7f)
+                                        drawSeriesMarker(marker, s.color, ptCenter, 4f)
                                     }
                                 }
                             }
@@ -960,6 +945,23 @@ fun MultiSeriesLineChart(
                 }
             }
         }
+    }
+}
+
+/** Legend swatch: short line in the series' color + line style with its point marker. */
+@Composable
+private fun SeriesLegendSample(style: SeriesStyle?, color: Color) {
+    Canvas(Modifier.size(width = 20.dp, height = 10.dp)) {
+        val y = size.height / 2f
+        drawLine(
+            color = color,
+            start = Offset(0f, y),
+            end = Offset(size.width, y),
+            strokeWidth = 2.5.dp.toPx(),
+            cap = if (style?.lineStyle == SeriesLineStyle.DOTTED) StrokeCap.Round else StrokeCap.Butt,
+            pathEffect = style?.lineStyle?.pathEffect(scale = 0.45f)
+        )
+        drawSeriesMarker(style?.marker ?: SeriesMarker.CIRCLE, color, Offset(size.width / 2f, y), 3.dp.toPx())
     }
 }
 

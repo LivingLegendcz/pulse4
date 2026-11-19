@@ -14,6 +14,10 @@ import app.pulse4.domain.MetricType
  *   (steps, Body Battery, stress, sleep, HRV, resting HR) groups: pairwise ΔE76 >= 25.
  * - Every metric type has its own color (no exact duplicates).
  *
+ * These are "home" colors (cards, detail screens, icons). Wherever several metrics are drawn
+ * together, [assignSeriesColors] / [SeriesColorAllocator] substitute colors (and line styles) so
+ * that no two series are closer than CIEDE2000 [SeriesColorAllocator.MIN_DELTA_E].
+ *
  * See MetricsFilterStateTest for the enforced thresholds.
  */
 object MetricPalette {
@@ -22,7 +26,7 @@ object MetricPalette {
     val Muscle = Color(0xFF3B82F6)
     val Fat = Color(0xFFF97316)
     val Water = Color(0xFF22D3EE)
-    val Bone = Color(0xFFC4B5FD)
+    val Bone = Color(0xFFD8B4FE)
     val FatFreeMass = Color(0xFF22C55E)
     val VisceralFat = Color(0xFFEF4444)
     val Bmr = Color(0xFFFACC15)

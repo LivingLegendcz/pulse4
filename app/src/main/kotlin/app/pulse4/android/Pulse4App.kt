@@ -1,15 +1,12 @@
 package app.pulse4.android
 
 import android.app.Application
-import android.os.Handler
-import android.os.Looper
 import android.os.StrictMode
 import android.util.Log
 import app.pulse4.android.di.ServiceLocator
 import app.pulse4.android.work.PulseSyncService
 import app.pulse4.android.work.Scheduler
 import app.pulse4.domain.PLog
-import java.util.concurrent.Executors
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -38,26 +35,15 @@ class Pulse4App : Application() {
             }
         }
         if (BuildConfig.DEBUG) {
+            // L5 (R4-3): v debug buildu je jakékoli čtení / zápis disku na hlavním vlákně fatální, ne jen
+            // v migračních rámcích. ThreadPolicy platí jen pro vlákno, které ji nastaví (= hlavní vlákno).
             runCatching {
                 StrictMode.setThreadPolicy(
                     StrictMode.ThreadPolicy.Builder()
                         .detectDiskReads()
                         .detectDiskWrites()
                         .penaltyLog()
-                        .penaltyListener(Executors.newSingleThreadExecutor()) { violation ->
-                            val frames = violation.stackTrace.map { "${it.className}.${it.methodName}" }
-                            val isMigrationOrBridgeInit = frames.any {
-                                it.contains("ServiceMigrations") ||
-                                    it.contains("ReticulumBridge.ensureStarted") ||
-                                    it.contains("ReticulumTransport")
-                            }
-                            if (isMigrationOrBridgeInit) {
-                                PLog.e("StrictMode", violation) { "Main thread blocked on migration/bridge init" }
-                                Handler(Looper.getMainLooper()).postAtFrontOfQueue {
-                                    throw AssertionError("Main thread blocked on migration/bridge init", violation)
-                                }
-                            }
-                        }
+                        .penaltyDeath()
                         .build()
                 )
             }
@@ -67,10 +53,8 @@ class Pulse4App : Application() {
             // Dvě jedinečné periodické úlohy (import a sdílení); opakované volání je idempotentní.
             runCatching { Scheduler.schedulePeriodic(this@Pulse4App) }
             // Jednorázová asynchronní migrace + warmUp nastavení pod jedním zámkem před startem transportu (R3-1, R3-13).
-            runCatching { services.awaitMigrations() }.onFailure { e ->
-                PLog.e("Pulse4App", e) { "Startup migrations failed" }
-            }
-            if (services.recoveryIssue.value != null) {
+            // R4-1: awaitStartupReady nikdy nevyhazuje; false = poškozený / nedostupný klíč → čeká se na obnovu v UI.
+            if (!services.awaitStartupReady()) {
                 PLog.e("Pulse4App") { "Critical secret corrupted; deferring background startup until recovery" }
                 return@launch
             }

@@ -110,8 +110,15 @@ class ReticulumBridge internal constructor(
     private val identitySeedOverride: ByteArray?,
     private val propagationNodeOverride: (() -> String)?,
     private val networkModeOverride: (() -> NetworkMode)?,
+    /** L3 (R4-3): brána před prvním startem – ServiceLocator zde čeká na dokončení startovní migrace. */
+    private val beforeStart: () -> Unit = {},
 ) {
-    constructor(context: Context, secrets: SecretStore, settings: Settings) : this(
+    constructor(
+        context: Context,
+        secrets: SecretStore,
+        settings: Settings,
+        beforeStart: () -> Unit = {},
+    ) : this(
         context = context,
         secrets = secrets,
         settings = settings,
@@ -119,6 +126,7 @@ class ReticulumBridge internal constructor(
         identitySeedOverride = null,
         propagationNodeOverride = null,
         networkModeOverride = null,
+        beforeStart = beforeStart,
     )
 
     private fun currentNetworkMode(): NetworkMode = networkModeOverride?.invoke() ?: settings?.networkMode ?: NetworkMode.MANUAL
@@ -132,6 +140,7 @@ class ReticulumBridge internal constructor(
     private fun writeIdentitySecret(b64: String) {
         secrets?.putString(SecretStore.RETICULUM_IDENTITY, b64)
     }
+    @Volatile
     var info: BridgeInfo? = null
         private set
 
@@ -371,8 +380,18 @@ class ReticulumBridge internal constructor(
         fun derivePrimaryDeliveryHash(publicKeyB64: String): String = deriveDeliveryHashes(publicKeyB64).first
     }
 
-    @Synchronized
+    /**
+     * Spustí most (idempotentně). Před prvním startem projde branou [beforeStart] mimo zámek mostu,
+     * takže se most nikdy nespustí před dokončením startovní migrace (L3).
+     */
     fun ensureStarted(): BridgeInfo {
+        info?.let { return it }
+        beforeStart()
+        return ensureStartedLocked()
+    }
+
+    @Synchronized
+    private fun ensureStartedLocked(): BridgeInfo {
         info?.let { return it }
         bridgeStopped.set(false)
         if (!scope.isActive) {

@@ -64,6 +64,11 @@ data class ParsedFit(
     val poolLengthM: Double? = null,
 )
 
+data class FitSessionIndex(
+    val sport: Sport,
+    val startMs: Long,
+)
+
 sealed interface FitResult {
     data class Ok(
         val parsed: ParsedFit,
@@ -266,6 +271,32 @@ object FitImporter {
             FitResult.Invalid("Chyba dekódování FIT: ${e.message}")
         } catch (e: RuntimeException) {
             FitResult.Invalid("Neočekávaná chyba parseru: ${e.javaClass.simpleName}")
+        }
+    }
+
+    /**
+     * Lehký průchod hlavičkou a `SessionMesg` bez načítání bodů trasy, kol ani sérií (R3-2).
+     */
+    fun parseSessionIndex(bytes: ByteArray): List<FitSessionIndex> {
+        if (bytes.isEmpty() || bytes.size > MAX_BYTES) return emptyList()
+        return try {
+            val probe = Decode()
+            if (!probe.isFileFit(ByteArrayInputStream(bytes))) return emptyList()
+            val sessions = ArrayList<FitSessionIndex>(2)
+            val decode = Decode()
+            val broadcaster = MesgBroadcaster(decode)
+            broadcaster.addListener(com.garmin.fit.SessionMesgListener { m: SessionMesg ->
+                val startMs = m.startTime?.date?.time ?: return@SessionMesgListener
+                val sport = m.sport?.let(::mapSport) ?: Sport.OTHER
+                sessions += FitSessionIndex(sport = sport, startMs = startMs)
+            })
+            broadcaster.run(ByteArrayInputStream(bytes))
+            sessions.sortBy { it.startMs }
+            sessions
+        } catch (_: FitRuntimeException) {
+            emptyList()
+        } catch (_: RuntimeException) {
+            emptyList()
         }
     }
 

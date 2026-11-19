@@ -75,6 +75,7 @@ class PulseSyncService : Service() {
         }
 
         loopJob = scope.launch {
+            sl.awaitMigrations()
             val bgEnabled = runCatching { sl.settings.backgroundServiceEnabled }.getOrElse { e ->
                 PLog.w(TAG, e) { "Cannot read settings in PulseSyncService; stopping service" }
                 false
@@ -165,7 +166,7 @@ class PulseSyncService : Service() {
         if (sl.settings.networkMode == NetworkMode.MANUAL) {
             return "Ruční režim sítě"
         }
-        val gw = sl.bridge.gatewayHealth.value
+        val gw = sl.gatewayHealth.value
         return when {
             sl.settings.networkMode == NetworkMode.LOCAL_ONLY -> "Lokální Wi-Fi P2P připraveno"
             gw.state == GatewayHealthState.ONLINE -> "Připojeno (${gw.host}) • zprávy aktivní"

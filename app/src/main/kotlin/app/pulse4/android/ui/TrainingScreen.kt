@@ -54,6 +54,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -138,11 +139,15 @@ fun TrainingScreen(sl: ServiceLocator) {
     var status by remember { mutableStateOf<String?>(null) }
     var dateText by remember { mutableStateOf(LocalDate.now().plusDays(1).toString()) }
 
-    val planId by io(Unit) {
-        ServiceMigrations.runOnce(sl)
-        val info = sl.bridge.ensureStarted()
-        val (_, legacy) = ServiceMigrations.deriveDeliveryHashes(info.publicKeyB64)
-        sl.settings.ownPlanId(info.deliveryHash, legacy)
+    var planId by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(Unit) {
+        planId = withContext(Dispatchers.IO) {
+            runCatching {
+                val info = sl.ensureBridgeStarted()
+                val (_, legacy) = ServiceMigrations.deriveDeliveryHashes(info.publicKeyB64)
+                sl.settings.ownPlanId(info.deliveryHash, legacy)
+            }.getOrNull()
+        }
     }
     val head by io(planId to refresh) { planId?.let { id -> RoomPlanStore(sl.db).head(id) } }
     val proposals by sl.db.plans().openProposals().collectAsState(emptyList())

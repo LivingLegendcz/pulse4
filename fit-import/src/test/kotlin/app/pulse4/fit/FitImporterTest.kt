@@ -160,4 +160,13 @@ class FitImporterTest {
             assertEquals(180, ok.sessions[1].points.single().cadence)
         } finally { f.delete() }
     }
+
+    @Test fun `R3-2 parseSessionIndex extracts sport and startMs without parsing records`() {
+        val bytes = build(withSession = true)
+        val full = assertIs<FitResult.Ok>(FitImporter.parse(bytes)).parsed
+        val indexed = FitImporter.parseSessionIndex(bytes)
+        assertEquals(listOf(FitSessionIndex(full.sport, full.startMs)), indexed)
+        assertTrue(FitImporter.parseSessionIndex(ByteArray(0)).isEmpty())
+        assertTrue(FitImporter.parseSessionIndex("not-a-fit".toByteArray()).isEmpty())
+    }
 }

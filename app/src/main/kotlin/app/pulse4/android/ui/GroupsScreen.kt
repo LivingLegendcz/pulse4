@@ -142,6 +142,14 @@ import kotlinx.serialization.json.doubleOrNull
 
 private const val ALL_FRIENDS_GROUP_ID = "__ALL_FRIENDS__"
 
+internal fun filterTopLevelGroupActivities(
+    rows: List<app.pulse4.android.data.ActivitySummaryRow>,
+): List<app.pulse4.android.data.ActivitySummaryRow> = rows.filterNot { row ->
+    if (app.pulse4.android.di.ImportService.isMultisportLegId(row.id)) return@filterNot true
+    val act = row.json?.let { js -> runCatching { Wire.json.decodeFromString(Activity.serializer(), js) }.getOrNull() }
+    act != null && ("multisport-leg" in act.tags || act.tags.any { it.startsWith("parent:") })
+}
+
 fun qrBitmap(text: String, size: Int = 600): Bitmap {
     val m = QRCodeWriter().encode(text, BarcodeFormat.QR_CODE, size, size)
     return Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888).also { b ->
@@ -175,8 +183,14 @@ fun GroupsScreen(
     val groups by sl.db.grants().groups().collectAsState(emptyList())
     val grants by sl.db.grants().all().collectAsState(emptyList())
     val receivedDaily by sl.db.inbox().objects("daily").collectAsState(emptyList())
-    val receivedActs by sl.db.inbox().objects("activity").collectAsState(emptyList())
-    val myActs by sl.db.activities().recentSummaries(20).collectAsState(emptyList())
+    val receivedActsRaw by sl.db.inbox().objects("activity").collectAsState(emptyList())
+    val receivedActs = remember(receivedActsRaw) {
+        receivedActsRaw.filterNot { app.pulse4.android.di.ImportService.isMultisportLegId(it.objectId) }
+    }
+    val myActsRaw by sl.db.activities().recentSummaries(60).collectAsState(emptyList())
+    val myActs = remember(myActsRaw) {
+        filterTopLevelGroupActivities(myActsRaw).take(20)
+    }
 
     val decodedGroups = remember(groups) {
         groups.mapNotNull { runCatching { Wire.json.decodeFromString(Group.serializer(), it.json) }.getOrNull() }
@@ -1534,7 +1548,9 @@ private fun GroupSharedActivitiesSection(
         value = withContext(Dispatchers.Default) {
             val zoneCache = HashMap<String, ZoneId>()
             val defaultZone = ZoneId.systemDefault()
-            val shared = receivedActs.filter { it.author in participantSet }.mapNotNull { r ->
+            val shared = receivedActs.filter {
+                it.author in participantSet && !app.pulse4.android.di.ImportService.isMultisportLegId(it.objectId)
+            }.mapNotNull { r ->
                 val p = runCatching { Wire.json.decodeFromString(ActivityProjection.serializer(), r.payload) }.getOrNull() ?: return@mapNotNull null
                 val sp = runCatching { Sport.valueOf(p.sport) }.getOrDefault(Sport.OTHER)
                 val cName = contactsMap[r.author] ?: r.author.take(8)
@@ -1553,7 +1569,7 @@ private fun GroupSharedActivitiesSection(
                     maxHeartRate = null
                 )
             }
-            val mine = myActs.take(15).mapNotNull { row ->
+            val mine = filterTopLevelGroupActivities(myActs).take(15).mapNotNull { row ->
                 if (row.title != null) {
                     val sp = runCatching { Sport.valueOf(row.sport) }.getOrDefault(Sport.OTHER)
                     val zone = row.zoneId?.let { zid ->
@@ -2206,6 +2222,8 @@ private fun GroupBranchMembersAndSharingSection(
                                             }
                                             is GrantEditor.GroupToggleResult.Revoke -> {
                                                 sl.shareService.revoke(res.grantId, now)
+                                                sl.shareService.planAndEnqueue(now)
+                                                sl.shareService.scheduleShare()
                                                 "Sdílení sekce '$catTitle' bylo odvoláno."
                                             }
                                             GrantEditor.GroupToggleResult.Noop -> "Žádná změna."

@@ -173,8 +173,11 @@ class ServiceLocator internal constructor(
         OutboxManager(
             store = RoomOutboxStore(db),
             onPermissionDenied = { recipient, objectKey ->
-                db.inbox().sent(recipient, objectKey)?.let { row ->
-                    db.inbox().putSent(row.copy(contentHash = ""))
+                // R3-4: pro own_weight/* (FAMILY_WEIGHT_PUSH) contentHash nemažeme; resync spouští výhradně SNAPSHOT_REQUEST.
+                if (!objectKey.startsWith("own_weight/")) {
+                    db.inbox().sent(recipient, objectKey)?.let { row ->
+                        db.inbox().putSent(row.copy(contentHash = ""))
+                    }
                 }
             },
         )
@@ -191,7 +194,13 @@ class ServiceLocator internal constructor(
     val planHandlers by lazy { PlanSyncHandlers(planService) }
     val transport by lazy {
         ReticulumTransport(bridge, settings, db, outbox) {
-            planHandlers.handlers() + buildFamilyAndWeightHandlers(RoomPulseDataAccess(db), RealShareSettingsAccess(settings)) + mapOf(
+            planHandlers.handlers() + buildFamilyAndWeightHandlers(
+                data = RoomPulseDataAccess(db),
+                settings = RealShareSettingsAccess(settings),
+                onSnapshotRequest = { childId, nowMs ->
+                    withings.onFamilyWeightSnapshotRequest(childId, nowMs)
+                },
+            ) + mapOf(
                 Kinds.ADMIN_HANDOVER_REQUEST to KindHandler { env, payload, store, nowMs ->
                     val g = runCatching {
                         Wire.json.decodeFromString(Group.serializer(), payload)
@@ -1538,6 +1547,7 @@ internal class RealShareSettingsAccess(private val s: Settings) : ShareSettingsA
 internal fun buildFamilyAndWeightHandlers(
     data: PulseDataAccess,
     settings: ShareSettingsAccess,
+    onSnapshotRequest: ((childId: String, nowMs: Long) -> Unit)? = null,
 ): Map<String, KindHandler> = mapOf(
     WithingsService.FAMILY_WEIGHT_PUSH_KIND to KindHandler { env, payload, _, nowMs ->
         val isVerifiedParent = data.familyLinks().allNow().any { row ->
@@ -1633,7 +1643,7 @@ internal fun buildFamilyAndWeightHandlers(
         data.familyLinks().upsert(FamilyLinkRow(link.id, link.parentId, link.childId, link.status.name, link.version, sanitizedJson))
         HandlerResult.Applied
     },
-    Kinds.SNAPSHOT_REQUEST to KindHandler { env, _, _, _ ->
+    Kinds.SNAPSHOT_REQUEST to KindHandler { env, _, _, nowMs ->
         if (env.objectType != "own_weight") {
             return@KindHandler HandlerResult.Rejected(RejectReason.INVALID_PAYLOAD)
         }
@@ -1650,6 +1660,7 @@ internal fun buildFamilyAndWeightHandlers(
                 data.inbox().putSent(sent.copy(contentHash = ""))
             }
         }
+        onSnapshotRequest?.invoke(env.author, nowMs)
         HandlerResult.Applied
     },
 )
@@ -1666,7 +1677,7 @@ class ShareService internal constructor(
     private val recordSent: (recipient: String, objectKey: String, version: Long, hash: String) -> Unit,
     private val selfIdProvider: () -> String,
     private val runMigrations: () -> Unit = {},
-    private val scheduleShare: () -> Unit = {},
+    private val onScheduleShare: () -> Unit = {},
     private val drainPlanNotifications: () -> List<app.pulse4.training.PlanNotification> = { emptyList() },
 ) {
     constructor(sl: ServiceLocator) : this(
@@ -1686,13 +1697,15 @@ class ShareService internal constructor(
                 runBlocking { sl.awaitMigrations() }
             }
         },
-        scheduleShare = {
+        onScheduleShare = {
             if (sl.settings.networkMode != app.pulse4.android.data.NetworkMode.MANUAL) {
                 app.pulse4.android.work.Scheduler.shareNow(sl.context)
             }
         },
         drainPlanNotifications = { sl.planHandlers.drainNotifications() },
     )
+
+    fun scheduleShare() = onScheduleShare()
 
     private val json = Wire.json
     private val planLock = Any()
@@ -2374,29 +2387,34 @@ class ShareService internal constructor(
                     }
                 }
             }
-        // NEW-1: ledger maž pouze pro klíče, kam se skutečně posílá PROJECTION_REMOVE;
-        // u klíčů krytých jiným grantem smaž jen contentHash a zachovej monotonní verzi N+1.
+        // R3-3: sent_projection řádek nemažeme ani u nekrytého klíče; nastavíme version = removeVersion a contentHash = "",
+        // aby následný re-grant/upsert dostal removeVersion + 1 (> vN příjemce) a čistě nahradil případný REMOVE ve frontě.
         val sentVersions = HashMap<Pair<String, String>, Long>()
+        val removeVersions = HashMap<Pair<String, String>, Long>()
         for ((recipient, keys) in delivered) {
             for (key in keys) {
                 val existingSent = data.inbox().sent(recipient, key)
                 if (existingSent != null) sentVersions[recipient to key] = existingSent.version
                 val covered = isCoveredByOtherGrant(recipient, key)
+                val removeVersion = maxOf(nowMs, (existingSent?.version ?: 0L) + 1L)
+                if (!covered) removeVersions[recipient to key] = removeVersion
                 val updatedSent = updateSentRowOnRevoke(
                     existing = existingSent,
+                    recipient = recipient,
+                    objectKey = key,
                     isCoveredByOtherGrant = covered,
+                    removeVersion = removeVersion,
                 )
                 if (updatedSent != null) {
                     data.inbox().putSent(updatedSent)
-                } else if (!covered) {
-                    data.inbox().deleteSent(recipient, key)
                 }
             }
         }
         for (rq in plan.removalRequests) {
             if (isCoveredByOtherGrant(rq.recipient, rq.objectKey)) continue
             val (type, id) = rq.objectKey.split('/', limit = 2)
-            val removeVersion = maxOf(nowMs, (sentVersions[rq.recipient to rq.objectKey] ?: 0L) + 1L)
+            val removeVersion = removeVersions[rq.recipient to rq.objectKey]
+                ?: maxOf(nowMs, (sentVersions[rq.recipient to rq.objectKey] ?: 0L) + 1L)
             val msg = MessageBuilder(self).build(rq.recipient, Kinds.PROJECTION_REMOVE, type, id, removeVersion, "{}", nowMs, grantRef = grantId)
             val e = msg.envelope
             outbox.enqueue(OutboxItem(e.eventId, rq.recipient, e.kind, e.objectType, e.objectId, e.objectVersion, null, Wire.encode(msg), nowMs))
@@ -2436,8 +2454,17 @@ internal fun mergeActivityGrantsForRecipient(matching: List<ShareGrant>): ShareG
     return sorted.first().copy(fields = mergedFields, sources = mergedSources)
 }
 
-internal fun updateSentRowOnRevoke(existing: SentRow?, isCoveredByOtherGrant: Boolean): SentRow? =
-    if (isCoveredByOtherGrant) existing?.copy(contentHash = "") else null
+internal fun updateSentRowOnRevoke(
+    existing: SentRow?,
+    recipient: String,
+    objectKey: String,
+    isCoveredByOtherGrant: Boolean,
+    removeVersion: Long,
+): SentRow? = if (isCoveredByOtherGrant) {
+    existing?.copy(contentHash = "")
+} else {
+    SentRow(recipient = recipient, objectKey = objectKey, version = removeVersion, contentHash = "")
+}
 
 /**
  * Jednorázové datové migrace při startu služeb:

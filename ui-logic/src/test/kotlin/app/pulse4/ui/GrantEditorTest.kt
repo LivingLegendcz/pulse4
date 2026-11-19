@@ -293,4 +293,65 @@ class GrantEditorTest {
         assertEquals(setOf("bob"), revokeAllDiff.removedRecipients)
         assertTrue(revokeAllDiff.hasChanges)
     }
+
+    @Test
+    fun `R3-9 computeGlobalDiff detects scope and planRights widening against all merged direct grants`() {
+        val gOnce = grant("d1", recipients = setOf("bob"), fields = setOf(Field.SLEEP_DURATION)).copy(
+            scope = TimeScope.once(today.minusDays(10), today.minusDays(5)),
+            planRights = mapOf("plan-1" to PlanRight.VIEW),
+        )
+        val gCont = grant("d2", recipients = setOf("bob"), fields = setOf(Field.SLEEP_DURATION)).copy(
+            scope = TimeScope.continuousFrom(today.minusDays(2)),
+            planRights = mapOf("plan-1" to PlanRight.EDIT, "plan-2" to PlanRight.PROPOSE),
+        )
+        val mergedDiff = GrantEditor.computeGlobalDiff(
+            existingDirectGrants = listOf(gOnce, gCont),
+            targetCategories = setOf(Category.SLEEP),
+            targetRecipients = setOf("bob"),
+            today = today,
+        )
+        assertTrue(mergedDiff.scopeChanged)
+        assertTrue(mergedDiff.scopeWidened)
+        assertEquals(TimeScope.continuousFrom(today.minusDays(10)), mergedDiff.newScope)
+        assertEquals(listOf(gOnce.scope, gCont.scope), mergedDiff.widenedFromScopes)
+        assertTrue(mergedDiff.planRightsWidened)
+        assertEquals(setOf("plan-1", "plan-2"), mergedDiff.widenedPlanIds)
+        assertTrue(mergedDiff.hasChanges)
+
+        // FROM + CONTINUOUS with same start date widens FROM -> CONTINUOUS
+        val gFrom = grant("d3", recipients = setOf("bob"), fields = setOf(Field.SLEEP_DURATION)).copy(
+            scope = TimeScope.from(today.minusDays(5)),
+        )
+        val gSameStartCont = grant("d4", recipients = setOf("bob"), fields = setOf(Field.SLEEP_DURATION)).copy(
+            scope = TimeScope.continuousFrom(today.minusDays(5)),
+        )
+        val fromToContDiff = GrantEditor.computeGlobalDiff(
+            existingDirectGrants = listOf(gFrom, gSameStartCont),
+            targetCategories = setOf(Category.SLEEP),
+            targetRecipients = setOf("bob"),
+            today = today,
+        )
+        assertTrue(fromToContDiff.scopeWidened)
+        assertTrue(fromToContDiff.scopeChanged)
+        assertEquals(listOf(gFrom.scope), fromToContDiff.widenedFromScopes)
+        assertFalse(fromToContDiff.planRightsWidened)
+        assertTrue(fromToContDiff.hasChanges)
+
+        // Identical scopes and planRights across merged grants report no widening
+        val gIdentical1 = grant("d5", recipients = setOf("bob"), fields = setOf(Field.SLEEP_DURATION)).copy(
+            scope = TimeScope.continuousFrom(today.minusDays(5)),
+            planRights = mapOf("plan-1" to PlanRight.VIEW),
+        )
+        val gIdentical2 = gIdentical1.copy(id = "d6")
+        val noWidenDiff = GrantEditor.computeGlobalDiff(
+            existingDirectGrants = listOf(gIdentical1, gIdentical2),
+            targetCategories = setOf(Category.SLEEP),
+            targetRecipients = setOf("bob"),
+            today = today,
+        )
+        assertFalse(noWidenDiff.scopeWidened)
+        assertFalse(noWidenDiff.scopeChanged)
+        assertFalse(noWidenDiff.planRightsWidened)
+        assertFalse(noWidenDiff.hasChanges)
+    }
 }

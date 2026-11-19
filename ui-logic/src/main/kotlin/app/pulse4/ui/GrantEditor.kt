@@ -161,7 +161,42 @@ object GrantEditor {
         val oldScope: TimeScope? = null,
         val newScope: TimeScope? = null,
         val scopeChanged: Boolean = false,
+        val scopeWidened: Boolean = false,
+        val widenedFromScopes: List<TimeScope> = emptyList(),
+        val planRightsWidened: Boolean = false,
+        val widenedPlanIds: Set<String> = emptySet(),
     )
+
+    fun isScopeWider(resulting: TimeScope, baseline: TimeScope): Boolean {
+        val rFrom = resulting.from?.let { runCatching { LocalDate.parse(it) }.getOrNull() }
+        val bFrom = baseline.from?.let { runCatching { LocalDate.parse(it) }.getOrNull() }
+        if (rFrom != null && bFrom != null && rFrom.isBefore(bFrom)) return true
+        return when (baseline.kind) {
+            TimeScope.Kind.ONCE -> {
+                if (resulting.kind != TimeScope.Kind.ONCE) {
+                    true
+                } else {
+                    val rTo = resulting.to?.let { runCatching { LocalDate.parse(it) }.getOrNull() }
+                    val bTo = baseline.to?.let { runCatching { LocalDate.parse(it) }.getOrNull() }
+                    rTo != null && bTo != null && rTo.isAfter(bTo)
+                }
+            }
+            TimeScope.Kind.FROM -> resulting.kind == TimeScope.Kind.CONTINUOUS
+            TimeScope.Kind.CONTINUOUS -> false
+        }
+    }
+
+    fun widenedPlanIdsAgainst(resulting: Map<String, PlanRight>, baseline: Map<String, PlanRight>): Set<String> {
+        if (resulting.isEmpty()) return emptySet()
+        val widened = LinkedHashSet<String>()
+        for ((planId, right) in resulting) {
+            val prev = baseline[planId]
+            if (prev == null || right.ordinal > prev.ordinal) {
+                widened += planId
+            }
+        }
+        return widened
+    }
 
     fun preservedGlobalScope(existingDirectGrants: List<ShareGrant>, today: LocalDate): TimeScope {
         if (existingDirectGrants.isEmpty()) return TimeScope.continuousFrom(today.minusDays(7))
@@ -289,12 +324,28 @@ object GrantEditor {
         } else {
             null
         }
-        val scopeChanged = oldScope != null && newScope != null && oldScope != newScope
+        val widenedFromScopes = if (newScope != null) {
+            existingDirectGrants.map { it.scope }.filter { isScopeWider(newScope, it) }.distinct()
+        } else {
+            emptyList()
+        }
+        val scopeWidened = widenedFromScopes.isNotEmpty()
+        val scopeChanged = (oldScope != null && newScope != null && oldScope != newScope) || scopeWidened
+
+        val resultingPlanRights = mergedPlanRights(existingDirectGrants)
+        val widenedPlanIds = if (effectiveNewRecipients.isNotEmpty() && effectiveNewCategories.isNotEmpty()) {
+            existingDirectGrants.flatMapTo(LinkedHashSet()) { g ->
+                widenedPlanIdsAgainst(resultingPlanRights, g.planRights)
+            }
+        } else {
+            emptySet()
+        }
+        val planRightsWidened = widenedPlanIds.isNotEmpty()
 
         val hasChanges = if (existingDirectGrants.isEmpty()) {
             effectiveNewRecipients.isNotEmpty() && effectiveNewCategories.isNotEmpty()
         } else {
-            addedByRecipient.isNotEmpty() || removedByRecipient.isNotEmpty() || sourcesChanged || activityFieldsChanged || scopeChanged
+            addedByRecipient.isNotEmpty() || removedByRecipient.isNotEmpty() || sourcesChanged || activityFieldsChanged || scopeChanged || scopeWidened || planRightsWidened
         }
 
         return GlobalSaveDiff(
@@ -310,6 +361,10 @@ object GrantEditor {
             oldScope = oldScope,
             newScope = newScope,
             scopeChanged = scopeChanged,
+            scopeWidened = scopeWidened,
+            widenedFromScopes = widenedFromScopes,
+            planRightsWidened = planRightsWidened,
+            widenedPlanIds = widenedPlanIds,
         )
     }
 

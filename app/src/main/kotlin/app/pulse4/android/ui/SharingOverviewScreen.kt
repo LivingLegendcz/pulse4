@@ -289,7 +289,7 @@ fun SharingOverviewScreen(
                 title = { Text("Odvolat oprávnění?", fontWeight = FontWeight.ExtraBold) },
                 text = {
                     Text(
-                        "Sdílení pro $recNames bude okamžitě zastaveno a příjemci obdrží požadavek na smazání. Již doručené kopie v cizích zařízeních nelze technicky vynutit zpět.",
+                        "Sdílení pro $recNames bude okamžitě zastaveno a data, která nesdílí jiný grant, budou u příjemce smazána. Již doručené kopie v cizích zařízeních nelze technicky vynutit zpět.",
                         style = MaterialTheme.typography.bodySmall
                     )
                 },
@@ -298,7 +298,11 @@ fun SharingOverviewScreen(
                         pendingRevokeGrant = null
                         scope.launch {
                             val plan = withContext(Dispatchers.IO) {
-                                sl.shareService.revoke(grantToRevoke.id, System.currentTimeMillis())
+                                val now = System.currentTimeMillis()
+                                sl.shareService.revoke(grantToRevoke.id, now)?.also {
+                                    sl.shareService.planAndEnqueue(now)
+                                    sl.shareService.scheduleShare()
+                                }
                             }
                             if (plan != null) {
                                 revocationPlanDialog = plan

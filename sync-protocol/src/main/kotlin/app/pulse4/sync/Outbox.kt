@@ -214,10 +214,12 @@ class OutboxManager(
                 true
             }
             Ack.Status.REJECTED if ack.reason == RejectReason.NOT_PERMITTED.name -> {
-                // Oprávnění bylo odepřeno (např. příjemce vypnul příjem): neresetovat snapshot, jinak vznikne nekonečná smyčka.
-                // Zároveň smažeme contentHash v sent ledgeru, aby pozdější zapnutí příjmu znovu poslalo celé okno (RE-5).
+                // Oprávnění bylo odepřeno (např. příjemce vypnul příjem): ponecháme položku CANCELLED
+                // a pro family.weight.push nemažeme contentHash (resync vyvolá až SNAPSHOT_REQUEST, R3-4).
                 store.update(it.copy(state = DeliveryState.CANCELLED, lastError = ack.reason))
-                onPermissionDenied?.invoke(it.recipient, it.objectKey)
+                if (it.kind != "family.weight.push") {
+                    onPermissionDenied?.invoke(it.recipient, it.objectKey)
+                }
                 true
             }
             // Odmítnutí (jiný důvod) a mezera nejsou doručení: položka se zastaví s chybou, aplikace vygeneruje snapshot.

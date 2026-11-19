@@ -841,12 +841,82 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
         return sentCount
     }
 
+    @Volatile
+    private var cachedChildObservationsByRecipient: Map<String, List<app.pulse4.domain.MetricObservation>> = emptyMap()
+
+    /**
+     * Okamžité přeposlání známých dětských měření po přijetí `SNAPSHOT_REQUEST` od dítěte (R3-4),
+     * bez čekání na příští Withings synchronizaci. Synchronně zařadí do outboxu známá/cachovaná měření
+     * a na IO vlákně spustí odeslání + případný čerstvý Withings fetch.
+     */
+    internal fun onFamilyWeightSnapshotRequest(childRecipient: String, nowMs: Long): Int {
+        if (childRecipient.isBlank()) return 0
+        val candidates = collectCachedChildObservations(childRecipient, nowMs)
+        val queued = forwardToChild(candidates, childRecipient, nowMs)
+        if (sl.settings.networkMode != app.pulse4.android.data.NetworkMode.MANUAL) {
+            CoroutineScope(Dispatchers.IO).launch {
+                val synced = runCatching { syncAndForwardChildWeights(nowMs) }.getOrDefault(0)
+                if (queued > 0 && synced == 0) {
+                    runCatching { sl.transport.pump(nowMs, 2500L) }
+                }
+            }
+        }
+        return queued
+    }
+
+    internal fun collectCachedChildObservations(
+        childRecipient: String,
+        nowMs: Long,
+    ): List<app.pulse4.domain.MetricObservation> {
+        val cutoffMs = nowMs - 30L * 86_400_000L
+        val collected = LinkedHashMap<String, app.pulse4.domain.MetricObservation>()
+        cachedChildObservationsByRecipient[childRecipient].orEmpty()
+            .filter { !it.deleted && it.startUtcMs >= cutoffMs }
+            .forEach { collected[it.id] = it }
+
+        val cUid = childVault.load()?.userId
+        val childWebUid = loadWebSession()?.childUserId?.toString() ?: cUid?.toString()
+        if (sl.settings.childWeightAutoForward && childWebUid != null) {
+            val cMin = sl.settings.childWeightMinKg
+            val cMax = sl.settings.childWeightMaxKg
+            val today = LocalDate.now(ZoneId.of(sl.settings.zoneId))
+            sl.db.observations()
+                .ofTypesIncludingDeleted(listOf(MetricType.WEIGHT.name), today.minusDays(30).toString(), today.toString())
+                .map { it.toDomain() }
+                .filter {
+                    !it.deleted &&
+                        it.provider == Provider.WITHINGS_API &&
+                        it.accountId == childWebUid &&
+                        it.value in cMin..cMax
+                }
+                .forEach { collected.putIfAbsent(it.id, it) }
+        }
+
+        // Záložní obnova z předchozích položek outboxu (např. po restartu aplikace v offline režimu)
+        runCatching {
+            for (row in sl.db.outbox().all()) {
+                if (row.recipient == childRecipient && row.kind == FAMILY_WEIGHT_PUSH_KIND) {
+                    val msg = Wire.decode(row.wire) ?: continue
+                    val obs = Wire.json.decodeFromString(app.pulse4.domain.MetricObservation.serializer(), msg.payload)
+                    if (!obs.deleted && obs.startUtcMs >= cutoffMs) {
+                        collected.putIfAbsent(obs.id, obs)
+                    }
+                }
+            }
+        }
+        return collected.values.toList()
+    }
+
     private fun forwardToChild(
         observations: List<app.pulse4.domain.MetricObservation>,
         childRecipient: String,
         nowMs: Long,
     ): Int {
         if (observations.isEmpty() || childRecipient.isBlank()) return 0
+        val merged = LinkedHashMap<String, app.pulse4.domain.MetricObservation>()
+        cachedChildObservationsByRecipient[childRecipient].orEmpty().forEach { merged[it.id] = it }
+        observations.forEach { merged[it.id] = it }
+        cachedChildObservationsByRecipient = cachedChildObservationsByRecipient + (childRecipient to merged.values.toList())
         val self = sl.bridge.ensureStarted().deliveryHash
         return forwardChildObservations(
             observations = observations,

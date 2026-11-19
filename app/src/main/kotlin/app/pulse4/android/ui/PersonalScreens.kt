@@ -196,7 +196,20 @@ internal fun mergeEcgHistoryObservations(rows: List<MetricObservation>): List<Me
 internal fun filterTopLevelActivities(
     rows: List<app.pulse4.android.data.ActivitySummaryRow>,
 ): List<app.pulse4.android.data.ActivitySummaryRow> =
-    rows.filterNot { ImportService.isMultisportLegId(it.id) }
+    rows.filterNot { row ->
+        ImportService.isMultisportLegId(row.id) || hasMultisportChildTagInJson(row.json)
+    }
+
+private fun hasMultisportChildTagInJson(rawJson: String?): Boolean {
+    if (rawJson.isNullOrBlank()) return false
+    val act = runCatching { Wire.json.decodeFromString(Activity.serializer(), rawJson) }.getOrNull() ?: return false
+    return "multisport-leg" in act.tags || act.tags.any { it.startsWith("parent:") }
+}
+
+internal fun pickLatestTopLevelActivity(
+    rows: List<app.pulse4.android.data.ActivitySummaryRow>,
+): app.pulse4.android.data.ActivitySummaryRow? =
+    filterTopLevelActivities(rows).firstOrNull()
 
 internal fun resolveHrZonesForUi(domHrZones: List<Double>): List<Double> =
     if (domHrZones.size == 5 && domHrZones.any { it > 0.0 }) domHrZones else emptyList()
@@ -624,7 +637,7 @@ fun TodayScreen(
 
     val states by sl.db.areaStates().all().collectAsState(initial = emptyList())
     val units by sl.settings.unitSystemFlow.collectAsState()
-    val recentActs by sl.db.activities().recentSummaries(10).collectAsState(initial = emptyList())
+    val recentActs by sl.db.activities().recentSummaries(30).collectAsState(initial = emptyList())
     val currentDateKey = LocalDate.now(ZoneId.of(sl.settings.zoneId)).toString()
     val importWorkInfos by androidx.work.WorkManager.getInstance(ctx)
         .getWorkInfosForUniqueWorkFlow("import-now")
@@ -967,8 +980,8 @@ fun TodayScreen(
             onInvite = onOpenGroups
         )
 
-        // 3. Poslední sportovní aktivita (Garmin FIT), pokud je k dispozici
-        val latestAct = filterTopLevelActivities(recentActs).firstOrNull() ?: recentActs.firstOrNull()
+        // 3. Poslední sportovní aktivita (Garmin FIT), pokud je k dispozici (bez podřízených úseků multisportu)
+        val latestAct = pickLatestTopLevelActivity(recentActs)
         if (latestAct != null) {
             Spacer(Modifier.height(12.dp))
             OuraFeaturedActivityBanner(

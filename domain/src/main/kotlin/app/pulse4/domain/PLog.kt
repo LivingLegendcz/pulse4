@@ -36,6 +36,9 @@ object PLog {
     private val SECRET_KV_REGEX = Regex(
         """(?i)\b(bearer|token|access_token|refresh_token|accessToken|refreshToken|sessionToken|authTicket|session_id|sessionid|csrf|csrf_token|csrfToken|password|passwd|secret|api_key|apikey|ticket)\s*[:=]\s*[^\s,;&"']+"""
     )
+    private val HOST_PORT_REGEX = Regex(
+        """\[[0-9A-Fa-f:]+\]:\d{1,5}\b|\b(?:\d{1,3}\.){3}\d{1,3}:\d{1,5}\b|\b(?:localhost|(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,63}):\d{1,5}\b"""
+    )
 
     fun redact(s: String, maxLen: Int = MAX_LEN): String {
         val scrubbed = s
@@ -45,6 +48,7 @@ object PLog {
             .replace(JSON_SECRET_REGEX) { m -> "\"${m.groupValues[1]}\":\"<redacted>\"" }
             .replace(TICKET_REGEX, "ticket=<redacted>")
             .replace(SECRET_KV_REGEX) { m -> "${m.groupValues[1]}=<redacted>" }
+            .replace(HOST_PORT_REGEX, "<host>:<port>")
         return if (scrubbed.length > maxLen) scrubbed.take(maxLen) + "..." else scrubbed
     }
 

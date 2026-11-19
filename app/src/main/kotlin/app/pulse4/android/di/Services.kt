@@ -292,6 +292,7 @@ class ServiceLocator internal constructor(
 
 /** Import z oficiálního Garmin Personal API (a záložně z přihlášené relace Garmin Connect) a ruční import FIT. */
 internal interface ActivityImportStore {
+    fun allIds(): List<String> = emptyList()
     fun get(id: String): ActivityRow?
     fun track(id: String): TrackRow?
     fun upsert(row: ActivityRow)
@@ -492,8 +493,8 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
             val hrZonesFromJson = (1..5).mapNotNull { z -> dbl("hrTimeInZone_$z") }
             val hrZones = if (hrZonesFromJson.size == 5 && hrZonesFromJson.any { it > 0.0 }) {
                 hrZonesFromJson
-            } else if (pts.size >= 2 && pts.any { it.heartRate != null }) {
-                val maxRef = (maxHr ?: 185).coerceAtLeast(150).toDouble()
+            } else if (maxHr != null && pts.size >= 2 && pts.any { it.heartRate != null }) {
+                val maxRef = maxHr.coerceAtLeast(150).toDouble()
                 val bounds = listOf(maxRef * 0.60, maxRef * 0.70, maxRef * 0.80, maxRef * 0.90)
                 app.pulse4.analytics.Zones.timeInZones(
                     pts.map { it.tMs to it.heartRate?.toDouble() },
@@ -861,6 +862,353 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
             }.getOrDefault(false)
         }
 
+        internal fun normalizeGarminSummaryObj(obj: kotlinx.serialization.json.JsonObject): kotlinx.serialization.json.JsonObject {
+            val summary = obj["summaryDTO"] as? kotlinx.serialization.json.JsonObject ?: return obj
+            val merged = LinkedHashMap<String, kotlinx.serialization.json.JsonElement>(obj)
+            summary.forEach { (k, v) -> merged.putIfAbsent(k, v) }
+            if (!merged.containsKey("activityType") && obj["activityTypeDTO"] is kotlinx.serialization.json.JsonObject) {
+                merged["activityType"] = obj.getValue("activityTypeDTO")
+            }
+            return kotlinx.serialization.json.JsonObject(merged)
+        }
+
+        private fun synthesizeOfflineMultisportParent(
+            parentId: String,
+            extId: String,
+            legs: List<Activity>,
+            zoneId: String,
+        ): Activity {
+            val first = legs.first()
+            val totalTimeS = legs.sumOf { it.totalTimeS }
+            val movingTimeS = legs.mapNotNull { it.movingTimeS }.takeIf { it.isNotEmpty() }?.sum() ?: totalTimeS
+            val distanceM = legs.mapNotNull { it.distanceM }.takeIf { it.isNotEmpty() }?.sum()
+            val ascentM = legs.mapNotNull { it.ascentM }.takeIf { it.isNotEmpty() }?.sum()
+            val descentM = legs.mapNotNull { it.descentM }.takeIf { it.isNotEmpty() }?.sum()
+            val caloriesKcal = legs.mapNotNull { it.caloriesKcal }.takeIf { it.isNotEmpty() }?.sum()
+            return Activity(
+                id = parentId,
+                provider = Provider.GARMIN_PERSONAL,
+                accountId = first.accountId,
+                externalId = extId,
+                sport = Sport.OTHER,
+                startUtcMs = first.startUtcMs,
+                zoneId = zoneId,
+                totalTimeS = totalTimeS,
+                movingTimeS = movingTimeS,
+                distanceM = distanceM,
+                ascentM = ascentM,
+                descentM = descentM,
+                caloriesKcal = caloriesKcal,
+                title = "Multisport (${legs.size} úseky)",
+                tags = setOf("multisport-summary-pending"),
+            )
+        }
+
+        /**
+         * R3-7: Jednorázová oprava multisport aktivit `garmin-X` importovaných verzí `9c61ec9`,
+         * kde rodič `garmin-X` nesl jen 1. úsek (bez Garmin souhrnu) a podřízené úseky `-s1..-s(N-1)`
+         * byly posunuty o jeden index a bez značek `multisport-leg` / `parent:`.
+         */
+        internal fun repairLegacyMultisportActivities(
+            store: ActivityImportStore,
+            garminSummariesByActKey: Map<String, kotlinx.serialization.json.JsonObject> = emptyMap(),
+            findSealedFitForParent: (parentAct: Activity, legPairs: List<Pair<String, Activity>>) -> FitResult.Ok? = { _, _ -> null },
+            fetchGarminSummary: (actId: String) -> kotlinx.serialization.json.JsonObject? = { null },
+            nowMs: Long,
+            accountId: String,
+            zoneId: String,
+        ): Int {
+            val allIds = store.allIds()
+            if (allIds.isEmpty()) return 0
+            val groupedLegs = allIds
+                .filter { isMultisportLegId(it) && it.startsWith("garmin-") }
+                .groupBy { parentIdFromLegId(it)!! }
+            if (groupedLegs.isEmpty()) return 0
+
+            val trackSerializer = kotlinx.serialization.builtins.ListSerializer(TrackPoint.serializer())
+            var repairedCount = 0
+
+            for ((parentId, legIds) in groupedLegs) {
+                val parentRow = store.get(parentId) ?: continue
+                val parentAct = runCatching { json.decodeFromString(Activity.serializer(), parentRow.json) }.getOrNull() ?: continue
+                val sortedLegIds = legIds.sortedBy { it.substringAfterLast("-s").toIntOrNull() ?: Int.MAX_VALUE }
+                val legPairs = sortedLegIds.mapNotNull { id ->
+                    val row = store.get(id) ?: return@mapNotNull null
+                    val act = runCatching { json.decodeFromString(Activity.serializer(), row.json) }.getOrNull() ?: return@mapNotNull null
+                    id to act
+                }
+                if (legPairs.isEmpty()) continue
+
+                val anyLegUntagged = legPairs.any { (_, act) ->
+                    "multisport-leg" !in act.tags || "parent:$parentId" !in act.tags
+                }
+                val parentSummaryPending = "multisport-summary-pending" in parentAct.tags
+                val parentLacksSummary = parentAct.title.isNullOrBlank() &&
+                    parentAct.aerobicTrainingEffect == null &&
+                    parentAct.anaerobicTrainingEffect == null &&
+                    parentAct.trainingLoad == null
+                if (!anyLegUntagged && !parentSummaryPending && !parentLacksSummary) continue
+
+                val actId = parentId.removePrefix("garmin-")
+                val rawGarminObj = garminSummariesByActKey[parentId]
+                    ?: if (parentLacksSummary || parentSummaryPending) fetchGarminSummary(actId) else null
+                val garminObj = rawGarminObj?.let(::normalizeGarminSummaryObj)
+                val sealedFit = if (anyLegUntagged) findSealedFitForParent(parentAct, legPairs) else null
+
+                store.inTransaction {
+                    when {
+                        // Případ 1: `9c61ec9` sync path — rodič `garmin-X` držel 1. úsek a `-s1..-sK` další úseky bez tagů.
+                        anyLegUntagged && parentLacksSummary -> {
+                            if (sealedFit != null && sealedFit.sessions.size >= 2) {
+                                val newParent = if (garminObj != null) {
+                                    buildActivityFromGarminAndFit(
+                                        id = parentId,
+                                        provider = Provider.GARMIN_PERSONAL,
+                                        extId = actId,
+                                        obj = garminObj,
+                                        parsed = null,
+                                        nowMs = nowMs,
+                                        accountId = accountId,
+                                        zoneId = zoneId,
+                                    )
+                                } else {
+                                    val synthLegs = sealedFit.sessions.mapIndexed { idx, session ->
+                                        buildActivityFromGarminAndFit(
+                                            id = "$parentId-s${idx + 1}",
+                                            provider = Provider.GARMIN_PERSONAL,
+                                            extId = "$actId-s${idx + 1}",
+                                            obj = null,
+                                            parsed = session,
+                                            nowMs = nowMs,
+                                            accountId = accountId,
+                                            zoneId = zoneId,
+                                        )
+                                    }
+                                    synthesizeOfflineMultisportParent(parentId, actId, synthLegs, zoneId)
+                                }
+                                store.upsert(newParent.toRow(json.encodeToString(Activity.serializer(), newParent)))
+                                val allPoints = sealedFit.sessions.flatMap { it.points }.sortedBy { it.tMs }
+                                if (allPoints.isNotEmpty()) {
+                                    store.upsertTrack(TrackRow(parentId, json.encodeToString(trackSerializer, allPoints)))
+                                }
+                                val parentTitle = newParent.title?.takeIf { !("multisport-summary-pending" in newParent.tags) && it.isNotBlank() }
+                                val newLegIds = multisportLegIds(parentId, actId, sealedFit.sessions.size)
+                                for ((idx, session) in sealedFit.sessions.withIndex()) {
+                                    val (legId, legExtId) = newLegIds[idx]
+                                    val legTitle = if (parentTitle != null) {
+                                        "$parentTitle · ${idx + 1}. ${session.sport.czechName()}"
+                                    } else {
+                                        "${idx + 1}. ${session.sport.czechName()}"
+                                    }
+                                    val legAct = buildActivityFromGarminAndFit(
+                                        id = legId,
+                                        provider = Provider.GARMIN_PERSONAL,
+                                        extId = legExtId,
+                                        obj = null,
+                                        parsed = session,
+                                        nowMs = nowMs,
+                                        accountId = accountId,
+                                        zoneId = zoneId,
+                                    ).copy(
+                                        title = legTitle,
+                                        tags = setOf("multisport-leg", "parent:$parentId"),
+                                    )
+                                    store.upsert(legAct.toRow(json.encodeToString(Activity.serializer(), legAct)))
+                                    if (session.points.isNotEmpty()) {
+                                        store.upsertTrack(TrackRow(legId, json.encodeToString(trackSerializer, session.points)))
+                                    }
+                                }
+                            } else {
+                                // Bez sealed FIT přečíslujeme existující řádky: starý `garmin-X` -> `-s1`, `-s1` -> `-s2`, ...
+                                val allLegsInOrder = listOf(parentAct) + legPairs.map { it.second }
+                                val allTracksInOrder = listOf(store.track(parentId)) + legPairs.map { store.track(it.first) }
+                                val newParent = if (garminObj != null) {
+                                    buildActivityFromGarminAndFit(
+                                        id = parentId,
+                                        provider = Provider.GARMIN_PERSONAL,
+                                        extId = actId,
+                                        obj = garminObj,
+                                        parsed = null,
+                                        nowMs = nowMs,
+                                        accountId = accountId,
+                                        zoneId = zoneId,
+                                    )
+                                } else {
+                                    synthesizeOfflineMultisportParent(parentId, actId, allLegsInOrder, zoneId)
+                                }
+                                store.upsert(newParent.toRow(json.encodeToString(Activity.serializer(), newParent)))
+                                val combinedPoints = allTracksInOrder.filterNotNull()
+                                    .flatMap { tr -> runCatching { json.decodeFromString(trackSerializer, tr.json) }.getOrDefault(emptyList()) }
+                                    .sortedBy { it.tMs }
+                                if (combinedPoints.isNotEmpty()) {
+                                    store.upsertTrack(TrackRow(parentId, json.encodeToString(trackSerializer, combinedPoints)))
+                                }
+                                val parentTitle = newParent.title?.takeIf { !("multisport-summary-pending" in newParent.tags) && it.isNotBlank() }
+                                val newLegIds = multisportLegIds(parentId, actId, allLegsInOrder.size)
+                                for ((idx, legAct) in allLegsInOrder.withIndex()) {
+                                    val (newLegId, newLegExtId) = newLegIds[idx]
+                                    val legTitle = legAct.title?.takeIf { it.isNotBlank() }
+                                        ?: if (parentTitle != null) "$parentTitle · ${idx + 1}. ${legAct.sport.czechName()}"
+                                        else "${idx + 1}. ${legAct.sport.czechName()}"
+                                    val updatedLeg = legAct.copy(
+                                        id = newLegId,
+                                        externalId = newLegExtId,
+                                        title = legTitle,
+                                        tags = legAct.tags + setOf("multisport-leg", "parent:$parentId"),
+                                    )
+                                    store.upsert(updatedLeg.toRow(json.encodeToString(Activity.serializer(), updatedLeg)))
+                                    allTracksInOrder[idx]?.let { tr ->
+                                        store.upsertTrack(TrackRow(newLegId, tr.json))
+                                    }
+                                }
+                            }
+                            repairedCount++
+                        }
+
+                        // Případ 2: Rodič už byl dočasně opraven offline a nyní dorazil souhrn z Garmin API.
+                        parentSummaryPending && garminObj != null -> {
+                            val newParent = buildActivityFromGarminAndFit(
+                                id = parentId,
+                                provider = Provider.GARMIN_PERSONAL,
+                                extId = actId,
+                                obj = garminObj,
+                                parsed = null,
+                                nowMs = nowMs,
+                                accountId = accountId,
+                                zoneId = zoneId,
+                            )
+                            store.upsert(newParent.toRow(json.encodeToString(Activity.serializer(), newParent)))
+                            val parentTitle = newParent.title?.takeIf { it.isNotBlank() }
+                            if (parentTitle != null) {
+                                legPairs.forEachIndexed { idx, (legId, legAct) ->
+                                    val updatedTitle = if (legAct.title.isNullOrBlank() || legAct.title!!.startsWith("${idx + 1}. ")) {
+                                        "$parentTitle · ${idx + 1}. ${legAct.sport.czechName()}"
+                                    } else legAct.title
+                                    val updatedLeg = legAct.copy(
+                                        title = updatedTitle,
+                                        tags = legAct.tags + setOf("multisport-leg", "parent:$parentId"),
+                                    )
+                                    if (updatedLeg != legAct) {
+                                        store.upsert(updatedLeg.toRow(json.encodeToString(Activity.serializer(), updatedLeg)))
+                                    }
+                                }
+                            }
+                            repairedCount++
+                        }
+
+                        // Případ 3: `9c61ec9` lazy path — rodič má Garmin souhrn, úseky `-s*` jen neměly tagy (případně chyběl `-s1`).
+                        anyLegUntagged -> {
+                            if (sealedFit != null && sealedFit.sessions.size >= 2 && sealedFit.sessions.size > legPairs.size) {
+                                val allPoints = sealedFit.sessions.flatMap { it.points }.sortedBy { it.tMs }
+                                if (allPoints.isNotEmpty()) {
+                                    store.upsertTrack(TrackRow(parentId, json.encodeToString(trackSerializer, allPoints)))
+                                }
+                                val parentTitle = parentAct.title?.takeIf { it.isNotBlank() }
+                                val newLegIds = multisportLegIds(parentId, actId, sealedFit.sessions.size)
+                                for ((idx, session) in sealedFit.sessions.withIndex()) {
+                                    val (legId, legExtId) = newLegIds[idx]
+                                    val legTitle = if (parentTitle != null) {
+                                        "$parentTitle · ${idx + 1}. ${session.sport.czechName()}"
+                                    } else {
+                                        "${idx + 1}. ${session.sport.czechName()}"
+                                    }
+                                    val legAct = buildActivityFromGarminAndFit(
+                                        id = legId,
+                                        provider = Provider.GARMIN_PERSONAL,
+                                        extId = legExtId,
+                                        obj = null,
+                                        parsed = session,
+                                        nowMs = nowMs,
+                                        accountId = accountId,
+                                        zoneId = zoneId,
+                                    ).copy(
+                                        title = legTitle,
+                                        tags = setOf("multisport-leg", "parent:$parentId"),
+                                    )
+                                    store.upsert(legAct.toRow(json.encodeToString(Activity.serializer(), legAct)))
+                                    if (session.points.isNotEmpty()) {
+                                        store.upsertTrack(TrackRow(legId, json.encodeToString(trackSerializer, session.points)))
+                                    }
+                                }
+                            } else {
+                                for ((legId, legAct) in legPairs) {
+                                    val tagged = legAct.copy(tags = legAct.tags + setOf("multisport-leg", "parent:$parentId"))
+                                    store.upsert(tagged.toRow(json.encodeToString(Activity.serializer(), tagged)))
+                                }
+                            }
+                            repairedCount++
+                        }
+                    }
+                }
+            }
+            return repairedCount
+        }
+
+        internal fun deduplicateBodyBatteryRows(db: AppDatabase) {
+            val rows = db.observations().ofTypesIncludingDeleted(
+                listOf(MetricType.BODY_BATTERY.name),
+                "1970-01-01",
+                "2999-12-31",
+            )
+            if (rows.isEmpty()) return
+            val excludedIds = db.exclusions().allIds().toHashSet()
+            val nowMs = System.currentTimeMillis()
+            val toDelete = ArrayList<String>()
+            val toUpsert = ArrayList<ObservationRow>()
+            val exclusionsToPut = ArrayList<ExcludedRow>()
+            val exclusionsToRemove = ArrayList<String>()
+            val grouped = rows.filter { !it.localDate.isNullOrBlank() && it.provider == Provider.GARMIN_PERSONAL.name }
+                .groupBy { Triple(it.provider, it.accountId, it.localDate!!) }
+            for ((key, group) in grouped) {
+                val (_, accountId, localDate) = key
+                val canonicalId = app.pulse4.domain.ImportKey.of(
+                    Provider.GARMIN_PERSONAL,
+                    accountId,
+                    null,
+                    listOf(MetricType.BODY_BATTERY.name, localDate),
+                )
+                val excludedInGroup = group.filter { it.id in excludedIds }
+                val canonicalRow = group.firstOrNull { it.id == canonicalId }
+                val isDayExcludedOrCanonicalDeleted = excludedInGroup.isNotEmpty() || canonicalRow?.deleted == true
+
+                for (exRow in excludedInGroup) {
+                    if (exRow.id != canonicalId) {
+                        if (canonicalId !in excludedIds) {
+                            exclusionsToPut += ExcludedRow(canonicalId, nowMs)
+                            excludedIds += canonicalId
+                        }
+                        exclusionsToRemove += exRow.id
+                    }
+                }
+
+                if (isDayExcludedOrCanonicalDeleted) {
+                    // Nikdy nevzkřísit smazaný nebo uživatelem vyloučený den.
+                    group.filter { !it.deleted }.forEach { toDelete += it.id }
+                    continue
+                }
+
+                val activeRows = group.filter { !it.deleted }
+                if (activeRows.isEmpty()) continue
+
+                val newest = activeRows.maxWithOrNull(
+                    compareBy<ObservationRow> { it.endUtcMs ?: it.startUtcMs }.thenBy { it.startUtcMs }
+                ) ?: continue
+                val nonCanonicalActiveIds = activeRows.map { it.id }.filter { it != canonicalId }
+                if (nonCanonicalActiveIds.isNotEmpty() || canonicalRow == null || newest.id != canonicalId) {
+                    toUpsert += newest.copy(id = canonicalId, deleted = false)
+                    group.filter { it.id != canonicalId && !it.deleted }.forEach { toDelete += it.id }
+                }
+            }
+            if (toUpsert.isNotEmpty() || toDelete.isNotEmpty() || exclusionsToPut.isNotEmpty() || exclusionsToRemove.isNotEmpty()) {
+                db.runInTransaction {
+                    toDelete.distinct().chunked(500).forEach { db.observations().markDeleted(it) }
+                    if (toUpsert.isNotEmpty()) db.observations().upsert(toUpsert)
+                    exclusionsToPut.forEach { db.exclusions().put(it) }
+                    exclusionsToRemove.forEach { db.exclusions().remove(it) }
+                }
+            }
+        }
+
         internal fun syncGarminActivityElements(
             allActivityElements: List<kotlinx.serialization.json.JsonElement>,
             isInitialSync: Boolean,
@@ -917,6 +1265,20 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
                 }
                 imported += activitiesToSave.size
             }
+
+            val garminSummariesByActKey = LinkedHashMap<String, kotlinx.serialization.json.JsonObject>()
+            for (elem in allActivityElements) {
+                val obj = (elem as? kotlinx.serialization.json.JsonObject) ?: continue
+                val actId = obj["activityId"]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content } ?: continue
+                garminSummariesByActKey["garmin-$actId"] = obj
+            }
+            repairLegacyMultisportActivities(
+                store = store,
+                garminSummariesByActKey = garminSummariesByActKey,
+                nowMs = nowMs,
+                accountId = accountId,
+                zoneId = zoneId,
+            )
 
             val maxImmediateFitDownloads = if (isInitialSync) 15 else 30
             var fitDownloadsCount = 0
@@ -1105,6 +1467,18 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
                 settings.put("migration.bb_dedup_v1", "true")
             }
         }
+        if (settings.getRaw("migration.multisport_repair_v1") != "true") {
+            runCatching {
+                repairLegacyMultisportActivities(
+                    store = roomActivityImportStore(),
+                    findSealedFitForParent = { parentAct, legPairs -> findSealedFitInDir(parentAct, legPairs) },
+                    nowMs = nowMs,
+                    accountId = settings.accountId,
+                    zoneId = settings.zoneId,
+                )
+                settings.put("migration.multisport_repair_v1", "true")
+            }
+        }
         val areaCheckMetrics = mapOf(
             SyncArea.SLEEP to app.pulse4.domain.MetricType.SLEEP_DURATION,
             SyncArea.HRV to app.pulse4.domain.MetricType.HRV,
@@ -1167,38 +1541,7 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
         res?.plus(SyncArea.ACTIVITIES to actRes)
     }
 
-    internal fun deduplicateBodyBatteryRows(db: AppDatabase) {
-        val rows = db.observations().forTypeInRange(MetricType.BODY_BATTERY.name, "1970-01-01", "2999-12-31")
-        if (rows.isEmpty()) return
-        val toDelete = ArrayList<String>()
-        val toUpsert = ArrayList<ObservationRow>()
-        val grouped = rows.filter { !it.localDate.isNullOrBlank() }
-            .groupBy { Triple(it.provider, it.accountId, it.localDate!!) }
-        for ((key, group) in grouped) {
-            val (providerName, accountId, localDate) = key
-            if (providerName != Provider.GARMIN_PERSONAL.name) continue
-            val canonicalId = app.pulse4.domain.ImportKey.of(
-                Provider.GARMIN_PERSONAL,
-                accountId,
-                null,
-                listOf(MetricType.BODY_BATTERY.name, localDate),
-            )
-            val newest = group.maxWithOrNull(
-                compareBy<ObservationRow> { it.endUtcMs ?: it.startUtcMs }.thenBy { it.startUtcMs }
-            ) ?: continue
-            val dupIds = group.map { it.id }.filter { it != canonicalId }
-            if (dupIds.isNotEmpty()) {
-                toUpsert += newest.copy(id = canonicalId)
-                toDelete += dupIds
-            }
-        }
-        if (toUpsert.isNotEmpty() || toDelete.isNotEmpty()) {
-            db.runInTransaction {
-                toDelete.chunked(500).forEach { db.observations().markDeleted(it) }
-                if (toUpsert.isNotEmpty()) db.observations().upsert(toUpsert)
-            }
-        }
-    }
+    internal fun deduplicateBodyBatteryRows(db: AppDatabase) = Companion.deduplicateBodyBatteryRows(db)
 
     /** Kompletní vymazání všech testovacích dat a reset aktivit k čistému opětovnému stažení. */
     fun clearTestDataAndResetActivities() {
@@ -1377,6 +1720,34 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
                 throttleMs = 80L,
             )
 
+            repairLegacyMultisportActivities(
+                store = roomActivityImportStore(),
+                findSealedFitForParent = { parentAct, legPairs -> findSealedFitInDir(parentAct, legPairs) },
+                fetchGarminSummary = { actId ->
+                    val summaryPath = "/activity-service/activity/$actId"
+                    val body = runCatching {
+                        if (authHeader != null) {
+                            val req = okhttp3.Request.Builder()
+                                .url("${cfg.baseUrl.trimEnd('/')}$summaryPath")
+                                .header(cfg.authHeader, authHeader)
+                                .get()
+                                .build()
+                            client.newCall(req).execute().use { resp ->
+                                if (resp.isSuccessful) resp.body?.string().orEmpty() else ""
+                            }
+                        } else ""
+                    }.getOrDefault("").ifBlank {
+                        if (hasExt) runCatching { sl.garminExt.connectApiJson(summaryPath) }.getOrDefault("") else ""
+                    }
+                    body.takeIf { it.isNotBlank() }?.let { raw ->
+                        runCatching { kotlinx.serialization.json.Json.parseToJsonElement(raw) as? kotlinx.serialization.json.JsonObject }.getOrNull()
+                    }
+                },
+                nowMs = nowMs,
+                accountId = sl.settings.accountId,
+                zoneId = sl.settings.zoneId,
+            )
+
             val cursor = latestTimestampMs ?: prevState?.cursorMs ?: nowMs
             sl.db.areaStates().put(AreaStateRow(SyncArea.ACTIVITIES.name, cursor, nowMs, nowMs, null, null))
             imported
@@ -1397,7 +1768,29 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
         }
     }
 
+    private fun findSealedFitInDir(parentAct: Activity, legPairs: List<Pair<String, Activity>>): FitResult.Ok? {
+        val fitDir = File(context.noBackupFilesDir, "fit")
+        if (!fitDir.isDirectory) return null
+        val files = fitDir.listFiles { f -> f.isFile && f.name.endsWith(".fit.enc") }.orEmpty()
+        val firstLeg = legPairs.firstOrNull()?.second
+        for (f in files) {
+            val ok = runCatching {
+                val bytes = sl.vault.open(f.readBytes())
+                FitImporter.parse(bytes) as? FitResult.Ok
+            }.getOrNull() ?: continue
+            if (ok.sessions.size < 2) continue
+            val s0 = ok.sessions.first()
+            if (kotlin.math.abs(s0.startMs - parentAct.startUtcMs) <= 2_000L &&
+                (s0.sport == parentAct.sport || (firstLeg != null && ok.sessions.getOrNull(1)?.sport == firstLeg.sport))
+            ) {
+                return ok
+            }
+        }
+        return null
+    }
+
     private fun roomActivityImportStore(): ActivityImportStore = object : ActivityImportStore {
+        override fun allIds(): List<String> = sl.db.activities().allIds()
         override fun get(id: String): ActivityRow? = sl.db.activities().get(id)
         override fun track(id: String): TrackRow? = sl.db.activities().track(id)
         override fun upsert(row: ActivityRow) = sl.db.activities().upsert(row)
@@ -2205,7 +2598,9 @@ class ShareService internal constructor(
         val allRecipients = recipientsByGrant.values.flatten().toSortedSet()
         PLog.i("Pulse4Sync") { "enqueueActivities: from=$from, acts=${acts.size}, activeGrants=${activeActivityGrants.size}" }
         for (row in acts) {
+            if (ImportService.isMultisportLegId(row.id)) continue
             val act = json.decodeFromString(Activity.serializer(), row.json)
+            if (isMultisportChildActivity(act)) continue
             val track = data.activities().track(row.id)?.let {
                 json.decodeFromString(kotlinx.serialization.builtins.ListSerializer(TrackPoint.serializer()), it.json)
             }.orEmpty()
@@ -2441,10 +2836,10 @@ internal fun isValidChildBodyComposition(type: MetricType, value: Double): Boole
     }
 }
 
-internal fun multisportSessionIds(baseId: String, baseExtId: String, sessionCount: Int): List<Pair<String, String>> =
-    (0 until sessionCount).map { idx ->
-        if (idx == 0) baseId to baseExtId else "$baseId-s$idx" to "$baseExtId-s$idx"
-    }
+internal fun isMultisportChildActivity(act: Activity): Boolean =
+    ImportService.isMultisportLegId(act.id) ||
+        "multisport-leg" in act.tags ||
+        act.tags.any { it.startsWith("parent:") }
 
 internal fun mergeActivityGrantsForRecipient(matching: List<ShareGrant>): ShareGrant {
     val sorted = matching.sortedBy { it.id }

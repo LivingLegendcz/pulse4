@@ -2216,8 +2216,10 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
 
                 // ───────────────────────── RODINA & DĚTSKÝ PROFIL ─────────────────────────
                 val childUid = wCfg?.childWithingsUserId
-                val childName = sl.withings.loadWebSession()?.childUserName
-                val allProfiles = sl.withings.loadWebSession()?.allProfiles.orEmpty()
+                // StrictMode (L5): čtení relace (soubor + Keystore) mimo hlavní vlákno.
+                val childSession = io(tick) { sl.withings.loadWebSession() }.value
+                val childName = childSession?.childUserName
+                val allProfiles = childSession?.allProfiles.orEmpty()
                 val childProfiles = allProfiles.filter { it.isChild }
                 val hasChildConfig = childUid != null || (wCfg?.childRecipientIdentity ?: "").isNotBlank()
 
@@ -2287,9 +2289,11 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                                 }
                                 if (childUid != null) {
                                     TextButton(onClick = {
-                                        sl.withings.disconnectChild()
-                                        notice = "Dětský profil odpojen."
-                                        tick++
+                                        scope.launch {
+                                            withContext(Dispatchers.IO) { sl.withings.disconnectChild() }
+                                            notice = "Dětský profil odpojen."
+                                            tick++
+                                        }
                                     }) {
                                         Text("Odpojit", color = MaterialTheme.colorScheme.error)
                                     }

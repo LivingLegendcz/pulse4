@@ -9,11 +9,14 @@ import app.pulse4.android.reticulum.ExtendedGarminApi
 import app.pulse4.android.reticulum.GatewayHealth
 import app.pulse4.android.reticulum.ReticulumBridge
 import app.pulse4.android.reticulum.ReticulumTransport
+import app.pulse4.android.security.CorruptedSecretException
 import app.pulse4.android.security.CorruptedSecretIssue
+import app.pulse4.android.security.CriticalSecretKind
 import app.pulse4.android.security.KeyVault
 import app.pulse4.android.security.SecretRecoveryState
 import app.pulse4.android.security.SecretSealer
 import app.pulse4.android.security.SecretStore
+import app.pulse4.android.security.TransientKeystoreException
 import app.pulse4.domain.Activity
 import app.pulse4.domain.MetricType
 import app.pulse4.domain.PLog
@@ -82,8 +85,10 @@ class ServiceLocator internal constructor(
     internal val context: Context,
     private val dbOverride: AppDatabase? = null,
     private val sealerOverride: SecretSealer? = null,
+    /** Testovací náhrada `AppDatabase.open` (SQLCipher nejde v JVM testu načíst); dostává produkční [KeyVault]. */
+    private val dbOpener: ((KeyVault) -> AppDatabase)? = null,
 ) {
-    constructor(context: Context) : this(context, null, null)
+    constructor(context: Context) : this(context, null, null, null)
 
     val vault by lazy {
         if (sealerOverride != null) {
@@ -98,7 +103,7 @@ class ServiceLocator internal constructor(
     }
     val secrets by lazy { SecretStore(context, vault) }
     val recoveryIssue: StateFlow<CorruptedSecretIssue?> get() = SecretRecoveryState.issue
-    val db: AppDatabase by lazy { dbOverride ?: AppDatabase.open(context, vault) }
+    val db: AppDatabase by lazy { dbOverride ?: dbOpener?.invoke(vault) ?: AppDatabase.open(context, vault) }
     val settings by lazy { Settings { db } }
 
     private val _gatewayHealth = MutableStateFlow(GatewayHealth())
@@ -108,18 +113,82 @@ class ServiceLocator internal constructor(
     private val migrationMutex = Mutex()
     private val migrationDone = CompletableDeferred<Unit>()
     internal var migrationRunner: (ServiceLocator) -> Unit = { ServiceMigrations.runOnce(it) }
+    private val _migrationsCompleted = MutableStateFlow(false)
+
+    /** R4-1: počet neúspěšných pokusů o odloženou migraci v tomto procesu (limit [MAX_MIGRATION_FAILURES]). */
+    private val migrationFailures = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /** R4-3 / L3: vlákno, které právě provádí migraci, nesmí v `bridge.ensureStarted()` čekat samo na sebe. */
+    private val inMigration = ThreadLocal<Boolean>()
 
     fun isMigrationsCompleted(): Boolean = migrationDone.isCompleted
 
-    /** Jednorázové asynchronní spuštění a čekání na startovní migrace mimo hlavní vlákno (R3-1, R3-13). */
+    /**
+     * R4-3: `true`, jakmile startovní migrace doběhla a nastavení je nahřáté – teprve pak smí Compose
+     * číst `db` / `settings`. Do té doby UI ukazuje lehký splash (při poškozeném klíči obnovovací obrazovku).
+     */
+    val migrationsCompleted: StateFlow<Boolean> = _migrationsCompleted.asStateFlow()
+
+    internal val migrationFailureCount: Int get() = migrationFailures.get()
+
+    /**
+     * Jednorázové asynchronní spuštění a čekání na startovní migrace mimo hlavní vlákno (R3-1, R3-13).
+     *
+     * R4-1: nikdy nevyhazuje výjimku (kromě zrušení korutiny). Poškozený nebo dočasně nedostupný klíč
+     * (`CorruptedSecretException` / `TransientKeystoreException`) se zapíše do [recoveryIssue] a UI ukáže
+     * obnovovací obrazovku místo pádu. Lazy `db` a `settings` se otevírají jen zde, na IO vlákně (R4-3).
+     */
     suspend fun awaitMigrations() {
+        try {
+            awaitMigrationsUnsafe()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: VirtualMachineError) {
+            throw e
+        } catch (e: Throwable) {
+            reportStartupFailure(e)
+        }
+    }
+
+    /**
+     * Volání pro pracovníky na pozadí (workery, služba, activity): počká na migraci a vrátí `true`,
+     * jen když je aplikace připravená (migrace doběhla a žádné kritické tajemství není poškozené).
+     */
+    suspend fun awaitStartupReady(): Boolean {
+        runCatching { awaitMigrations() }.onFailure { e ->
+            if (e is CancellationException) throw e
+            PLog.e("ServiceLocator", e) { "awaitMigrations failed unexpectedly" }
+        }
+        return isMigrationsCompleted() && recoveryIssue.value == null
+    }
+
+    private fun reportStartupFailure(e: Throwable) {
+        val secretName = when (e) {
+            is CorruptedSecretException -> e.secretName
+            is TransientKeystoreException -> e.secretName
+            else -> null
+        }
+        if (secretName == null) {
+            PLog.e("ServiceLocator", e) { "Startup migrations failed" }
+            return
+        }
+        // KeyVault / SecretStore už stav obvykle nahlásily; pro jistotu ho doplníme, ať UI vždy ukáže overlay.
+        if (recoveryIssue.value == null) {
+            val kind = if (secretName == KeyVault.DB_KEY_NAME) CriticalSecretKind.DB_KEY else CriticalSecretKind.RETICULUM_IDENTITY
+            SecretRecoveryState.report(kind, secretName, e, recoverable = e is TransientKeystoreException)
+        }
+        PLog.e("ServiceLocator", e) { "Critical secret unavailable during startup ($secretName); showing recovery" }
+    }
+
+    private suspend fun awaitMigrationsUnsafe() {
         if (migrationDone.isCompleted) {
-            if (ServiceMigrations.needsDeferredMigration(this) && ServiceMigrations.hasSelfIdentity(secrets)) {
-                withContext(Dispatchers.IO) {
-                    migrationMutex.withLock {
-                        migrationRunner(this@ServiceLocator)
-                        settings.reloadFromDb()
-                    }
+            // R4-1: s nevyřešeným poškozením klíče na DB vůbec nesaháme (otevření by znovu selhalo).
+            if (recoveryIssue.value != null) return
+            withContext(Dispatchers.IO) {
+                if (ServiceMigrations.needsDeferredMigration(this@ServiceLocator) &&
+                    ServiceMigrations.hasSelfIdentity(secrets)
+                ) {
+                    migrationMutex.withLock { runDeferredMigrationAttemptLocked() }
                 }
             }
             return
@@ -129,11 +198,24 @@ class ServiceLocator internal constructor(
                 if (!migrationDone.isCompleted) {
                     try {
                         if (vault.probeCriticalSecrets(secrets) == null) {
-                            migrationRunner(this@ServiceLocator)
+                            // R4-3: db a settings se inicializují zde (IO), nikdy poprvé z kompozice.
+                            db
+                            settings
+                            runMigrationLocked()
                             settings.warmUp()
+                            // L5: WithingsService při konstrukci čte tajemství a soubory; inicializovat ji zde (IO),
+                            // ne poprvé z kompozice obrazovky Dnes na hlavním vlákně.
+                            runCatching { withings }.onFailure { e ->
+                                PLog.w("ServiceLocator", e) { "Withings warm-up failed" }
+                            }
+                            // R4-3: instanci mostu (bez startu) vytvořit zde; Groups/Sharing pak v kompozici
+                            // čtou jen `bridge.info` a nečekají na lazy init držený IO workerem.
+                            runCatching { bridge }
                         }
                     } finally {
                         migrationDone.complete(Unit)
+                        // S poškozeným klíčem zůstává UI na obnovovací obrazovce; „hotovo“ ohlásí až runMigrationsAfterRecovery.
+                        if (recoveryIssue.value == null) _migrationsCompleted.value = true
                     }
                 }
             }
@@ -141,32 +223,82 @@ class ServiceLocator internal constructor(
         migrationDone.await()
     }
 
+    /** Spustí migraci s příznakem [inMigration]; musí se volat pod [migrationMutex]. */
+    private fun runMigrationLocked() {
+        val prev = inMigration.get()
+        inMigration.set(true)
+        try {
+            migrationRunner(this)
+        } finally {
+            if (prev == null) inMigration.remove() else inMigration.set(prev)
+        }
+    }
+
+    /**
+     * R4-10: opakovaná odložená migrace s limitem [MAX_MIGRATION_FAILURES] neúspěšných pokusů za proces;
+     * po vyčerpání se čeká na další start procesu. Musí se volat pod [migrationMutex].
+     */
+    private suspend fun runDeferredMigrationAttemptLocked() {
+        if (!ServiceMigrations.needsDeferredMigration(this)) return
+        if (migrationFailures.get() >= MAX_MIGRATION_FAILURES) return
+        if (vault.probeCriticalSecrets(secrets) != null) return
+        val failed = try {
+            runMigrationLocked()
+            settings.reloadFromDb()
+            ServiceMigrations.needsDeferredMigration(this) && ServiceMigrations.hasSelfIdentity(secrets)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            migrationFailures.incrementAndGet()
+            throw e
+        }
+        if (failed) {
+            val n = migrationFailures.incrementAndGet()
+            PLog.w("ServiceLocator") { "Deferred migration attempt $n/$MAX_MIGRATION_FAILURES did not complete" }
+        }
+    }
+
     suspend fun runMigrationsAfterRecovery() {
         withContext(Dispatchers.IO) {
             migrationMutex.withLock {
-                if (vault.probeCriticalSecrets(secrets) == null) {
-                    migrationRunner(this@ServiceLocator)
-                    settings.warmUp()
+                // Uživatel klíč obnovil: nový proces obnovy dostane opět plný počet pokusů.
+                migrationFailures.set(0)
+                try {
+                    if (vault.probeCriticalSecrets(secrets) == null) {
+                        runMigrationLocked()
+                        settings.warmUp()
+                    }
+                } finally {
+                    _migrationsCompleted.value = true
                 }
             }
         }
     }
 
     suspend fun runDeferredMigrationsIfNeeded() {
-        if (!ServiceMigrations.needsDeferredMigration(this)) return
         withContext(Dispatchers.IO) {
-            migrationMutex.withLock {
-                if (vault.probeCriticalSecrets(secrets) == null) {
-                    migrationRunner(this@ServiceLocator)
-                    settings.reloadFromDb()
-                }
-            }
+            if (!ServiceMigrations.needsDeferredMigration(this@ServiceLocator)) return@withContext
+            migrationMutex.withLock { runDeferredMigrationAttemptLocked() }
         }
+    }
+
+    /** L3: brána `bridge.ensureStarted()` – most se nikdy nespustí před dokončením migrace. */
+    internal fun awaitMigrationsBlockingForBridge() {
+        if (migrationDone.isCompleted || inMigration.get() == true) return
+        if (android.os.Looper.getMainLooper()?.isCurrentThread == true) {
+            PLog.w("ServiceLocator") { "bridge.ensureStarted() on main thread before migrations; blocking" }
+        }
+        runBlocking { awaitMigrations() }
     }
 
     suspend fun ensureBridgeStarted(): BridgeInfo {
         awaitMigrations()
         return withContext(Dispatchers.IO) { bridge.ensureStarted() }
+    }
+
+    companion object {
+        /** R4-10: maximum neúspěšných pokusů o odloženou migraci za proces; další pokus až po restartu. */
+        internal const val MAX_MIGRATION_FAILURES = 3
     }
 
     val outbox by lazy {
@@ -184,7 +316,7 @@ class ServiceLocator internal constructor(
     }
     val sentLedger by lazy { RoomSentLedger(db) }
     val bridge by lazy {
-        ReticulumBridge(context, secrets, settings).also { b ->
+        ReticulumBridge(context, secrets, settings, beforeStart = { awaitMigrationsBlockingForBridge() }).also { b ->
             gatewayHealthScope.launch {
                 b.gatewayHealth.collect { _gatewayHealth.value = it }
             }
@@ -3644,7 +3776,8 @@ class FabricatedActivityCleanupWorker(
 ) : androidx.work.CoroutineWorker(ctx, params) {
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val sl = (applicationContext as app.pulse4.android.Pulse4App).services
-        sl.awaitMigrations()
+        // R4-1: poškozený nebo zamčený klíč nesmí shodit worker; zkusí se znovu podle backoffu.
+        if (!sl.awaitStartupReady()) return@withContext Result.retry()
         val nm = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as? android.app.NotificationManager
         ensureChannel(nm)
         try {

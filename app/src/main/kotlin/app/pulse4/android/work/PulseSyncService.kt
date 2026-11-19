@@ -75,7 +75,15 @@ class PulseSyncService : Service() {
         }
 
         loopJob = scope.launch {
-            sl.awaitMigrations()
+            // R4-1: výjimka z migrace / Keystoru nesmí potichu zabít loopJob. Bez připraveného úložiště
+            // službu ukončíme a necháme práci na WorkManageru (worker vrací retry, dokud se klíč neobnoví).
+            if (!sl.awaitStartupReady()) {
+                PLog.w(TAG) { "Storage not ready (recovery pending); stopping service, WorkManager will retry" }
+                runCatching { Scheduler.schedulePeriodic(applicationContext) }
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+                return@launch
+            }
             val bgEnabled = runCatching { sl.settings.backgroundServiceEnabled }.getOrElse { e ->
                 PLog.w(TAG, e) { "Cannot read settings in PulseSyncService; stopping service" }
                 false
@@ -256,8 +264,12 @@ class PulseSyncService : Service() {
         fun syncState(context: Context, triggerSyncNow: Boolean = false) {
             val appCtx = context.applicationContext
             CoroutineScope(Dispatchers.IO).launch {
+                val services = (appCtx as Pulse4App).services
+                // R4-3: nastavení (a tím DB) se poprvé otevírá jen v awaitMigrations, ne souběžně s ní.
+                // R4-1: s poškozeným klíčem službu nespouštíme (obnova běží v UI).
+                if (!services.awaitStartupReady()) return@launch
                 val enabled = runCatching {
-                    (appCtx as Pulse4App).services.settings.backgroundServiceEnabled
+                    services.settings.backgroundServiceEnabled
                 }.getOrDefault(true)
                 val intent = Intent(appCtx, PulseSyncService::class.java).apply {
                     if (triggerSyncNow) action = ACTION_SYNC_NOW

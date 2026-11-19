@@ -867,7 +867,8 @@ fun TodayScreen(
         }
 
         val wState by sl.withings.state.collectAsState()
-        val webSession = remember(wState) { sl.withings.loadWebSession() }
+        // StrictMode (L5): loadWebSession čte a dešifruje soubor – nikdy v kompozici na hlavním vlákně.
+        val webSession = io(wState) { sl.withings.loadWebSession() }.value
         val wNeedsLogin = wState is app.pulse4.android.di.WithingsUiState.Failed ||
             (sl.settings.withingsDirectEnabled && webSession != null && !webSession.isConnected())
         var showWithingsLoginDialogOnToday by remember { mutableStateOf(false) }
@@ -927,7 +928,7 @@ fun TodayScreen(
             WidgetOrderReorderDialog(
                 initialOrder = currentWidgetOrder,
                 onSave = { newOrder ->
-                    sl.settings.todayWidgetOrder = newOrder
+                    scope.launch(Dispatchers.IO) { sl.settings.todayWidgetOrder = newOrder }
                     currentWidgetOrder = newOrder
                 },
                 onDismiss = { showReorderDialog = false }

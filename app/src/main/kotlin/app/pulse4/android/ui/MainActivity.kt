@@ -116,20 +116,8 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         val sl = (application as Pulse4App).services
         CoroutineScope(Dispatchers.IO).launch {
-            sl.awaitMigrations()
-            if (sl.recoveryIssue.value != null) {
-                return@launch
-            }
-            runCatching {
-                val u = sl.settings.unitSystem
-                val _mp = sl.settings.mapProvider
-                val z = runCatching { ZoneId.of(sl.settings.zoneId) }.getOrDefault(ZoneId.systemDefault())
-                val updatedFmt = Fmt(z, units = u)
-                activeFmt = updatedFmt
-                activeFmtFlow.value = updatedFmt
-            }.onFailure { e ->
-                PLog.e("MainActivity", e) { "Startup warmup failed" }
-            }
+            // R4-1: start (i po otočení obrazovky) nikdy nespadne; poškozený klíč vede na SecretRecoveryOverlay.
+            runActivityStartup(sl)
         }
         setContent {
             Pulse4Theme {
@@ -215,6 +203,37 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+/**
+ * Startovní práce activity mimo hlavní vlákno (R4-1): počká na migraci a nahřeje formátování.
+ * Nikdy nevyhazuje výjimku; při poškozeném / nedostupném klíči jen nechá [ServiceLocator.recoveryIssue] nastavené.
+ */
+internal suspend fun runActivityStartup(sl: app.pulse4.android.di.ServiceLocator) {
+    if (!sl.awaitStartupReady()) return
+    runCatching {
+        val u = sl.settings.unitSystem
+        val z = runCatching { ZoneId.of(sl.settings.zoneId) }.getOrDefault(ZoneId.systemDefault())
+        val updatedFmt = Fmt(z, units = u)
+        activeFmt = updatedFmt
+        activeFmtFlow.value = updatedFmt
+    }.onFailure { e ->
+        if (e is kotlinx.coroutines.CancellationException) throw e
+        PLog.e("MainActivity", e) { "Startup warmup failed" }
+    }
+}
+
+/** Co kořen UI smí ukázat (R4-1, R4-3). */
+internal enum class RootContent { RECOVERY, SPLASH, MAIN }
+
+/**
+ * Obnovovací obrazovka má přednost; dokud nedoběhne startovní migrace, ukazuje se jen lehký splash,
+ * který nesahá na `sl.db` ani `sl.settings` (jinak by hlavní vlákno čekalo na lazy init v IO workeru).
+ */
+internal fun resolveRootContent(hasRecoveryIssue: Boolean, migrationsCompleted: Boolean): RootContent = when {
+    hasRecoveryIssue -> RootContent.RECOVERY
+    !migrationsCompleted -> RootContent.SPLASH
+    else -> RootContent.MAIN
+}
+
 private val ALLOWED_STATIC_ROUTES = setOf(
     "today", "metrics", "activities", "training", "groups", "sharing_overview", "settings"
 )
@@ -268,14 +287,35 @@ fun Pulse4Theme(content: @Composable () -> Unit) {
     }
 }
 
+/** Lehký splash během startovní migrace: žádný přístup k DB, nastavení ani Keystoru (R4-3). */
+@Composable
+private fun StartupSplash() {
+    Column(
+        modifier = Modifier.fillMaxSize().padding(24.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text("Pulse4", fontSize = 32.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+        Spacer(Modifier.height(12.dp))
+        androidx.compose.material3.CircularProgressIndicator(modifier = Modifier.size(28.dp))
+        Spacer(Modifier.height(12.dp))
+        Text("Připravuji data…", color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
 private data class Dest(val route: String, val label: String, val icon: androidx.compose.ui.graphics.vector.ImageVector)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun Root(sl: app.pulse4.android.di.ServiceLocator, onCompletePlayUpdate: () -> Unit = {}) {
     val recoveryIssue by sl.recoveryIssue.collectAsState()
+    val migrationsCompleted by sl.migrationsCompleted.collectAsState()
     val recoveryScope = rememberCoroutineScope()
     val issue = recoveryIssue
+    if (resolveRootContent(issue != null, migrationsCompleted) == RootContent.SPLASH) {
+        StartupSplash()
+        return
+    }
     if (issue != null) {
         SecretRecoveryOverlay(
             issue = issue,

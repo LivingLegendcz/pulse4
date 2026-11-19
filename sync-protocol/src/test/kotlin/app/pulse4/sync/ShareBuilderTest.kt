@@ -132,4 +132,18 @@ class ShareBuilderTest {
         assertTrue(payload2.contains("79.5"))
         assertFalse(payload2.contains("81.0"))
     }
+
+    @Test fun `N-6 merged grants carry all contributing grantIds and omit non-contributing grants`() {
+        val sb = ShareBuilder("josef", MessageBuilder("josef") { java.util.UUID.randomUUID().toString() })
+        val g1 = grant(setOf(Field.SLEEP_DURATION), setOf("bob")).copy(id = "g1")
+        val g2 = grant(setOf(Field.WEIGHT), setOf("bob")).copy(id = "g2")
+        val g3HrvNoData = grant(setOf(Field.SLEEP_STAGES), setOf("bob")).copy(id = "g3-unused")
+
+        // Day 2026-10-19 has SLEEP_DURATION only -> only g1 contributes (not g2 or g3-unused)
+        // Day 2026-10-20 has both SLEEP_DURATION and WEIGHT -> both g1 and g2 contribute (not g3-unused)
+        val plan = sb.plan(listOf(g1, g2, g3HrvNoData), emptyMap(), listOf(LocalDate.of(2026, 10, 19), d), observations, ledger, 100)
+        val byKey = plan.associateBy { it.objectKey }
+        assertEquals(listOf("g1"), byKey.getValue("daily/2026-10-19").grantIds)
+        assertEquals(listOf("g1", "g2"), byKey.getValue("daily/2026-10-20").grantIds)
+    }
 }

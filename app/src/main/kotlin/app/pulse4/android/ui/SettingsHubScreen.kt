@@ -849,8 +849,9 @@ private fun GlobalSharingSection(
     val resolvedSources = remember(selectedSourceChoice, directGrants, sourceModified) {
         GrantEditor.resolveSources(selectedSourceChoice, directGrants.firstOrNull()?.sources, sourceModified)
     }
-    val currentDiff = remember(directGrants, enabledCategories, selectedRecipients, extraActivityFields, resolvedSources) {
-        GrantEditor.computeGlobalDiff(directGrants, enabledCategories, selectedRecipients, extraActivityFields, resolvedSources)
+    val today = remember(sl.settings.zoneId) { LocalDate.now(ZoneId.of(sl.settings.zoneId)) }
+    val currentDiff = remember(directGrants, enabledCategories, selectedRecipients, extraActivityFields, resolvedSources, today) {
+        GrantEditor.computeGlobalDiff(directGrants, enabledCategories, selectedRecipients, extraActivityFields, resolvedSources, today = today)
     }
     var showConfirmSaveDialog by remember { mutableStateOf(false) }
     var pendingRevokeGrant by remember { mutableStateOf<ShareGrant?>(null) }
@@ -1094,7 +1095,10 @@ private fun GlobalSharingSection(
 
                 Spacer(Modifier.height(10.dp))
                 Button(
-                    enabled = contacts.isNotEmpty() && selectedRecipients.isNotEmpty() && !incompatibleDirectGrants && currentDiff.hasChanges,
+                    enabled = (contacts.isNotEmpty() || directGrants.isNotEmpty()) &&
+                        (selectedRecipients.isNotEmpty() || directGrants.isNotEmpty()) &&
+                        !incompatibleDirectGrants &&
+                        currentDiff.hasChanges,
                     onClick = { showConfirmSaveDialog = true },
                     modifier = Modifier.fillMaxWidth()
                 ) {
@@ -1103,6 +1107,10 @@ private fun GlobalSharingSection(
 
                 if (showConfirmSaveDialog) {
                     val diff = currentDiff
+                    val isMinor = sl.settings.ownAgeProfile == app.pulse4.sharing.AgeProfile.MINOR.name
+                    val isRevokingAll = selectedRecipients.isEmpty() || enabledCategories.isEmpty()
+                    val needsGuardianConsent = isMinor && !isRevokingAll && diff.addedByRecipient.isNotEmpty()
+                    var guardianChecked by remember(showConfirmSaveDialog) { mutableStateOf(false) }
                     fun contactName(id: String) = contacts.firstOrNull { it.identity == id }?.displayName ?: id.take(10)
                     fun categoryLabel(cat: Category) = sectionDefs.firstOrNull { it.first == cat }?.second?.first ?: cat.name
                     AlertDialog(
@@ -1110,7 +1118,12 @@ private fun GlobalSharingSection(
                         containerColor = Color(0xFF0A101B),
                         titleContentColor = Color.White,
                         textContentColor = Color(0xFFCBD5E1),
-                        title = { Text("Potvrdit změny přímého sdílení", fontWeight = FontWeight.ExtraBold) },
+                        title = {
+                            Text(
+                                if (isRevokingAll) "Odvolat přímé globální sdílení?" else "Potvrdit změny přímého sdílení",
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                        },
                         text = {
                             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                 diff.addedByRecipient.forEach { (recipientId, cats) ->
@@ -1141,53 +1154,85 @@ private fun GlobalSharingSection(
                                         color = Color(0xFF38BDF8)
                                     )
                                 }
-                                Text(
-                                    "Sdílení v kruzích a rodinných vazbách zůstane beze změny. Při zapnutí se odešle i posledních 7 dní historie.",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = Color(0xFF94A3B8)
-                                )
+                                if (diff.scopeChanged) {
+                                    Text(
+                                        "Rozsah historie: ${diff.oldScope?.from ?: "?"} → ${diff.newScope?.from ?: "?"}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = Color(0xFF38BDF8)
+                                    )
+                                }
+                                if (isRevokingAll) {
+                                    Text(
+                                        "Všechna přímá globální oprávnění budou odvolána; data, která nesdílí jiný grant, budou u příjemců smazána.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = Color(0xFFF59E0B)
+                                    )
+                                } else {
+                                    Text(
+                                        "Sdílení v kruzích a rodinných vazbách zůstane beze změny. Zachovává se původní rozsah historie (u nového grantu posledních 7 dní).",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color(0xFF94A3B8)
+                                    )
+                                }
+                                if (needsGuardianConsent) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Checkbox(checked = guardianChecked, onCheckedChange = { guardianChecked = it })
+                                        Spacer(Modifier.width(6.dp))
+                                        Text(
+                                            "Potvrzuji souhlas zákonného zástupce s rozšířením tohoto sdílení.",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = Color(0xFFFDE68A)
+                                        )
+                                    }
+                                }
                             }
                         },
                         confirmButton = {
-                            Button(onClick = {
-                                showConfirmSaveDialog = false
-                                if (incompatibleDirectGrants || !diff.hasChanges) return@Button
-                                scope.launch {
-                                    val resultMsg = withContext(Dispatchers.IO) {
-                                        val now = System.currentTimeMillis()
-                                        val self = sl.bridge.ensureStarted().deliveryHash
-                                        val today = LocalDate.now(ZoneId.of(sl.settings.zoneId))
-                                        val newGrant = GrantEditor.buildGlobalGrant(
-                                            id = UUID.randomUUID().toString(),
-                                            ownerId = self,
-                                            existingDirectGrants = directGrants,
-                                            selectedCategories = enabledCategories,
-                                            selectedRecipients = selectedRecipients,
-                                            extraActivityFields = extraActivityFields,
-                                            today = today,
-                                            nowMs = now,
-                                            sources = resolvedSources,
-                                        )
-                                        directGrants.forEach { old -> sl.shareService.revoke(old.id, now) }
-                                        if (newGrant != null) {
-                                            sl.shareService.saveGrantWithPolicy(newGrant, null).fold(
-                                                onSuccess = {
-                                                    sl.shareService.planAndEnqueue(now)
+                            Button(
+                                enabled = !needsGuardianConsent || guardianChecked,
+                                onClick = {
+                                    showConfirmSaveDialog = false
+                                    if (incompatibleDirectGrants || !diff.hasChanges) return@Button
+                                    val consentAtMs = if (needsGuardianConsent && guardianChecked) System.currentTimeMillis() else null
+                                    scope.launch {
+                                        val resultMsg = withContext(Dispatchers.IO) {
+                                            val now = System.currentTimeMillis()
+                                            val self = sl.bridge.ensureStarted().deliveryHash
+                                            val saveToday = LocalDate.now(ZoneId.of(sl.settings.zoneId))
+                                            val newGrant = GrantEditor.buildGlobalGrant(
+                                                id = UUID.randomUUID().toString(),
+                                                ownerId = self,
+                                                existingDirectGrants = directGrants,
+                                                selectedCategories = enabledCategories,
+                                                selectedRecipients = selectedRecipients,
+                                                extraActivityFields = extraActivityFields,
+                                                today = saveToday,
+                                                nowMs = now,
+                                                sources = resolvedSources,
+                                            )
+                                            sl.shareService.saveGlobalDirectProfile(
+                                                newGrant = newGrant,
+                                                existingDirectGrants = directGrants,
+                                                nowMs = now,
+                                                guardianCoConsentAtMs = consentAtMs,
+                                            ).fold(
+                                                onSuccess = { saved ->
                                                     isDirty = false
-                                                    "Globální sdílení uloženo (${enabledCategories.size} sekcí, ${newGrant.fields.size} polí) a zařazeno k odeslání."
+                                                    if (saved != null) {
+                                                        "Globální sdílení uloženo (${enabledCategories.size} sekcí, ${saved.fields.size} polí) a zařazeno k odeslání."
+                                                    } else {
+                                                        "Přímé globální sdílení bylo vypnuto. Kruhy zůstaly beze změny."
+                                                    }
                                                 },
                                                 onFailure = { err ->
                                                     err.message ?: "Uložení globálního sdílení selhalo."
                                                 }
                                             )
-                                        } else {
-                                            isDirty = false
-                                            "Přímé globální sdílení bylo vypnuto. Kruhy zůstaly beze změny."
                                         }
+                                        notice = resultMsg
                                     }
-                                    notice = resultMsg
                                 }
-                            }) { Text("Potvrdit a uložit", fontWeight = FontWeight.Bold) }
+                            ) { Text(if (isRevokingAll) "Potvrdit odvolání" else "Potvrdit a uložit", fontWeight = FontWeight.Bold) }
                         },
                         dismissButton = {
                             TextButton(onClick = { showConfirmSaveDialog = false }) { Text("Zrušit", color = Color(0xFF94A3B8)) }
@@ -1255,7 +1300,7 @@ private fun GlobalSharingSection(
                 title = { Text("Odvolat oprávnění?", fontWeight = FontWeight.ExtraBold) },
                 text = {
                     Text(
-                        "Sdílení pro ${g.recipients.size} příjemců (${g.fields.size} polí) se okamžitě zastaví a příjemcům odejde požadavek na smazání.",
+                        "Sdílení pro ${g.recipients.size} příjemců (${g.fields.size} polí) se okamžitě zastaví a data, která nesdílí jiný grant, budou u příjemce smazána.",
                         style = MaterialTheme.typography.bodySmall
                     )
                 },
@@ -1600,7 +1645,7 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                         OutlinedTextField(
                             value = mfa,
                             onValueChange = { mfa = it },
-                            label = { Text("Ověřovací kód z e-mailu / SMS (2FA)") },
+                            label = { Text("Ověřovací kód z e-mailu / SMS / ověřovací aplikace (2FA)") },
                             placeholder = { Text("Zadejte kód, pokud jej Garmin vyžádal") },
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                             singleLine = true,
@@ -1626,7 +1671,7 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                                                 }
                                                 LoginResult.NeedsMfa -> {
                                                     needMfa = true
-                                                    "Zadejte ověřovací kód z e-mailu / SMS do pole výše a klikněte na Potvrdit kód."
+                                                    "Zadejte ověřovací kód z e-mailu, SMS nebo ověřovací aplikace (TOTP) do pole výše a klikněte na Potvrdit kód."
                                                 }
                                             }
                                         } catch (e: ProviderError.MfaRequired) {
@@ -2021,6 +2066,10 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                                     latestBody?.get(app.pulse4.domain.MetricType.BMR)?.let { add("BMR ${"%.0f".format(java.util.Locale.US, it.value)} kcal") }
                                     latestBody?.get(app.pulse4.domain.MetricType.METABOLIC_AGE)?.let { add("Metab. věk ${"%.0f".format(java.util.Locale.US, it.value)} r") }
                                     latestBody?.get(app.pulse4.domain.MetricType.ECG)?.let { add("ECG ${"%.0f".format(java.util.Locale.US, it.value)} ${if (it.value >= 200.0) "ms" else "bpm"}") }
+                                    latestBody?.get(app.pulse4.domain.MetricType.ECG_HR)?.let { add("ECG tep ${"%.0f".format(java.util.Locale.US, it.value)} bpm") }
+                                    latestBody?.get(app.pulse4.domain.MetricType.ECG_QTC)?.let { add("QTc ${"%.0f".format(java.util.Locale.US, it.value)} ms") }
+                                    latestBody?.get(app.pulse4.domain.MetricType.ECG_QRS)?.let { add("QRS ${"%.0f".format(java.util.Locale.US, it.value)} ms") }
+                                    latestBody?.get(app.pulse4.domain.MetricType.ECG_AFIB)?.let { add("AFib ${if (it.value >= 1.0) "detek." else "ne"}") }
                                 }
                                 if (summaryParts.isNotEmpty()) {
                                     Text(
@@ -2330,8 +2379,14 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                                 )
                             }
                             Switch(
-                                checked = wCfg?.acceptFromParent ?: true,
-                                onCheckedChange = { on -> scope.launch(Dispatchers.IO) { sl.settings.acceptWeightFromParent = on; tick++ } }
+                                checked = wCfg?.acceptFromParent ?: false,
+                                onCheckedChange = { on ->
+                                    scope.launch(Dispatchers.IO) {
+                                        sl.settings.acceptWeightFromParent = on
+                                        if (on) sl.shareService.sendFamilyWeightResyncRequests()
+                                        tick++
+                                    }
+                                }
                             )
                         }
                     }
@@ -2757,7 +2812,11 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                         app.pulse4.domain.MetricType.PULSE_WAVE_VELOCITY to "Rychlost pulzní vlny (PWV)",
                         app.pulse4.domain.MetricType.BMR to "Bazální metabolismus (BMR)",
                         app.pulse4.domain.MetricType.METABOLIC_AGE to "Metabolický věk (METABOLIC_AGE)",
-                        app.pulse4.domain.MetricType.ECG to "Elektrokardiogram (ECG)"
+                        app.pulse4.domain.MetricType.ECG to "Elektrokardiogram (ECG)",
+                        app.pulse4.domain.MetricType.ECG_HR to "ECG tepová frekvence (ECG_HR)",
+                        app.pulse4.domain.MetricType.ECG_QTC to "ECG interval QTc (ECG_QTC)",
+                        app.pulse4.domain.MetricType.ECG_QRS to "ECG komplex QRS (ECG_QRS)",
+                        app.pulse4.domain.MetricType.ECG_AFIB to "ECG fibrilace síní (ECG_AFIB)"
                     )
                     withingsMetricLabels.forEach { (mType, label) ->
                         val obs = latestBody?.get(mType)
@@ -2776,6 +2835,10 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                                 app.pulse4.domain.MetricType.PULSE_WAVE_VELOCITY -> "${"%.2f".format(java.util.Locale.US, v)} m/s"
                                 app.pulse4.domain.MetricType.BMR -> "${"%.0f".format(java.util.Locale.US, v)} kcal"
                                 app.pulse4.domain.MetricType.ECG -> "${"%.0f".format(java.util.Locale.US, v)} ${if (v >= 200.0) "ms" else "bpm"}"
+                                app.pulse4.domain.MetricType.ECG_HR -> "${"%.0f".format(java.util.Locale.US, v)} bpm"
+                                app.pulse4.domain.MetricType.ECG_QTC,
+                                app.pulse4.domain.MetricType.ECG_QRS -> "${"%.0f".format(java.util.Locale.US, v)} ms"
+                                app.pulse4.domain.MetricType.ECG_AFIB -> if (v >= 1.0) "detekováno" else "normální"
                                 else -> "%.1f".format(java.util.Locale.US, v)
                             }
                             "$formatted (${it.localDate ?: fmt.time(it.startUtcMs)})"

@@ -48,11 +48,21 @@ class RoomOutboxStore(private val db: AppDatabase) : OutboxStore {
     override fun find(eventId: String) = db.outbox().find(eventId)?.toItem()
     override fun all() = db.outbox().all().map { it.toItem() }
 
-    private fun OutboxItem.toRow() = OutboxRow(eventId, recipient, kind, objectType, objectId, objectVersion, grantId, wire,
-        createdAtMs, state.name, attempts, nextAttemptAtMs, lastError)
+    private fun OutboxItem.toRow(): OutboxRow {
+        val serializedGrantIds = effectiveGrantRefs.takeIf { it.isNotEmpty() }?.joinToString(",")
+        return OutboxRow(
+            eventId, recipient, kind, objectType, objectId, objectVersion, serializedGrantIds, wire,
+            createdAtMs, state.name, attempts, nextAttemptAtMs, lastError,
+        )
+    }
 
-    private fun OutboxRow.toItem() = OutboxItem(eventId, recipient, kind, objectType, objectId, objectVersion, grantId, wire,
-        createdAtMs, DeliveryState.valueOf(state), attempts, nextAttemptAtMs, lastError)
+    private fun OutboxRow.toItem(): OutboxItem {
+        val refs = grantId?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() }.orEmpty()
+        return OutboxItem(
+            eventId, recipient, kind, objectType, objectId, objectVersion, refs.firstOrNull(), wire,
+            createdAtMs, DeliveryState.valueOf(state), attempts, nextAttemptAtMs, lastError, refs,
+        )
+    }
 }
 
 /** Klíč stavu = `prefix + oblast`, aby se Garmin a Withings/Health Connect nepřepisovaly (prázdný prefix = Garmin). */

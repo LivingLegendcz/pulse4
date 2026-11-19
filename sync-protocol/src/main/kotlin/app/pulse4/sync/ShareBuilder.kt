@@ -20,7 +20,13 @@ interface SentLedger {
     fun last(recipient: String, objectKey: String): SentRecord?
 }
 
-data class PlannedSend(val message: WireMessage, val grantId: String, val objectKey: String, val contentHash: String)
+data class PlannedSend(
+    val message: WireMessage,
+    val grantId: String,
+    val objectKey: String,
+    val contentHash: String,
+    val grantIds: List<String> = listOf(grantId),
+)
 
 /**
  * Plánovač projekcí: pro každý aktivní grant a skutečného příjemce vyrobí omezenou projekci a zařadí ji,
@@ -48,7 +54,11 @@ class ShareBuilder(private val selfId: String, private val builder: MessageBuild
                     .sortedBy { it.id }
                 if (matching.isEmpty()) continue
                 val merged = mergeGrantsForRecipient(matching)
-                planDayForRecipient(merged, r, day, ledger, nowMs, out)
+                val contributingIds = matching
+                    .filter { g -> Projector.project(g, day, nowMs) != null }
+                    .map { it.id }
+                    .ifEmpty { listOf(merged.id) }
+                planDayForRecipient(merged, contributingIds, r, day, ledger, nowMs, out)
             }
         }
         return out
@@ -76,12 +86,16 @@ class ShareBuilder(private val selfId: String, private val builder: MessageBuild
                     .sortedBy { it.id }
                 if (matching.isEmpty()) continue
                 val primaryGrant = matching.first()
+                val contributingIds = matching.filter { g ->
+                    val gDay = OwnerDayAssembler.assembleForGrant(date, observations, g)
+                    Projector.project(g, gDay, nowMs) != null
+                }.map { it.id }.ifEmpty { listOf(primaryGrant.id) }
                 val fieldsBySources = groupFieldsByEffectiveSources(matching)
                 if (fieldsBySources.size == 1) {
                     val (sourcesGroup, fieldsGroup) = fieldsBySources.entries.single()
                     val merged = primaryGrant.copy(fields = fieldsGroup, sources = sourcesGroup)
                     val day = OwnerDayAssembler.assembleForGrant(date, observations, merged)
-                    planDayForRecipient(merged, r, day, ledger, nowMs, out)
+                    planDayForRecipient(merged, contributingIds, r, day, ledger, nowMs, out)
                 } else {
                     val combinedFields = LinkedHashMap<Field, JsonElement>()
                     var maxMeasuredAt: Long? = null
@@ -108,7 +122,7 @@ class ShareBuilder(private val selfId: String, private val builder: MessageBuild
                         measuredAtUtcMs = maxMeasuredAt,
                         producedAtMs = nowMs,
                     )
-                    enqueueProjectionIfChanged(projection, primaryGrant.id, r, date, ledger, nowMs, out)
+                    enqueueProjectionIfChanged(projection, primaryGrant.id, contributingIds, r, date, ledger, nowMs, out)
                 }
             }
         }
@@ -145,6 +159,7 @@ class ShareBuilder(private val selfId: String, private val builder: MessageBuild
 
     private fun planDayForRecipient(
         g: ShareGrant,
+        grantIds: List<String>,
         recipient: String,
         day: OwnerDay,
         ledger: SentLedger,
@@ -152,12 +167,13 @@ class ShareBuilder(private val selfId: String, private val builder: MessageBuild
         out: MutableList<PlannedSend>,
     ) {
         val projection = Projector.project(g, day, nowMs) ?: return
-        enqueueProjectionIfChanged(projection, g.id, recipient, day.date, ledger, nowMs, out)
+        enqueueProjectionIfChanged(projection, g.id, grantIds, recipient, day.date, ledger, nowMs, out)
     }
 
     private fun enqueueProjectionIfChanged(
         projection: SharedProjection,
         grantId: String,
+        grantIds: List<String>,
         recipient: String,
         date: LocalDate,
         ledger: SentLedger,
@@ -175,7 +191,7 @@ class ShareBuilder(private val selfId: String, private val builder: MessageBuild
                 recipient = recipient, kind = Kinds.PROJECTION_UPSERT, objectType = "daily", objectId = date.toString(),
                 objectVersion = (last?.version ?: 0) + 1, payload = payload, nowMs = nowMs, grantRef = grantId,
             ),
-            grantId, key, hash,
+            grantId, key, hash, grantIds,
         )
     }
 }

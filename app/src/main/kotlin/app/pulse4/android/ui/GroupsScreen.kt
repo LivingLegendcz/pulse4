@@ -2000,7 +2000,7 @@ private fun GroupBranchMembersAndSharingSection(
                         )
                     }
                     Text(
-                        "„Všichni přátelé“ je souhrnný pohled na všechny spárované kontakty. Přímé sdílení bez kruhu nastavíte v globálním profilu sdílení nebo v Přehledu sdílení a oprávnění.",
+                        "„Všichni přátelé“ je souhrnný pohled na všechny spárované kontakty. Jednotlivé přímé sdílení upravíte v Přehledu sdílení a oprávnění; společný profil nastavíte v Nastavení → Globální sdílení.",
                         style = MaterialTheme.typography.bodySmall,
                         color = Color(0xFF94A3B8)
                     )
@@ -2008,7 +2008,7 @@ private fun GroupBranchMembersAndSharingSection(
                         onClick = onOpenSharingOverview,
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text("Otevřít přehled a globální profil sdílení")
+                        Text("Otevřít Přehled sdílení a oprávnění")
                     }
                 }
             }
@@ -2171,7 +2171,7 @@ private fun GroupBranchMembersAndSharingSection(
                         title = { Text("Odvolat sdílení: $catTitle?", fontWeight = FontWeight.ExtraBold) },
                         text = {
                             Text(
-                                "Budoucí synchronizace této sekce pro kruh se okamžitě zastaví a příjemcům odejde požadavek na smazání. Již doručené kopie v cizích zařízeních nelze technicky vynutit zpět.",
+                                "Budoucí synchronizace této sekce pro kruh se okamžitě zastaví a data, která nesdílí jiný grant, budou u příjemce smazána. Již doručené kopie v cizích zařízeních nelze technicky vynutit zpět.",
                                 style = MaterialTheme.typography.bodySmall
                             )
                         },

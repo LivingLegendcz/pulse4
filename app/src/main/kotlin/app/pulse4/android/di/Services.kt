@@ -65,7 +65,16 @@ class ServiceLocator(internal val context: Context) {
     val db: AppDatabase by lazy { AppDatabase.open(context, vault) }
     val settings by lazy { Settings(db) }
 
-    val outbox by lazy { OutboxManager(RoomOutboxStore(db)) }
+    val outbox by lazy {
+        OutboxManager(
+            store = RoomOutboxStore(db),
+            onPermissionDenied = { recipient, objectKey ->
+                db.inbox().sent(recipient, objectKey)?.let { row ->
+                    db.inbox().putSent(row.copy(contentHash = ""))
+                }
+            },
+        )
+    }
     val sentLedger by lazy { RoomSentLedger(db) }
     val bridge by lazy { ReticulumBridge(context, secrets, settings) }
     val planService by lazy { PlanService(RoomPlanStore(db)) }
@@ -73,92 +82,7 @@ class ServiceLocator(internal val context: Context) {
     val transport by lazy {
         ServiceMigrations.runOnce(this)
         ReticulumTransport(bridge, settings, db, outbox) {
-            planHandlers.handlers() + mapOf(
-                WithingsService.FAMILY_WEIGHT_PUSH_KIND to KindHandler { env, payload, _, nowMs ->
-                    val isVerifiedParent = db.familyLinks().allNow().any { row ->
-                        row.status == FamilyLinkStatus.VERIFIED.name &&
-                            row.parentId == env.author &&
-                            row.childId == env.recipient
-                    }
-                    if (!isVerifiedParent) {
-                        return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
-                    }
-                    // Migrace výchozí hodnoty pro existující ověřené dětské účty (RE-5).
-                    if (settings.getRaw("acceptWeightFromParent") == null) {
-                        settings.acceptWeightFromParent = true
-                    }
-                    if (!settings.acceptWeightFromParent) {
-                        return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
-                    }
-                    val obs = runCatching {
-                        Wire.json.decodeFromString(app.pulse4.domain.MetricObservation.serializer(), payload)
-                    }.getOrNull() ?: return@KindHandler HandlerResult.Rejected(RejectReason.INVALID_PAYLOAD)
-                    if (!isValidChildBodyComposition(obs.type, obs.value)) {
-                        return@KindHandler HandlerResult.Rejected(RejectReason.INVALID_PAYLOAD)
-                    }
-                    val idPrefix = if (obs.type == MetricType.WEIGHT) "parent-weight" else "parent-${obs.type.name.lowercase()}"
-                    val savedObs = obs.copy(
-                        id = "$idPrefix:${env.author.take(16)}:${obs.startUtcMs}",
-                        provider = Provider.WITHINGS_API,
-                        accountId = "withings-family:${env.author.take(8)}",
-                        quality = Quality.OK,
-                        deleted = false
-                    )
-                    db.observations().upsert(listOf(savedObs.toRow()))
-                    val areaKey = "withings.${obs.type.name}"
-                    val prevW = db.areaStates().get(areaKey)
-                    db.areaStates().put(AreaStateRow(areaKey, prevW?.cursorMs, nowMs, nowMs, null, null))
-                    HandlerResult.Applied
-                },
-                Kinds.FAMILY_LINK_REQUEST to KindHandler { env, payload, _, nowMs ->
-                    val link = runCatching {
-                        Wire.json.decodeFromString(FamilyLink.serializer(), payload)
-                    }.getOrNull() ?: return@KindHandler HandlerResult.Rejected(RejectReason.INVALID_PAYLOAD)
-                    if (link.childId != env.recipient || link.parentId != env.author) {
-                        return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
-                    }
-                    val existing = db.familyLinks().get(link.id)
-                    if (existing != null && link.version <= existing.version) {
-                        return@KindHandler HandlerResult.Stale
-                    }
-                    val sanitized = link.copy(status = FamilyLinkStatus.PENDING, verifiedAtMs = null)
-                    val sanitizedJson = Wire.json.encodeToString(FamilyLink.serializer(), sanitized)
-                    db.familyLinks().upsert(FamilyLinkRow(sanitized.id, sanitized.parentId, sanitized.childId, FamilyLinkStatus.PENDING.name, sanitized.version, sanitizedJson))
-                    db.pendingRequests().upsert(
-                        PendingRequestRow(
-                            id = sanitized.id,
-                            kind = "FAMILY_LINK_REQUEST",
-                            fromId = sanitized.parentId,
-                            toId = sanitized.childId,
-                            status = "PENDING",
-                            createdAtMs = nowMs,
-                            json = sanitizedJson,
-                        )
-                    )
-                    HandlerResult.Applied
-                },
-                Kinds.FAMILY_LINK_RESPONSE to KindHandler { env, payload, _, _ ->
-                    val link = runCatching {
-                        Wire.json.decodeFromString(FamilyLink.serializer(), payload)
-                    }.getOrNull() ?: return@KindHandler HandlerResult.Rejected(RejectReason.INVALID_PAYLOAD)
-                    if (link.parentId != env.recipient || link.childId != env.author) {
-                        return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
-                    }
-                    if (link.status != FamilyLinkStatus.VERIFIED && link.status != FamilyLinkStatus.REJECTED) {
-                        return@KindHandler HandlerResult.Rejected(RejectReason.INVALID_PAYLOAD)
-                    }
-                    val existing = db.familyLinks().get(link.id)
-                        ?: return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
-                    if (existing.parentId != env.recipient || existing.childId != env.author) {
-                        return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
-                    }
-                    if (link.version <= existing.version) {
-                        return@KindHandler HandlerResult.Stale
-                    }
-                    val sanitizedJson = Wire.json.encodeToString(FamilyLink.serializer(), link)
-                    db.familyLinks().upsert(FamilyLinkRow(link.id, link.parentId, link.childId, link.status.name, link.version, sanitizedJson))
-                    HandlerResult.Applied
-                },
+            planHandlers.handlers() + buildFamilyAndWeightHandlers(RoomPulseDataAccess(db), RealShareSettingsAccess(settings)) + mapOf(
                 Kinds.ADMIN_HANDOVER_REQUEST to KindHandler { env, payload, store, nowMs ->
                     val g = runCatching {
                         Wire.json.decodeFromString(Group.serializer(), payload)
@@ -1210,15 +1134,205 @@ sealed interface FitImportResult {
     data class Rejected(val reason: String) : FitImportResult
 }
 
+internal interface PulseDataAccess {
+    fun observations(): ObservationDao
+    fun activities(): ActivityDao
+    fun areaStates(): AreaStateDao
+    fun grants(): GrantDao
+    fun outbox(): OutboxDao
+    fun inbox(): InboxDao
+    fun familyLinks(): FamilyLinkDao
+    fun pendingRequests(): PendingRequestDao
+}
+
+internal class RoomPulseDataAccess(private val db: AppDatabase) : PulseDataAccess {
+    override fun observations() = db.observations()
+    override fun activities() = db.activities()
+    override fun areaStates() = db.areaStates()
+    override fun grants() = db.grants()
+    override fun outbox() = db.outbox()
+    override fun inbox() = db.inbox()
+    override fun familyLinks() = db.familyLinks()
+    override fun pendingRequests() = db.pendingRequests()
+}
+
+internal interface ShareSettingsAccess {
+    val zoneId: String
+    val privacyZones: List<app.pulse4.sharing.PrivacyZone>
+    val ownAgeProfile: String
+    val acceptWeightFromParent: Boolean
+    val childRecipientIdentity: String
+    fun getRaw(key: String): String?
+    fun put(key: String, value: String)
+}
+
+internal class RealShareSettingsAccess(private val s: Settings) : ShareSettingsAccess {
+    override val zoneId: String get() = s.zoneId
+    override val privacyZones: List<app.pulse4.sharing.PrivacyZone> get() = s.privacyZones
+    override val ownAgeProfile: String get() = s.ownAgeProfile
+    override val acceptWeightFromParent: Boolean get() = s.acceptWeightFromParent
+    override val childRecipientIdentity: String get() = s.childRecipientIdentity
+    override fun getRaw(key: String) = s.getRaw(key)
+    override fun put(key: String, value: String) = s.put(key, value)
+}
+
+internal fun buildFamilyAndWeightHandlers(
+    data: PulseDataAccess,
+    settings: ShareSettingsAccess,
+): Map<String, KindHandler> = mapOf(
+    WithingsService.FAMILY_WEIGHT_PUSH_KIND to KindHandler { env, payload, _, nowMs ->
+        val isVerifiedParent = data.familyLinks().allNow().any { row ->
+            row.status == FamilyLinkStatus.VERIFIED.name &&
+                row.parentId == env.author &&
+                row.childId == env.recipient
+        }
+        if (!isVerifiedParent) {
+            return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
+        }
+        if (!settings.acceptWeightFromParent) {
+            return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
+        }
+        val obs = runCatching {
+            Wire.json.decodeFromString(app.pulse4.domain.MetricObservation.serializer(), payload)
+        }.getOrNull() ?: return@KindHandler HandlerResult.Rejected(RejectReason.INVALID_PAYLOAD)
+        if (obs.type !in WithingsService.CHILD_ACCEPTED_TYPES || !isValidChildBodyComposition(obs.type, obs.value)) {
+            return@KindHandler HandlerResult.Rejected(RejectReason.INVALID_PAYLOAD)
+        }
+        val idPrefix = if (obs.type == MetricType.WEIGHT) "parent-weight" else "parent-${obs.type.name.lowercase()}"
+        val savedObs = obs.copy(
+            id = "$idPrefix:${env.author.take(16)}:${obs.startUtcMs}",
+            provider = Provider.WITHINGS_API,
+            accountId = "withings-family:${env.author.take(8)}",
+            quality = obs.quality,
+            deleted = false
+        )
+        data.observations().upsert(listOf(savedObs.toRow()))
+        val areaKey = "withings.${obs.type.name}"
+        val prevW = data.areaStates().get(areaKey)
+        data.areaStates().put(AreaStateRow(areaKey, prevW?.cursorMs, nowMs, nowMs, null, null))
+        HandlerResult.Applied
+    },
+    Kinds.FAMILY_LINK_REQUEST to KindHandler { env, payload, _, nowMs ->
+        val link = runCatching {
+            Wire.json.decodeFromString(FamilyLink.serializer(), payload)
+        }.getOrNull() ?: return@KindHandler HandlerResult.Rejected(RejectReason.INVALID_PAYLOAD)
+        if (link.childId != env.recipient || link.parentId != env.author) {
+            return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
+        }
+        val existing = data.familyLinks().get(link.id)
+        if (existing != null) {
+            // SEC-2: cizí autor nesmí převzít existující vazbu podle UUID; ověřenou vazbu nelze shodit na PENDING.
+            if (existing.parentId != env.author || existing.childId != env.recipient) {
+                return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
+            }
+            if (link.version <= existing.version) {
+                return@KindHandler HandlerResult.Stale
+            }
+            if (existing.status == FamilyLinkStatus.VERIFIED.name) {
+                return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
+            }
+        }
+        val sanitized = link.copy(status = FamilyLinkStatus.PENDING, verifiedAtMs = null)
+        val sanitizedJson = Wire.json.encodeToString(FamilyLink.serializer(), sanitized)
+        data.familyLinks().upsert(FamilyLinkRow(sanitized.id, sanitized.parentId, sanitized.childId, FamilyLinkStatus.PENDING.name, sanitized.version, sanitizedJson))
+        data.pendingRequests().upsert(
+            PendingRequestRow(
+                id = sanitized.id,
+                kind = "FAMILY_LINK_REQUEST",
+                fromId = sanitized.parentId,
+                toId = sanitized.childId,
+                status = "PENDING",
+                createdAtMs = nowMs,
+                json = sanitizedJson,
+            )
+        )
+        HandlerResult.Applied
+    },
+    Kinds.FAMILY_LINK_RESPONSE to KindHandler { env, payload, _, _ ->
+        val link = runCatching {
+            Wire.json.decodeFromString(FamilyLink.serializer(), payload)
+        }.getOrNull() ?: return@KindHandler HandlerResult.Rejected(RejectReason.INVALID_PAYLOAD)
+        if (link.parentId != env.recipient || link.childId != env.author) {
+            return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
+        }
+        if (link.status != FamilyLinkStatus.VERIFIED && link.status != FamilyLinkStatus.REJECTED) {
+            return@KindHandler HandlerResult.Rejected(RejectReason.INVALID_PAYLOAD)
+        }
+        val existing = data.familyLinks().get(link.id)
+            ?: return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
+        if (existing.parentId != env.recipient || existing.childId != env.author) {
+            return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
+        }
+        // SEC-2: dítě nesmí přepnout REVOKED/REJECTED/VERIFIED bez nového požadavku rodiče (stav musí být PENDING).
+        if (existing.status != FamilyLinkStatus.PENDING.name) {
+            return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
+        }
+        if (link.version <= existing.version) {
+            return@KindHandler HandlerResult.Stale
+        }
+        val sanitizedJson = Wire.json.encodeToString(FamilyLink.serializer(), link)
+        data.familyLinks().upsert(FamilyLinkRow(link.id, link.parentId, link.childId, link.status.name, link.version, sanitizedJson))
+        HandlerResult.Applied
+    },
+    Kinds.SNAPSHOT_REQUEST to KindHandler { env, _, _, _ ->
+        if (env.objectType != "own_weight") {
+            return@KindHandler HandlerResult.Rejected(RejectReason.INVALID_PAYLOAD)
+        }
+        val isVerifiedChild = data.familyLinks().allNow().any { row ->
+            row.status == FamilyLinkStatus.VERIFIED.name &&
+                row.parentId == env.recipient &&
+                row.childId == env.author
+        } || settings.childRecipientIdentity == env.author
+        if (!isVerifiedChild) {
+            return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
+        }
+        for (sent in data.inbox().allSentNow()) {
+            if (sent.recipient == env.author && sent.objectKey.startsWith("own_weight/") && sent.contentHash.isNotEmpty()) {
+                data.inbox().putSent(sent.copy(contentHash = ""))
+            }
+        }
+        HandlerResult.Applied
+    },
+)
+
+internal fun parseGrantRefs(rawGrantId: String?): List<String> =
+    rawGrantId?.split(',')?.filter { it.isNotBlank() }.orEmpty()
+
 /** Tvorba projekcí, zařazení do outboxu a odvolání sdílení. Filtrace probíhá před šifrováním a odesláním. */
-class ShareService(private val sl: ServiceLocator) {
+class ShareService internal constructor(
+    private val data: PulseDataAccess,
+    private val settings: ShareSettingsAccess,
+    private val outbox: OutboxManager,
+    private val sentLedger: app.pulse4.sync.SentLedger,
+    private val recordSent: (recipient: String, objectKey: String, version: Long, hash: String) -> Unit,
+    private val selfIdProvider: () -> String,
+    private val runMigrations: () -> Unit = {},
+    private val scheduleShare: () -> Unit = {},
+    private val drainPlanNotifications: () -> List<app.pulse4.training.PlanNotification> = { emptyList() },
+) {
+    constructor(sl: ServiceLocator) : this(
+        data = RoomPulseDataAccess(sl.db),
+        settings = RealShareSettingsAccess(sl.settings),
+        outbox = sl.outbox,
+        sentLedger = sl.sentLedger,
+        recordSent = { r, k, v, h -> sl.sentLedger.record(r, k, v, h) },
+        selfIdProvider = { sl.bridge.ensureStarted().deliveryHash },
+        runMigrations = { ServiceMigrations.runOnce(sl) },
+        scheduleShare = {
+            if (sl.settings.networkMode != app.pulse4.android.data.NetworkMode.MANUAL) {
+                app.pulse4.android.work.Scheduler.shareNow(sl.context)
+            }
+        },
+        drainPlanNotifications = { sl.planHandlers.drainNotifications() },
+    )
+
     private val json = Wire.json
     private val planLock = Any()
 
-    fun grants(): List<ShareGrant> = sl.db.grants().allNow().map { json.decodeFromString(ShareGrant.serializer(), it.json) }
-    fun groups(): Map<String, Group> = sl.db.grants().groupsNow().associate { it.id to json.decodeFromString(Group.serializer(), it.json) }
-    fun familyLinks(): List<FamilyLink> = sl.db.familyLinks().allNow().map { json.decodeFromString(FamilyLink.serializer(), it.json) }
-    fun pendingRequests(): List<PendingRequestRow> = sl.db.pendingRequests().pendingNow()
+    fun grants(): List<ShareGrant> = data.grants().allNow().map { json.decodeFromString(ShareGrant.serializer(), it.json) }
+    fun groups(): Map<String, Group> = data.grants().groupsNow().associate { it.id to json.decodeFromString(Group.serializer(), it.json) }
+    fun familyLinks(): List<FamilyLink> = data.familyLinks().allNow().map { json.decodeFromString(FamilyLink.serializer(), it.json) }
+    fun pendingRequests(): List<PendingRequestRow> = data.pendingRequests().pendingNow()
 
     private fun saveGrant(g: ShareGrant) {
         if (g.active) {
@@ -1229,18 +1343,60 @@ class ShareService(private val sl: ServiceLocator) {
     }
 
     private fun saveGrantDirect(g: ShareGrant) =
-        sl.db.grants().upsert(GrantRow(g.id, !g.active, json.encodeToString(ShareGrant.serializer(), g)))
+        data.grants().upsert(GrantRow(g.id, !g.active, json.encodeToString(ShareGrant.serializer(), g)))
 
-    fun saveGroup(g: Group) = sl.db.grants().upsertGroup(GroupRow(g.id, g.version, json.encodeToString(Group.serializer(), g)))
+    fun saveGroup(g: Group) = data.grants().upsertGroup(GroupRow(g.id, g.version, json.encodeToString(Group.serializer(), g)))
+
+    private fun scopeCovers(outer: app.pulse4.sharing.TimeScope, inner: app.pulse4.sharing.TimeScope): Boolean {
+        val outerFrom = outer.from?.let { runCatching { LocalDate.parse(it) }.getOrNull() } ?: return false
+        val innerFrom = inner.from?.let { runCatching { LocalDate.parse(it) }.getOrNull() } ?: return false
+        if (innerFrom.isBefore(outerFrom)) return false
+        if (outer.kind == app.pulse4.sharing.TimeScope.Kind.ONCE) {
+            if (inner.kind != app.pulse4.sharing.TimeScope.Kind.ONCE) return false
+            val outerTo = outer.to?.let { runCatching { LocalDate.parse(it) }.getOrNull() } ?: return false
+            val innerTo = inner.to?.let { runCatching { LocalDate.parse(it) }.getOrNull() } ?: return false
+            if (innerTo.isAfter(outerTo)) return false
+        }
+        return true
+    }
+
+    internal fun isGrantNarrowing(existingGrants: List<ShareGrant>, candidate: ShareGrant): Boolean {
+        if (existingGrants.isEmpty() || !candidate.active) return false
+        val activeExisting = existingGrants.filter { it.active && it.ownerId == candidate.ownerId }
+        if (activeExisting.isEmpty()) return false
+        if (candidate.recipients.isEmpty()) return true
+        return candidate.recipients.all { recipient ->
+            val grantsForRecipient = activeExisting.filter { recipient in it.recipients }
+            if (grantsForRecipient.isEmpty()) return@all false
+            val fieldsCovered = candidate.fields.all { field ->
+                grantsForRecipient.any { g ->
+                    field in g.fields &&
+                        (g.sources == null || (candidate.sources != null && candidate.sources!!.all { it in g.sources!! })) &&
+                        scopeCovers(g.scope, candidate.scope)
+                }
+            }
+            val planRightsCovered = candidate.planRights.all { (planId, right) ->
+                grantsForRecipient.any { g -> (g.planRights[planId]?.ordinal ?: -1) >= right.ordinal }
+            }
+            fieldsCovered && planRightsCovered
+        }
+    }
 
     fun saveGrantWithPolicy(grant: ShareGrant, guardianCoConsentAtMs: Long? = null): Result<ShareGrant> {
         if (!grant.active) {
             saveGrantDirect(grant)
             return Result.success(grant)
         }
-        val self = sl.bridge.ensureStarted().deliveryHash
-        val ageProfile = AgeProfile.valueOf(sl.settings.ownAgeProfile)
+        val self = selfIdProvider()
+        val ageProfile = AgeProfile.valueOf(settings.ownAgeProfile)
         if (!FamilyLinkPolicy.canActivateShareGrant(self, ageProfile, grant, familyLinks(), guardianCoConsentAtMs)) {
+            val existingSame = data.grants().get(grant.id)?.let {
+                runCatching { json.decodeFromString(ShareGrant.serializer(), it.json) }.getOrNull()
+            }
+            if (existingSame != null && isGrantNarrowing(listOf(existingSame), grant)) {
+                saveGrantDirect(grant)
+                return Result.success(grant)
+            }
             return Result.failure(
                 IllegalStateException("Sdílení nelze aktivovat: pro nezletilý účet je nutná ověřená rodinná vazba a souhlas zákonného zástupce.")
             )
@@ -1249,12 +1405,74 @@ class ShareService(private val sl: ServiceLocator) {
         return Result.success(grant)
     }
 
+    /**
+     * N-2 & RE-7: Globální profil nejprve ověří a uloží nový grant, teprve poté odvolá staré přímé granty.
+     * Při selhání politiky (např. nezletilý bez spolupodpisu při rozšiřování) nic neodvolá; zúžení projde.
+     */
+    fun saveGlobalDirectProfile(
+        newGrant: ShareGrant?,
+        existingDirectGrants: List<ShareGrant>,
+        nowMs: Long = System.currentTimeMillis(),
+        guardianCoConsentAtMs: Long? = null,
+    ): Result<ShareGrant?> {
+        if (newGrant == null) {
+            existingDirectGrants.forEach { old -> revoke(old.id, nowMs) }
+            return Result.success(null)
+        }
+        val self = selfIdProvider()
+        val ageProfile = AgeProfile.valueOf(settings.ownAgeProfile)
+        val policyOk = FamilyLinkPolicy.canActivateShareGrant(
+            self, ageProfile, newGrant, familyLinks(), guardianCoConsentAtMs
+        ) || isGrantNarrowing(existingDirectGrants, newGrant)
+        if (!policyOk) {
+            return Result.failure(
+                IllegalStateException("Sdílení nelze aktivovat: pro nezletilý účet je nutná ověřená rodinná vazba a souhlas zákonného zástupce.")
+            )
+        }
+        saveGrantDirect(newGrant)
+        existingDirectGrants.forEach { old ->
+            if (old.id != newGrant.id) {
+                revoke(old.id, nowMs)
+            }
+        }
+        planAndEnqueue(nowMs)
+        return Result.success(newGrant)
+    }
+
+    /** Dítě po zapnutí příjmu váhy od rodiče požádá ověřené rodiče o znovuposlání 30denního okna (RE-5). */
+    fun sendFamilyWeightResyncRequests(nowMs: Long = System.currentTimeMillis()): Int {
+        val self = selfIdProvider()
+        val verifiedParents = familyLinks()
+            .filter { it.status == FamilyLinkStatus.VERIFIED && it.childId == self }
+            .map { it.parentId }
+            .distinct()
+        if (verifiedParents.isEmpty()) return 0
+        val builder = MessageBuilder(self)
+        var queued = 0
+        for (parentId in verifiedParents) {
+            val msg = builder.build(
+                recipient = parentId,
+                kind = Kinds.SNAPSHOT_REQUEST,
+                objectType = "own_weight",
+                objectId = "family_weight",
+                objectVersion = nowMs,
+                payload = "{}",
+                nowMs = nowMs,
+            )
+            val e = msg.envelope
+            val item = OutboxItem(e.eventId, e.recipient, e.kind, e.objectType, e.objectId, e.objectVersion, null, Wire.encode(msg), nowMs)
+            if (outbox.enqueue(item) is EnqueueResult.Queued) queued++
+        }
+        if (queued > 0) scheduleShare()
+        return queued
+    }
+
     fun sendFamilyLinkRequest(
         childId: String,
         childAgeProfile: AgeProfile = AgeProfile.MINOR,
         nowMs: Long = System.currentTimeMillis(),
     ): FamilyLink {
-        val self = sl.bridge.ensureStarted().deliveryHash
+        val self = selfIdProvider()
         val link = FamilyLinkPolicy.createRequest(
             id = java.util.UUID.randomUUID().toString(),
             parentId = self,
@@ -1263,7 +1481,7 @@ class ShareService(private val sl: ServiceLocator) {
             nowMs = nowMs,
         )
         val linkJson = json.encodeToString(FamilyLink.serializer(), link)
-        sl.db.familyLinks().upsert(FamilyLinkRow(link.id, link.parentId, link.childId, link.status.name, link.version, linkJson))
+        data.familyLinks().upsert(FamilyLinkRow(link.id, link.parentId, link.childId, link.status.name, link.version, linkJson))
         val msg = MessageBuilder(self).build(
             recipient = childId,
             kind = Kinds.FAMILY_LINK_REQUEST,
@@ -1274,7 +1492,7 @@ class ShareService(private val sl: ServiceLocator) {
             nowMs = nowMs,
         )
         val e = msg.envelope
-        sl.outbox.enqueue(OutboxItem(e.eventId, e.recipient, e.kind, e.objectType, e.objectId, e.objectVersion, null, Wire.encode(msg), nowMs))
+        outbox.enqueue(OutboxItem(e.eventId, e.recipient, e.kind, e.objectType, e.objectId, e.objectVersion, null, Wire.encode(msg), nowMs))
         return link
     }
 
@@ -1283,14 +1501,14 @@ class ShareService(private val sl: ServiceLocator) {
         accept: Boolean,
         nowMs: Long = System.currentTimeMillis(),
     ): FamilyLink? {
-        val row = sl.db.familyLinks().get(linkId) ?: return null
+        val row = data.familyLinks().get(linkId) ?: return null
         val link = json.decodeFromString(FamilyLink.serializer(), row.json)
-        val self = sl.bridge.ensureStarted().deliveryHash
+        val self = selfIdProvider()
         val updated = runCatching { FamilyLinkPolicy.respond(link, self, accept, nowMs) }.getOrNull() ?: return null
         val updatedJson = json.encodeToString(FamilyLink.serializer(), updated)
-        sl.db.familyLinks().upsert(FamilyLinkRow(updated.id, updated.parentId, updated.childId, updated.status.name, updated.version, updatedJson))
-        sl.db.pendingRequests().get(linkId)?.let { req ->
-            sl.db.pendingRequests().upsert(
+        data.familyLinks().upsert(FamilyLinkRow(updated.id, updated.parentId, updated.childId, updated.status.name, updated.version, updatedJson))
+        data.pendingRequests().get(linkId)?.let { req ->
+            data.pendingRequests().upsert(
                 req.copy(
                     status = if (accept) "ACCEPTED" else "REJECTED",
                     json = updatedJson,
@@ -1307,13 +1525,13 @@ class ShareService(private val sl: ServiceLocator) {
             nowMs = nowMs,
         )
         val e = msg.envelope
-        sl.outbox.enqueue(OutboxItem(e.eventId, e.recipient, e.kind, e.objectType, e.objectId, e.objectVersion, null, Wire.encode(msg), nowMs))
+        outbox.enqueue(OutboxItem(e.eventId, e.recipient, e.kind, e.objectType, e.objectId, e.objectVersion, null, Wire.encode(msg), nowMs))
         return updated
     }
 
     fun promoteCircleAdmin(groupId: String, targetMemberId: String): Result<Group> {
         val group = groups()[groupId] ?: return Result.failure(IllegalArgumentException("Kruh nenalezen."))
-        val self = sl.bridge.ensureStarted().deliveryHash
+        val self = selfIdProvider()
         val updated = CircleAdminPolicy.promoteAdmin(group, self, targetMemberId)
             ?: return Result.failure(IllegalStateException("Nelze povýšit člena na správce."))
         saveGroup(updated)
@@ -1323,7 +1541,7 @@ class ShareService(private val sl: ServiceLocator) {
 
     fun demoteCircleAdmin(groupId: String, targetMemberId: String): Result<Group> {
         val group = groups()[groupId] ?: return Result.failure(IllegalArgumentException("Kruh nenalezen."))
-        val self = sl.bridge.ensureStarted().deliveryHash
+        val self = selfIdProvider()
         val updated = CircleAdminPolicy.demoteAdmin(group, self, targetMemberId)
             ?: return Result.failure(IllegalStateException("Nelze odebrat roli správce (kruh musí mít alespoň jednoho správce)."))
         saveGroup(updated)
@@ -1337,7 +1555,7 @@ class ShareService(private val sl: ServiceLocator) {
         nowMs: Long = System.currentTimeMillis(),
     ): Result<Group> {
         val group = groups()[groupId] ?: return Result.failure(IllegalArgumentException("Kruh nenalezen."))
-        val self = sl.bridge.ensureStarted().deliveryHash
+        val self = selfIdProvider()
         val updated = CircleAdminPolicy.initiateHandover(group, self, targetMemberId, nowMs)
             ?: return Result.failure(IllegalStateException("Nelze zahájit předání správy kruhu."))
         saveGroup(updated)
@@ -1353,7 +1571,7 @@ class ShareService(private val sl: ServiceLocator) {
             nowMs = nowMs,
         )
         val e = msg.envelope
-        sl.outbox.enqueue(OutboxItem(e.eventId, e.recipient, e.kind, e.objectType, e.objectId, e.objectVersion, null, Wire.encode(msg), nowMs))
+        outbox.enqueue(OutboxItem(e.eventId, e.recipient, e.kind, e.objectType, e.objectId, e.objectVersion, null, Wire.encode(msg), nowMs))
         return Result.success(updated)
     }
 
@@ -1362,14 +1580,14 @@ class ShareService(private val sl: ServiceLocator) {
         nowMs: Long = System.currentTimeMillis(),
     ): Result<Group> {
         val group = groups()[groupId] ?: return Result.failure(IllegalArgumentException("Kruh nenalezen."))
-        val self = sl.bridge.ensureStarted().deliveryHash
+        val self = selfIdProvider()
         val initiator = group.pendingAdminHandover?.initiatedBy
         val updated = CircleAdminPolicy.acceptHandover(group, self, nowMs, removeInitiator = true)
             ?: return Result.failure(IllegalStateException("Žádost o předání správy není platná nebo vypršela."))
         saveGroup(updated)
         val payload = json.encodeToString(Group.serializer(), updated)
-        sl.db.pendingRequests().get("handover-${group.id}")?.let { req ->
-            sl.db.pendingRequests().upsert(req.copy(status = "ACCEPTED", json = payload))
+        data.pendingRequests().get("handover-${group.id}")?.let { req ->
+            data.pendingRequests().upsert(req.copy(status = "ACCEPTED", json = payload))
         }
         val extra = setOfNotNull(initiator)
         broadcastMembershipUpdate(updated, nowMs, extraRecipients = extra)
@@ -1385,14 +1603,14 @@ class ShareService(private val sl: ServiceLocator) {
                 nowMs = nowMs,
             )
             val e = msg.envelope
-            sl.outbox.enqueue(OutboxItem(e.eventId, e.recipient, e.kind, e.objectType, e.objectId, e.objectVersion, null, Wire.encode(msg), nowMs))
+            outbox.enqueue(OutboxItem(e.eventId, e.recipient, e.kind, e.objectType, e.objectId, e.objectVersion, null, Wire.encode(msg), nowMs))
         }
         return Result.success(updated)
     }
 
     fun leaveCircle(groupId: String): Result<Group> {
         val group = groups()[groupId] ?: return Result.failure(IllegalArgumentException("Kruh nenalezen."))
-        val self = sl.bridge.ensureStarted().deliveryHash
+        val self = selfIdProvider()
         if (!CircleAdminPolicy.canLeaveDirectly(group, self)) {
             return Result.failure(
                 IllegalStateException("Jste poslední správce kruhu. Před odchodem musíte nejprve předat roli správce jinému členovi.")
@@ -1408,7 +1626,7 @@ class ShareService(private val sl: ServiceLocator) {
 
     fun dissolveCircle(groupId: String): Result<Group> {
         val group = groups()[groupId] ?: return Result.failure(IllegalArgumentException("Kruh nenalezen."))
-        val self = sl.bridge.ensureStarted().deliveryHash
+        val self = selfIdProvider()
         val prevMembers = group.members
         val updated = CircleAdminPolicy.dissolveCircle(group, self)
             ?: return Result.failure(IllegalStateException("Kruh může rozpustit pouze správce."))
@@ -1423,7 +1641,7 @@ class ShareService(private val sl: ServiceLocator) {
 
     /** Odebere člena ze skupiny, zruší jeho čekající položky v outboxu, vyřadí ho z vlastních grantů a rozešle aktualizaci členství. */
     fun removeMemberFromGroup(group: Group, memberId: String): Group {
-        val self = sl.bridge.ensureStarted().deliveryHash
+        val self = selfIdProvider()
         val updated = group.copy(
             members = group.members - memberId,
             admins = if (memberId in group.admins) group.admins - memberId else group.admins,
@@ -1431,15 +1649,15 @@ class ShareService(private val sl: ServiceLocator) {
         )
         val groupGrants = grants().filter { it.groupId == group.id }
         val groupGrantIds = groupGrants.mapTo(HashSet()) { it.id }
-        synchronized(sl.outbox) {
-            sl.db.outbox().all()
+        synchronized(outbox) {
+            data.outbox().all()
                 .filter {
                     it.recipient == memberId &&
                         it.state == app.pulse4.sync.DeliveryState.QUEUED.name &&
-                        it.grantId in groupGrantIds
+                        parseGrantRefs(it.grantId).any { gid -> gid in groupGrantIds }
                 }
                 .forEach { row ->
-                    sl.db.outbox().update(row.copy(state = app.pulse4.sync.DeliveryState.CANCELLED.name))
+                    data.outbox().update(row.copy(state = app.pulse4.sync.DeliveryState.CANCELLED.name))
                 }
         }
         for (g in groupGrants) {
@@ -1467,7 +1685,7 @@ class ShareService(private val sl: ServiceLocator) {
         nowMs: Long,
         extraRecipients: Set<String> = emptySet(),
     ) {
-        val self = sl.bridge.ensureStarted().deliveryHash
+        val self = selfIdProvider()
         val builder = MessageBuilder(self)
         val payload = json.encodeToString(Group.serializer(), group)
         for (r in (group.members + extraRecipients) - self) {
@@ -1481,36 +1699,34 @@ class ShareService(private val sl: ServiceLocator) {
                 nowMs = nowMs,
             )
             val e = msg.envelope
-            sl.outbox.enqueue(OutboxItem(e.eventId, e.recipient, e.kind, e.objectType, e.objectId, e.objectVersion, null, Wire.encode(msg), nowMs))
+            outbox.enqueue(OutboxItem(e.eventId, e.recipient, e.kind, e.objectType, e.objectId, e.objectVersion, null, Wire.encode(msg), nowMs))
         }
-        if (sl.settings.networkMode != app.pulse4.android.data.NetworkMode.MANUAL) {
-            app.pulse4.android.work.Scheduler.shareNow(sl.context)
-        }
+        scheduleShare()
     }
 
     /** Vytvoří projekce změněných dat pro každého skutečného příjemce a zařadí je do outboxu. Vrací počet zařazených. */
     fun planAndEnqueue(nowMs: Long): Int = synchronized(planLock) {
-        ServiceMigrations.runOnce(sl)
-        val self = sl.bridge.ensureStarted().deliveryHash
-        val zone = ZoneId.of(sl.settings.zoneId)
+        runMigrations()
+        val self = selfIdProvider()
+        val zone = ZoneId.of(settings.zoneId)
         val today = LocalDate.now(zone)
         val activeGrants = grants().filter { it.active && it.ownerId == self }
         val earliestGrantFrom = activeGrants.mapNotNull { it.scope.from?.let { f -> runCatching { LocalDate.parse(f) }.getOrNull() } }.minOrNull()
         val from = earliestGrantFrom ?: today.minusDays(60)
         // Řadíme od nejnovějších dní, aby dnešek a včerejšek měly vždy přednost před starší historií.
-        val dates = sl.db.observations().datesWithData(from.toString(), today.toString())
+        val dates = data.observations().datesWithData(from.toString(), today.toString())
             .map(LocalDate::parse)
             .sortedDescending()
-        val allObservations = sl.db.observations().forRange(from.toString(), today.toString()).map { it.toDomain() }
+        val allObservations = data.observations().forRange(from.toString(), today.toString()).map { it.toDomain() }
         // Nejdřív nahradit prošlé nepotvrzené souhrny čerstvým snapshotem.
-        sl.outbox.expireStale(nowMs).forEach { (recipient, key) -> sl.sentLedger.record(recipient, key, (sl.sentLedger.last(recipient, key)?.version ?: 0), "expired") }
+        outbox.expireStale(nowMs).forEach { (recipient, key) -> recordSent(recipient, key, (sentLedger.last(recipient, key)?.version ?: 0), "expired") }
 
         val recentDateCutoff = today.minusDays(1).toString()
         val pendingByRecipient = HashMap<String, Int>()
-        fun pendingFor(recipient: String): Int = pendingByRecipient.getOrPut(recipient) { sl.outbox.pendingCountFor(recipient) }
+        fun pendingFor(recipient: String): Int = pendingByRecipient.getOrPut(recipient) { outbox.pendingCountFor(recipient) }
 
         var queued = 0
-        val plan = ShareBuilder(self, MessageBuilder(self)).plan(grants(), groups(), dates, allObservations, sl.sentLedger, nowMs)
+        val plan = ShareBuilder(self, MessageBuilder(self)).plan(grants(), groups(), dates, allObservations, sentLedger, nowMs)
             .associateBy { it.message.envelope.recipient to it.objectKey }
             .values
         val maxEventBytes = app.pulse4.sync.ProtocolLimits().maxEventBytes
@@ -1521,11 +1737,15 @@ class ShareService(private val sl: ServiceLocator) {
             if (isHistorical && pendingFor(e.recipient) >= MAX_PENDING_PER_RECIPIENT) {
                 continue
             }
-            val item = OutboxItem(e.eventId, e.recipient, e.kind, e.objectType, e.objectId, e.objectVersion, p.grantId, Wire.encode(p.message), nowMs)
-            when (sl.outbox.enqueue(item)) {
+            val refs = p.grantIds.ifEmpty { listOf(p.grantId) }
+            val item = OutboxItem(
+                e.eventId, e.recipient, e.kind, e.objectType, e.objectId, e.objectVersion,
+                p.grantId, Wire.encode(p.message), nowMs, grantRefs = refs,
+            )
+            when (outbox.enqueue(item)) {
                 is EnqueueResult.Queued -> {
-                    sl.sentLedger.record(e.recipient, p.objectKey, e.objectVersion, p.contentHash)
-                    recordDeliveredKey(p.grantId, e.recipient, p.objectKey)
+                    recordSent(e.recipient, p.objectKey, e.objectVersion, p.contentHash)
+                    refs.forEach { gid -> recordDeliveredKey(gid, e.recipient, p.objectKey) }
                     pendingByRecipient[e.recipient] = pendingFor(e.recipient) + 1
                     queued++
                 }
@@ -1544,11 +1764,11 @@ class ShareService(private val sl: ServiceLocator) {
         from: LocalDate,
         pendingByRecipient: MutableMap<String, Int> = HashMap(),
     ): Int {
-        val zone = ZoneId.of(sl.settings.zoneId)
-        val zones = sl.settings.privacyZones
+        val zone = ZoneId.of(settings.zoneId)
+        val zones = settings.privacyZones
         val recentActCutoffMs = LocalDate.now(zone).minusDays(2).atStartOfDay(zone).toInstant().toEpochMilli()
         var queued = 0
-        val acts = sl.db.activities().since(from.atStartOfDay(zone).toInstant().toEpochMilli())
+        val acts = data.activities().since(from.atStartOfDay(zone).toInstant().toEpochMilli())
             .sortedByDescending { it.startUtcMs }
         val allGroups = groups()
         val activeActivityGrants = grants().filter {
@@ -1561,10 +1781,10 @@ class ShareService(private val sl: ServiceLocator) {
         PLog.i("Pulse4Sync") { "enqueueActivities: from=$from, acts=${acts.size}, activeGrants=${activeActivityGrants.size}" }
         for (row in acts) {
             val act = json.decodeFromString(Activity.serializer(), row.json)
-            val track = sl.db.activities().track(row.id)?.let {
+            val track = data.activities().track(row.id)?.let {
                 json.decodeFromString(kotlinx.serialization.builtins.ListSerializer(TrackPoint.serializer()), it.json)
             }.orEmpty()
-            val actDate = java.time.Instant.ofEpochMilli(act.startUtcMs).atZone(zone).toLocalDate()
+            val actDate = app.pulse4.domain.TimeRules.localDate(act.startUtcMs, act.zoneId)
             val isHistorical = act.startUtcMs < recentActCutoffMs
             // Slučování grantů aktivit per příjemce stejně jako S4 v ShareBuilderu (RE-6).
             for (r in allRecipients) {
@@ -1577,25 +1797,29 @@ class ShareService(private val sl: ServiceLocator) {
                 if (proj == null) continue
                 val payload = json.encodeToString(app.pulse4.sharing.ActivityProjection.serializer(), proj)
                 val hash = Wire.sha256Hex(payload.toByteArray())
-                val curPending = pendingByRecipient.getOrPut(r) { sl.outbox.pendingCountFor(r) }
+                val curPending = pendingByRecipient.getOrPut(r) { outbox.pendingCountFor(r) }
                 if (isHistorical && curPending >= MAX_PENDING_PER_RECIPIENT) {
                     continue
                 }
                 val key = "activity/${act.id}"
-                val last = sl.sentLedger.last(r, key)
+                val last = sentLedger.last(r, key)
                 if (last?.contentHash == hash) {
                     PLog.i("Pulse4Sync") { "act=${act.id} skipped, same hash as last sent" }
                     continue
                 }
+                val contributingIds = matching.map { it.id }
                 val msg = MessageBuilder(self).build(r, Kinds.PROJECTION_UPSERT, "activity", act.id, (last?.version ?: 0) + 1, payload, nowMs, grantRef = mergedGrant.id)
                 val e = msg.envelope
-                val item = OutboxItem(e.eventId, r, e.kind, e.objectType, e.objectId, e.objectVersion, mergedGrant.id, Wire.encode(msg), nowMs)
-                val res = sl.outbox.enqueue(item)
+                val item = OutboxItem(
+                    e.eventId, r, e.kind, e.objectType, e.objectId, e.objectVersion,
+                    mergedGrant.id, Wire.encode(msg), nowMs, grantRefs = contributingIds,
+                )
+                val res = outbox.enqueue(item)
                 PLog.i("Pulse4Sync") { "act=${act.id} enqueue result: $res" }
                 when (res) {
                     is EnqueueResult.Queued -> {
-                        sl.sentLedger.record(r, key, e.objectVersion, hash)
-                        matching.forEach { recordDeliveredKey(it.id, r, key) }
+                        recordSent(r, key, e.objectVersion, hash)
+                        contributingIds.forEach { gid -> recordDeliveredKey(gid, r, key) }
                         pendingByRecipient[r] = curPending + 1
                         queued++
                     }
@@ -1618,14 +1842,14 @@ class ShareService(private val sl: ServiceLocator) {
      * Běží po commitu transakce příjmu (handler nic neodesílá).
      */
     fun flushPlanNotifications(nowMs: Long): Int {
-        val notes = sl.planHandlers.drainNotifications()
+        val notes = drainPlanNotifications()
         if (notes.isEmpty()) return 0
-        val self = sl.bridge.ensureStarted().deliveryHash
+        val self = selfIdProvider()
         val b = MessageBuilder(self)
         var n = 0
         fun put(msg: app.pulse4.sync.WireMessage) {
             val e = msg.envelope
-            if (sl.outbox.enqueue(OutboxItem(e.eventId, e.recipient, e.kind, e.objectType, e.objectId, e.objectVersion, null, Wire.encode(msg), nowMs)) is EnqueueResult.Queued) n++
+            if (outbox.enqueue(OutboxItem(e.eventId, e.recipient, e.kind, e.objectType, e.objectId, e.objectVersion, null, Wire.encode(msg), nowMs)) is EnqueueResult.Queued) n++
         }
         for (note in notes) {
             // Verze rozhodnutí roste s „vyřízeností“, aby starší stav nepřepsal novější.
@@ -1656,19 +1880,19 @@ class ShareService(private val sl: ServiceLocator) {
 
     private fun recordDeliveredKey(grantId: String, recipient: String, objectKey: String) {
         val k = "delivered_keys.$grantId"
-        val current = sl.settings.getRaw(k)?.let {
+        val current = settings.getRaw(k)?.let {
             runCatching { json.decodeFromString(deliveredKeysSerializer, it) }.getOrNull()
         }.orEmpty().toMutableMap()
         val updatedSet = (current[recipient].orEmpty() + objectKey)
         if (updatedSet != current[recipient]) {
             current[recipient] = updatedSet
-            sl.settings.put(k, json.encodeToString(deliveredKeysSerializer, current))
+            settings.put(k, json.encodeToString(deliveredKeysSerializer, current))
         }
     }
 
     private fun deliveredKeysForGrant(grantId: String): Map<String, Set<String>> {
         val k = "delivered_keys.$grantId"
-        return sl.settings.getRaw(k)?.let {
+        return settings.getRaw(k)?.let {
             runCatching { json.decodeFromString(deliveredKeysSerializer, it) }.getOrNull()
         }.orEmpty()
     }
@@ -1678,12 +1902,12 @@ class ShareService(private val sl: ServiceLocator) {
      * který UI musí uživateli ukázat přesně (doručená data nelze vzít zpět).
      */
     fun revoke(grantId: String, nowMs: Long): RevocationPlan? {
-        val row = sl.db.grants().get(grantId) ?: return null
+        val row = data.grants().get(grantId) ?: return null
         val g = json.decodeFromString(ShareGrant.serializer(), row.json)
-        val self = sl.bridge.ensureStarted().deliveryHash
-        val allOutbox = sl.db.outbox().all()
+        val self = selfIdProvider()
+        val allOutbox = data.outbox().all()
         val outboxSentRows = allOutbox.filter {
-            it.grantId == grantId && it.state !in setOf("CANCELLED", "SUPERSEDED")
+            grantId in parseGrantRefs(it.grantId) && it.state !in setOf("CANCELLED", "SUPERSEDED")
         }
         val durableDelivered = deliveredKeysForGrant(grantId)
         val allRecipients = (g.recipients + durableDelivered.keys + outboxSentRows.map { it.recipient }).distinct()
@@ -1692,59 +1916,78 @@ class ShareService(private val sl: ServiceLocator) {
             val fromDurable = durableDelivered[r].orEmpty()
             (fromOutbox + fromDurable).distinct()
         }
-        val inNode = allOutbox.any { it.grantId == grantId && it.state == "STORED_IN_PROPAGATION" }
+        val inNode = allOutbox.any { grantId in parseGrantRefs(it.grantId) && it.state == "STORED_IN_PROPAGATION" }
         val plan = Revocation.plan(g, nowMs, delivered, inNode)
         saveGrantDirect(plan.revokedGrant)
-        sl.outbox.cancelForGrant(plan.cancelQueuedForGrantId)
-        sl.settings.put("delivered_keys.$grantId", "{}")
+        outbox.cancelForGrant(plan.cancelQueuedForGrantId)
+        settings.put("delivered_keys.$grantId", "{}")
         val allGroups = groups()
         val otherActiveGrants = grants().filter { it.id != grantId && it.active && it.ownerId == self }
-        val zone = ZoneId.of(sl.settings.zoneId)
-        fun isCoveredByOtherGrant(recipient: String, objectKey: String): Boolean {
-            return otherActiveGrants.any { other ->
-                val recipients = app.pulse4.sharing.MembershipPolicy.effectiveRecipients(other, other.groupId?.let(allGroups::get))
-                if (recipient !in recipients) return@any false
-                when {
-                    objectKey.startsWith("daily/") -> {
-                        val date = runCatching { LocalDate.parse(objectKey.removePrefix("daily/")) }.getOrNull() ?: return@any false
-                        other.fields.any { it.category != app.pulse4.sharing.Category.ACTIVITY } && other.scope.covers(date)
-                    }
-                    objectKey.startsWith("activity/") -> {
-                        if (other.fields.none { it.category == app.pulse4.sharing.Category.ACTIVITY }) return@any false
-                        val actRow = sl.db.activities().get(objectKey.removePrefix("activity/"))
-                        val actDate = actRow?.let {
-                            java.time.Instant.ofEpochMilli(it.startUtcMs).atZone(zone).toLocalDate()
+        val effectiveRecipientsByGrant = otherActiveGrants.associateWith { other ->
+            app.pulse4.sharing.MembershipPolicy.effectiveRecipients(other, other.groupId?.let(allGroups::get))
+        }
+        val zones = settings.privacyZones
+        val dayObsCache = HashMap<LocalDate, List<app.pulse4.domain.MetricObservation>>()
+        val actCache = HashMap<String, Pair<Activity, List<TrackPoint>>?>()
+        val coveredCache = HashMap<Pair<String, String>, Boolean>()
+        fun isCoveredByOtherGrant(recipient: String, objectKey: String): Boolean =
+            coveredCache.getOrPut(recipient to objectKey) {
+                otherActiveGrants.any { other ->
+                    if (recipient !in effectiveRecipientsByGrant.getValue(other)) return@any false
+                    when {
+                        objectKey.startsWith("daily/") -> {
+                            val date = runCatching { LocalDate.parse(objectKey.removePrefix("daily/")) }.getOrNull()
+                                ?: return@any false
+                            val dayObs = dayObsCache.getOrPut(date) {
+                                data.observations().forDate(date.toString()).map { it.toDomain() }
+                            }
+                            app.pulse4.sharing.Projector.project(other, date, dayObs, nowMs) != null
                         }
-                        val provOk = actRow?.let {
-                            runCatching { json.decodeFromString(Activity.serializer(), it.json).provider }.getOrNull()?.let(other::allowsProvider) ?: true
-                        } ?: true
-                        provOk && (actDate == null || other.scope.covers(actDate))
+                        objectKey.startsWith("activity/") -> {
+                            val actId = objectKey.removePrefix("activity/")
+                            val actAndTrack = actCache.getOrPut(actId) {
+                                val actRow = data.activities().get(actId) ?: return@getOrPut null
+                                val act = runCatching { json.decodeFromString(Activity.serializer(), actRow.json) }.getOrNull()
+                                    ?: return@getOrPut null
+                                val track = data.activities().track(actId)?.let {
+                                    runCatching {
+                                        json.decodeFromString(kotlinx.serialization.builtins.ListSerializer(TrackPoint.serializer()), it.json)
+                                    }.getOrNull()
+                                }.orEmpty()
+                                act to track
+                            } ?: return@any false
+                            ActivityProjector.project(other, actAndTrack.first, actAndTrack.second, emptyList<LapIn>(), zones) != null
+                        }
+                        else -> false
                     }
-                    else -> false
                 }
             }
-        }
         // NEW-1: ledger maž pouze pro klíče, kam se skutečně posílá PROJECTION_REMOVE;
         // u klíčů krytých jiným grantem smaž jen contentHash a zachovej monotonní verzi N+1.
+        val sentVersions = HashMap<Pair<String, String>, Long>()
         for ((recipient, keys) in delivered) {
             for (key in keys) {
+                val existingSent = data.inbox().sent(recipient, key)
+                if (existingSent != null) sentVersions[recipient to key] = existingSent.version
+                val covered = isCoveredByOtherGrant(recipient, key)
                 val updatedSent = updateSentRowOnRevoke(
-                    existing = sl.db.inbox().sent(recipient, key),
-                    isCoveredByOtherGrant = isCoveredByOtherGrant(recipient, key),
+                    existing = existingSent,
+                    isCoveredByOtherGrant = covered,
                 )
                 if (updatedSent != null) {
-                    sl.db.inbox().putSent(updatedSent)
-                } else if (!isCoveredByOtherGrant(recipient, key)) {
-                    sl.db.inbox().deleteSent(recipient, key)
+                    data.inbox().putSent(updatedSent)
+                } else if (!covered) {
+                    data.inbox().deleteSent(recipient, key)
                 }
             }
         }
         for (rq in plan.removalRequests) {
             if (isCoveredByOtherGrant(rq.recipient, rq.objectKey)) continue
             val (type, id) = rq.objectKey.split('/', limit = 2)
-            val msg = MessageBuilder(self).build(rq.recipient, Kinds.PROJECTION_REMOVE, type, id, nowMs, "{}", nowMs, grantRef = grantId)
+            val removeVersion = maxOf(nowMs, (sentVersions[rq.recipient to rq.objectKey] ?: 0L) + 1L)
+            val msg = MessageBuilder(self).build(rq.recipient, Kinds.PROJECTION_REMOVE, type, id, removeVersion, "{}", nowMs, grantRef = grantId)
             val e = msg.envelope
-            sl.outbox.enqueue(OutboxItem(e.eventId, rq.recipient, e.kind, e.objectType, e.objectId, e.objectVersion, null, Wire.encode(msg), nowMs))
+            outbox.enqueue(OutboxItem(e.eventId, rq.recipient, e.kind, e.objectType, e.objectId, e.objectVersion, null, Wire.encode(msg), nowMs))
         }
         return plan
     }

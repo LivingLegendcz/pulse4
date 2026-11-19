@@ -6,6 +6,7 @@ import app.pulse4.domain.Provider
 import app.pulse4.provider.ProviderError
 import app.pulse4.sharing.Category
 import app.pulse4.sharing.Field
+import app.pulse4.sharing.PlanRight
 import app.pulse4.sharing.ShareGrant
 import app.pulse4.sharing.TimeScope
 import java.time.LocalDate
@@ -247,5 +248,49 @@ class GrantEditorTest {
         assertEquals("5:00 /km", Fmt.default.pace(299.6))
         val emptyChart = Chart(emptyList(), IntArray(0), 0.0, 0.0)
         assertEquals(IntRange.EMPTY, emptyChart.trackRange(0..10))
+    }
+
+    @Test
+    fun `NEW-3 buildGlobalGrant preserves widest scope, planRights, and reports scopeChanged and empty revoke`() {
+        val g1 = grant("d1", recipients = setOf("bob"), fields = setOf(Field.SLEEP_DURATION)).copy(
+            scope = TimeScope.continuousFrom(today.minusDays(45)),
+            planRights = mapOf("plan-1" to PlanRight.VIEW, "plan-2" to PlanRight.PROPOSE),
+        )
+        val g2 = grant("d2", recipients = setOf("bob"), fields = setOf(Field.SLEEP_DURATION)).copy(
+            scope = TimeScope.from(today.minusDays(14)),
+            planRights = mapOf("plan-1" to PlanRight.EDIT),
+        )
+        val rebuilt = assertNotNull(
+            GrantEditor.buildGlobalGrant(
+                id = "d3",
+                ownerId = "alice",
+                existingDirectGrants = listOf(g1, g2),
+                selectedCategories = setOf(Category.SLEEP, Category.HRV),
+                selectedRecipients = setOf("bob"),
+                today = today,
+                nowMs = 5_000L,
+            )
+        )
+        assertEquals(today.minusDays(45).toString(), rebuilt.scope.from)
+        assertEquals(mapOf("plan-1" to PlanRight.EDIT, "plan-2" to PlanRight.PROPOSE), rebuilt.planRights)
+
+        val scopeDiff = GrantEditor.computeGlobalDiff(
+            existingDirectGrants = listOf(g1),
+            targetCategories = setOf(Category.SLEEP),
+            targetRecipients = setOf("bob"),
+            today = today,
+            targetScope = TimeScope.continuousFrom(today.minusDays(90)),
+        )
+        assertTrue(scopeDiff.scopeChanged)
+        assertTrue(scopeDiff.hasChanges)
+
+        val revokeAllDiff = GrantEditor.computeGlobalDiff(
+            existingDirectGrants = listOf(g1),
+            targetCategories = setOf(Category.SLEEP),
+            targetRecipients = emptySet(),
+            today = today,
+        )
+        assertEquals(setOf("bob"), revokeAllDiff.removedRecipients)
+        assertTrue(revokeAllDiff.hasChanges)
     }
 }

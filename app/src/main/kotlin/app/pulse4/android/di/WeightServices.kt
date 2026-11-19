@@ -11,6 +11,7 @@ import app.pulse4.android.net.OkHttpGateway
 import app.pulse4.android.security.SecretStore
 import app.pulse4.domain.MeasurementExclusions
 import app.pulse4.domain.MetricType
+import app.pulse4.domain.PLog
 import app.pulse4.domain.Provider
 import app.pulse4.domain.TrendSelector
 import app.pulse4.provider.AreaResult
@@ -192,7 +193,7 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
             loginPassword = { email, pass -> directAuth.loginPassword(email, pass) },
             onSilentRefreshOk = { res, emailFallback -> applySilentRefreshResult(res, emailFallback) },
             onAuthPaused = { _, message -> _state.value = WithingsUiState.Failed(message) },
-            onLog = { msg -> android.util.Log.i("Withings", msg) },
+            onLog = { msg -> PLog.i("Withings") { msg } },
         )
     }
 
@@ -546,9 +547,9 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
             }
         }
 
-        android.util.Log.i("Withings", "runWebImport: running engine.runArea for user ${s.primaryUserId}")
+        PLog.i("Withings") { "runWebImport: running engine.runArea for user ${s.primaryUserId}" }
         val result = engine.runArea(SyncArea.WEIGHT, nowMs)
-        android.util.Log.i("Withings", "runWebImport result: $result")
+        PLog.i("Withings") { "runWebImport result: $result" }
         when (result) {
             is AreaResult.Success -> {
                 val latestSession = loadWebSession() ?: s
@@ -566,7 +567,9 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
                             sessionToken = latestSession.sessionToken
                         )
                         val childMapped = WithingsWebMapper.map(childGroups, childUid, sl.settings.zoneId)
-                        val childBodyObs = childMapped.items.filter { it.type in BODY_COMPOSITION_TYPES }
+                        val childBodyObs = childMapped.items.filter {
+                            it.type in CHILD_ACCEPTED_TYPES && isValidChildBodyComposition(it.type, it.value)
+                        }
                         val sent = forwardToChild(childBodyObs, sl.settings.childRecipientIdentity, nowMs)
                         if (sent > 0) {
                             runCatching { sl.transport.pump(nowMs, 2500L) }
@@ -748,7 +751,8 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
     fun forwardSingleWeightToChild(obs: app.pulse4.domain.MetricObservation, nowMs: Long, excludeFromParent: Boolean = true): Boolean {
         val childId = sl.settings.childRecipientIdentity
         if (childId.isBlank()) return false
-        val count = forwardToChild(listOf(obs), childId, nowMs)
+        val confirmedObs = obs.copy(quality = app.pulse4.domain.Quality.OK)
+        val count = forwardToChild(listOf(confirmedObs), childId, nowMs)
         if (excludeFromParent) {
             markWrong(obs.id, nowMs)
         }
@@ -782,8 +786,9 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
                     userId = webChildId,
                     defaultZone = sl.settings.zoneId
                 )
-                val childBodyObs = mapped.items.filter { it.type in BODY_COMPOSITION_TYPES }
-                toForward += childBodyObs.map { it.copy(quality = app.pulse4.domain.Quality.OK) }
+                toForward += mapped.items.filter {
+                    it.type in CHILD_ACCEPTED_TYPES && isValidChildBodyComposition(it.type, it.value)
+                }
             }
         }
 
@@ -799,7 +804,9 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
                     sl.settings.zoneId,
                     config()
                 )
-                toForward += mapped.items.map { it.copy(quality = app.pulse4.domain.Quality.OK) }
+                toForward += mapped.items.filter {
+                    it.type in CHILD_ACCEPTED_TYPES && isValidChildBodyComposition(it.type, it.value)
+                }
             }
         }
 
@@ -819,7 +826,7 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
                         it.value in cMin..cMax
                 }
             recent.forEach { obs ->
-                toForward += obs.copy(quality = app.pulse4.domain.Quality.OK)
+                toForward += obs
                 // Pokud dětské vážení leží mimo dospělý filtr rodiče, vyřadíme ho z grafu rodiče
                 if (sl.settings.weightFilterEnabled && obs.value !in sl.settings.weightFilterMinKg..sl.settings.weightFilterMaxKg) {
                     markWrong(obs.id, nowMs)
@@ -841,39 +848,15 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
     ): Int {
         if (observations.isEmpty() || childRecipient.isBlank()) return 0
         val self = sl.bridge.ensureStarted().deliveryHash
-        val builder = app.pulse4.sync.MessageBuilder(self)
-        var queued = 0
-        for (obs in observations) {
-            val cleanObs = obs.copy(
-                deleted = false,
-                quality = app.pulse4.domain.Quality.OK,
-                origin = "withings-family:$self"
-            )
-            val payload = Wire.json.encodeToString(app.pulse4.domain.MetricObservation.serializer(), cleanObs)
-            val hash = Wire.sha256Hex(payload.toByteArray())
-            val key = "own_weight/${cleanObs.id}"
-            val last = sl.sentLedger.last(childRecipient, key)
-            if (last?.contentHash == hash) continue
-            val version = (last?.version ?: 0L) + 1L
-            val msg = builder.build(
-                recipient = childRecipient,
-                kind = FAMILY_WEIGHT_PUSH_KIND,
-                objectType = "own_weight",
-                objectId = cleanObs.id,
-                objectVersion = version,
-                payload = payload,
-                nowMs = nowMs
-            )
-            val e = msg.envelope
-            val item = app.pulse4.sync.OutboxItem(
-                e.eventId, e.recipient, e.kind, e.objectType, e.objectId, e.objectVersion, null, Wire.encode(msg), nowMs
-            )
-            if (sl.outbox.enqueue(item) is app.pulse4.sync.EnqueueResult.Queued) {
-                sl.sentLedger.record(childRecipient, key, version, hash)
-                queued++
-            }
-        }
-        return queued
+        return forwardChildObservations(
+            observations = observations,
+            childRecipient = childRecipient,
+            selfId = self,
+            outbox = sl.outbox,
+            lastSent = { r, k -> sl.sentLedger.last(r, k) },
+            recordSent = { r, k, v, h -> sl.sentLedger.record(r, k, v, h) },
+            nowMs = nowMs,
+        )
     }
 
     companion object {
@@ -899,5 +882,52 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
             MetricType.ECG_AFIB,
             MetricType.ECG,
         )
+
+        val CHILD_ACCEPTED_TYPES: Set<MetricType> = BODY_COMPOSITION_TYPES.toSet()
+
+        internal fun forwardChildObservations(
+            observations: List<app.pulse4.domain.MetricObservation>,
+            childRecipient: String,
+            selfId: String,
+            outbox: app.pulse4.sync.OutboxManager,
+            lastSent: (recipient: String, key: String) -> app.pulse4.sync.SentRecord?,
+            recordSent: (recipient: String, key: String, version: Long, hash: String) -> Unit,
+            nowMs: Long,
+        ): Int {
+            if (observations.isEmpty() || childRecipient.isBlank()) return 0
+            val builder = app.pulse4.sync.MessageBuilder(selfId)
+            var queued = 0
+            for (obs in observations) {
+                if (obs.type !in CHILD_ACCEPTED_TYPES || !isValidChildBodyComposition(obs.type, obs.value)) continue
+                val cleanObs = obs.copy(
+                    deleted = false,
+                    origin = "withings-family:$selfId"
+                )
+                val payload = Wire.json.encodeToString(app.pulse4.domain.MetricObservation.serializer(), cleanObs)
+                val hash = Wire.sha256Hex(payload.toByteArray())
+                val key = "own_weight/${cleanObs.id}"
+                val last = lastSent(childRecipient, key)
+                if (last?.contentHash == hash) continue
+                val version = (last?.version ?: 0L) + 1L
+                val msg = builder.build(
+                    recipient = childRecipient,
+                    kind = FAMILY_WEIGHT_PUSH_KIND,
+                    objectType = "own_weight",
+                    objectId = cleanObs.id,
+                    objectVersion = version,
+                    payload = payload,
+                    nowMs = nowMs
+                )
+                val e = msg.envelope
+                val item = app.pulse4.sync.OutboxItem(
+                    e.eventId, e.recipient, e.kind, e.objectType, e.objectId, e.objectVersion, null, Wire.encode(msg), nowMs
+                )
+                if (outbox.enqueue(item) is app.pulse4.sync.EnqueueResult.Queued) {
+                    recordSent(childRecipient, key, version, hash)
+                    queued++
+                }
+            }
+            return queued
+        }
     }
 }

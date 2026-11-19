@@ -74,8 +74,8 @@ class Pulse4App : Application() {
                 PLog.e("Pulse4App") { "Critical secret corrupted; deferring background startup until recovery" }
                 return@launch
             }
-            // P0-4: bezpodmínečný purge případného starého Withings hesla ze SecretStore
-            runCatching { services.secrets.delete("withings.web.password") }
+            // Withings heslo (volitelně zapamatované uživatelem) zůstává šifrované v SecretStore (Keystore);
+            // maže se pouze při odpojení účtu nebo při odmítnutí heslem.
             // Inicializace P2P transportu a mostu (nejprve transport zaregistruje kontakty pro dešifrování příchozích zpráv)
             runCatching {
                 services.transport

@@ -111,7 +111,8 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
         )
     }
 
-    fun clearWebSession() = synchronized(renewLock) {
+    fun clearWebSession() = authGate.background {
+        authGate.bumpGeneration()
         sl.secrets.delete(WEB_SESSION_KEY)
         sl.secrets.delete("withings.web.password")
         sl.secrets.delete("withings.web.cookiejar")
@@ -168,14 +169,44 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
         return webClient.getUsersList(cookies, sessionToken)
     }
 
-    private val renewLock = Any()
+    /**
+     * Zámek datového importu (runWebImport / runImport / selectProfiles). Ruční přihlášení ho nikdy nebere,
+     * aby nečekalo na dlouhý import; autentizační stav chrání [authGate].
+     * Pořadí zámků: importLock → authGate (nikdy obráceně).
+     */
+    private val importLock = Any()
+    private val authGate = WithingsAuthGate()
+    private val authDiagnostics by lazy {
+        WithingsAuthDiagnostics(
+            load = { sl.secrets.getString(WithingsAuthDiagnostics.STORE_KEY) },
+            persist = { sl.secrets.putString(WithingsAuthDiagnostics.STORE_KEY, it) },
+        )
+    }
     private val directAuth by lazy {
         WithingsDirectAuth(
             webClient = webClient,
             loadPersistedCookies = { sl.secrets.getString("withings.web.cookiejar") },
             savePersistedCookies = { sl.secrets.putString("withings.web.cookiejar", it) },
+            diagnostics = authDiagnostics,
         )
     }
+
+    /** Redigovaný záznam posledních pokusů o přihlášení / tiché obnovení (bez cookies, hesel, tokenů a e-mailu). */
+    fun authDiagnosticsText(): String = authDiagnostics.export()
+    fun clearAuthDiagnostics() = authDiagnostics.clear()
+
+    /**
+     * Spustí ruční (uživatelskou) operaci přihlášení s předností před obnovou na pozadí.
+     * Čeká nejvýše [WithingsAuthGate.MANUAL_WAIT_TIMEOUT_MS]; při čekání zavolá [onWaiting].
+     */
+    private fun manualAuth(onWaiting: () -> Unit, block: () -> WithingsLoginResult): WithingsLoginResult =
+        when (val g = authGate.manual(WithingsAuthGate.MANUAL_WAIT_TIMEOUT_MS, onWaiting, block)) {
+            is WithingsAuthGate.GateResult.Done -> g.value
+            WithingsAuthGate.GateResult.TimedOut -> {
+                PLog.w("Withings") { "manual login: auth gate busy, timed out" }
+                WithingsLoginResult.Error(MANUAL_WAIT_TIMEOUT_MESSAGE, WithingsAuthFailureKind.NETWORK)
+            }
+        }
 
     private val sessionCoordinator by lazy {
         WithingsSessionCoordinator(
@@ -189,11 +220,12 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
             saveSession = ::saveWebSession,
             extendSession = { cookies, token -> webClient.extendSessionDetailed(cookies, token) },
             hasUsableCookies = { directAuth.hasUsableCookies() },
-            trySilentSsoRefresh = { directAuth.trySilentSsoRefresh() },
-            loginPassword = { email, pass -> directAuth.loginPassword(email, pass) },
+            trySilentSsoRefresh = { directAuth.trySilentSsoRefresh(shouldAbort = authGate::manualPending) },
+            loginPassword = { email, pass -> directAuth.loginPassword(email, pass, background = true) },
             onSilentRefreshOk = { res, emailFallback -> applySilentRefreshResult(res, emailFallback) },
             onAuthPaused = { _, message -> _state.value = WithingsUiState.Failed(message) },
             onLog = { msg -> PLog.i("Withings") { msg } },
+            shouldAbort = authGate::manualPending,
         )
     }
 
@@ -206,10 +238,9 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
     /**
      * Vyžádá zaslání 8místného přihlašovacího kódu na e-mail v pozadí (pro účty Google, Apple i účty bez hesla).
      */
-    fun requestDirectEmailCode(email: String): WithingsLoginResult = synchronized(renewLock) {
+    fun requestDirectEmailCode(email: String, onWaiting: () -> Unit = {}): WithingsLoginResult = manualAuth(onWaiting) {
         val em = email.trim()
-        sl.secrets.putString("withings.web.email", em)
-        sl.secrets.delete("withings.web.password")
+        sl.secrets.putString(KEY_EMAIL, em)
         val r = directAuth.requestEmailCode(em)
         if (r is WithingsLoginResult.Ok) {
             sessionCoordinator.clearAuthPauseAndBackoff()
@@ -231,23 +262,32 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
     }
 
     /** Znovu odešle 8místný přihlašovací kód na e-mail v pozadí. */
-    fun resendDirectEmailCode(emailFallback: String? = null): WithingsLoginResult = synchronized(renewLock) {
+    fun resendDirectEmailCode(emailFallback: String? = null, onWaiting: () -> Unit = {}): WithingsLoginResult = manualAuth(onWaiting) {
         directAuth.resendEmailCode(emailFallback)
     }
 
     /** Nativní přihlášení e-mailem a heslem v pozadí (stejně jako u Garminu) */
-    fun loginDirectPassword(email: String, password: String): WithingsLoginResult = synchronized(renewLock) {
+    fun loginDirectPassword(
+        email: String,
+        password: String,
+        rememberPassword: Boolean = true,
+        onWaiting: () -> Unit = {},
+    ): WithingsLoginResult = manualAuth(onWaiting) {
         val em = email.trim()
+        if (em.isBlank()) {
+            return@manualAuth WithingsLoginResult.Error("Zadejte e-mail účtu Withings.")
+        }
         val r = directAuth.loginPassword(em, password)
         sessionCoordinator.recordManualAuthResult(r)
+        // E-mail si pamatujeme vždy (i když Withings ještě vyžaduje kód), aby přežil restart procesu.
+        if (r !is WithingsLoginResult.Error) sl.secrets.putString(KEY_EMAIL, em)
         if (r is WithingsLoginResult.Ok) {
             val existing = loadWebSession()
             val primary = existing?.primaryUserId?.let { pid -> r.profiles.firstOrNull { it.id == pid } }
                 ?: r.profiles.firstOrNull { it.isPrimary }
                 ?: r.profiles.first()
             val child = existing?.childUserId?.let { cid -> r.profiles.firstOrNull { it.id == cid } }
-            sl.secrets.putString("withings.web.email", em)
-            sl.secrets.delete("withings.web.password")
+            storeRememberedPassword(password, rememberPassword)
             completeWebLogin(
                 cookies = r.session.cookies,
                 primary = primary,
@@ -261,7 +301,13 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
     }
 
     /** Dokončení dvoufázového ověření (kód z e-mailu nebo SMS) */
-    fun resumeDirectMfa(code: String, emailFallback: String? = null): WithingsLoginResult = synchronized(renewLock) {
+    fun resumeDirectMfa(
+        code: String,
+        emailFallback: String? = null,
+        password: String? = null,
+        rememberPassword: Boolean = true,
+        onWaiting: () -> Unit = {},
+    ): WithingsLoginResult = manualAuth(onWaiting) {
         val r = directAuth.resumeMfa(code, emailFallback)
         if (r is WithingsLoginResult.Ok) {
             sessionCoordinator.clearAuthPauseAndBackoff()
@@ -270,9 +316,12 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
                 ?: r.profiles.firstOrNull { it.isPrimary }
                 ?: r.profiles.first()
             val child = existing?.childUserId?.let { cid -> r.profiles.firstOrNull { it.id == cid } }
-            val em = emailFallback?.trim() ?: directAuth.pendingEmail ?: existing?.email
-            if (em != null) sl.secrets.putString("withings.web.email", em)
-            sl.secrets.delete("withings.web.password")
+            val em = emailFallback?.trim()?.takeIf { it.isNotBlank() }
+                ?: directAuth.pendingEmail?.takeIf { it.isNotBlank() }
+                ?: existing?.email
+                ?: sl.secrets.getString(KEY_EMAIL)
+            if (!em.isNullOrBlank()) sl.secrets.putString(KEY_EMAIL, em)
+            if (!password.isNullOrBlank() || !rememberPassword) storeRememberedPassword(password.orEmpty(), rememberPassword)
             completeWebLogin(
                 cookies = r.session.cookies,
                 primary = primary,
@@ -286,6 +335,18 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
         }
         r
     }
+
+    /** Uloží heslo šifrovaně do SecretStore (Android Keystore), nebo ho smaže, pokud si ho uživatel nepřeje pamatovat. */
+    private fun storeRememberedPassword(password: String, remember: Boolean) {
+        if (remember && password.isNotBlank()) {
+            sl.secrets.putString(KEY_PASSWORD, password)
+        } else {
+            sl.secrets.delete(KEY_PASSWORD)
+        }
+    }
+
+    /** Zapamatované heslo pro předvyplnění formuláře (pouze z šifrovaného SecretStore). */
+    fun rememberedPassword(): String? = sl.secrets.getString(KEY_PASSWORD)?.takeIf { it.isNotEmpty() }
 
     private fun applySilentRefreshResult(r: WithingsLoginResult.Ok, emailFallback: String? = null) {
         val nowMs = System.currentTimeMillis()
@@ -305,8 +366,9 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
             allProfiles = r.profiles.ifEmpty { existing?.allProfiles.orEmpty() },
             lastSyncMs = existing?.lastSyncMs,
             lastExtendedMs = nowMs,
-            email = emailFallback ?: existing?.email ?: sl.secrets.getString("withings.web.email"),
+            email = emailFallback ?: existing?.email ?: sl.secrets.getString(KEY_EMAIL),
         )
+        updated.email?.takeIf { it.isNotBlank() }?.let { sl.secrets.putString(KEY_EMAIL, it) }
         saveWebSession(updated)
         sl.settings.withingsProfileLabel = primary.displayName
     }
@@ -316,17 +378,17 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
      * 1. Tiché SSO přes dlouhodobé cookies `account.withings.com` (funguje i bez hesla).
      * 2. Tiché znovupřihlášení e-mailem a heslem (pouze pokud není aktivní circuit-breaker / backoff).
      */
-    fun tryAutoReLogin(): Boolean = synchronized(renewLock) {
+    fun tryAutoReLogin(): Boolean = authGate.background {
         sessionCoordinator.tryAutoReLogin()
     }
 
     /** Prodlouží existující webovou relaci Withings nebo provede automatické tiché znovupřihlášení. */
-    fun renewSession(forceExtend: Boolean = false): Boolean = synchronized(renewLock) {
+    fun renewSession(forceExtend: Boolean = false): Boolean = authGate.background {
         if (sl.settings.withingsDirectEnabled) {
-            return@synchronized sessionCoordinator.renewSession(forceExtend)
+            return@background sessionCoordinator.renewSession(forceExtend)
         }
         if (session.isConnected()) {
-            return@synchronized runCatching { session.accessToken(); true }.getOrDefault(false)
+            return@background runCatching { session.accessToken(); true }.getOrDefault(false)
         }
         false
     }
@@ -340,11 +402,13 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
         allProfiles: List<WithingsUserProfile> = emptyList(),
         nowMs: Long = System.currentTimeMillis(),
         email: String? = null,
-    ) = synchronized(renewLock) {
+    ) = authGate.background {
+        authGate.bumpGeneration()
         sessionCoordinator.clearAuthPauseAndBackoff()
         val existing = loadWebSession()
         val profiles = allProfiles.ifEmpty { existing?.allProfiles.orEmpty() }
-        val effectiveEmail = email ?: existing?.email ?: sl.secrets.getString("withings.web.email")
+        val effectiveEmail = email?.trim()?.takeIf { it.isNotBlank() } ?: existing?.email ?: sl.secrets.getString(KEY_EMAIL)
+        effectiveEmail?.takeIf { it.isNotBlank() }?.let { sl.secrets.putString(KEY_EMAIL, it) }
         val s = WithingsWebSession(
             cookies = cookies,
             sessionToken = sessionToken ?: existing?.sessionToken,
@@ -372,7 +436,7 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
     }
 
     /** Přepne aktivní hlavní nebo dětský profil v rámci existující relace a spustí synchronizaci. */
-    fun selectProfiles(primaryId: Long, childId: Long?, nowMs: Long = System.currentTimeMillis()): Boolean = synchronized(renewLock) {
+    fun selectProfiles(primaryId: Long, childId: Long?, nowMs: Long = System.currentTimeMillis()): Boolean = synchronized(importLock) {
         val s = loadWebSession() ?: return@synchronized false
         val profiles = s.allProfiles.ifEmpty {
             runCatching { webClient.getUsersList(s.cookies, s.sessionToken) }.getOrDefault(emptyList())
@@ -389,7 +453,10 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
             childUserName = child?.displayName,
             allProfiles = profiles
         )
-        saveWebSession(updated)
+        authGate.background {
+            authGate.bumpGeneration()
+            saveWebSession(updated)
+        }
         sl.settings.withingsProfileLabel = primary.displayName
         runCatching { RoomAreaStateStore(sl.db, "withings.").put(SyncArea.WEIGHT, app.pulse4.provider.AreaState()) }
         runCatching { runWebImport(nowMs) }
@@ -439,19 +506,26 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
     }
 
     /** Import dat přes webový konektor (váha, tuk, svaly, kosti, voda, beztuková hmota, viscerální tuk, cévní věk, PWV, BMR, tep, ECG). */
-    fun runWebImport(nowMs: Long, allowRetry: Boolean = true): AreaResult? = synchronized(renewLock) {
+    fun runWebImport(nowMs: Long, allowRetry: Boolean = true): AreaResult? = synchronized(importLock) {
         if (sessionCoordinator.isAutoReloginPaused()) {
             _state.value = WithingsUiState.Failed(
                 sessionCoordinator.pausedMessage() ?: "Relace Withings vyžaduje ruční přihlášení"
             )
             return@synchronized null
         }
+        if (authGate.manualPending()) {
+            PLog.i("Withings") { "runWebImport skipped: manual login pending" }
+            return@synchronized null
+        }
+        // Generace relace na začátku importu: pokud se mezitím uživatel ručně přihlásí, import nesmí
+        // přepsat novou relaci starými cookies ani přepnout UI do stavu „vyžaduje přihlášení“.
+        val startGen = authGate.generation()
         val s = loadWebSession() ?: return@synchronized null
         if (!sl.settings.withingsDirectEnabled || !s.isConnected()) return@synchronized null
 
         runCatching {
             val freshProfiles = webClient.getUsersList(s.cookies, s.sessionToken)
-            if (freshProfiles.isNotEmpty()) {
+            if (freshProfiles.isNotEmpty()) authGate.saveIfCurrent(startGen) {
                 val cur = loadWebSession() ?: s
                 val curPrimary = freshProfiles.firstOrNull { it.id == cur.primaryUserId }
                 val autoChild = if (cur.childUserId == null && curPrimary != null) {
@@ -500,7 +574,11 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
         val fetcher = WithingsWebFetcher(
             client = webClient,
             sessionProvider = ::loadWebSession,
-            onSessionExtended = ::saveWebSession,
+            onSessionExtended = { ext ->
+                if (!authGate.saveIfCurrent(startGen) { saveWebSession(ext) }) {
+                    PLog.i("Withings") { "runWebImport: dropped stale extended session (manual login happened)" }
+                }
+            },
             defaultZone = sl.settings.zoneId,
             existingIds = { f, t ->
                 if (activeUserId != null) db.observations().idsInForAccount(Provider.WITHINGS_API.name, activeUserId, f, t).toSet()
@@ -552,8 +630,9 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
         PLog.i("Withings") { "runWebImport result: $result" }
         when (result) {
             is AreaResult.Success -> {
-                val latestSession = loadWebSession() ?: s
-                saveWebSession(latestSession.copy(lastSyncMs = nowMs))
+                val latestSession = authGate.background {
+                    (loadWebSession() ?: s).copy(lastSyncMs = nowMs).also { saveWebSession(it) }
+                }
                 // Pokud je v session nastavený dětský profil, stáhneme a odešleme dětská měření složení těla:
                 val childUid = latestSession.childUserId
                 if (childUid != null && sl.settings.childRecipientIdentity.isNotBlank()) {
@@ -578,7 +657,7 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
                 }
             }
             is AreaResult.Failed -> {
-                if (result.error is ProviderError.Unauthorized) {
+                if (result.error is ProviderError.Unauthorized && authGate.generation() == startGen) {
                     if (allowRetry && !sessionCoordinator.isAutoReloginPaused() && renewSession(forceExtend = true)) {
                         return@synchronized runWebImport(nowMs, allowRetry = false)
                     }
@@ -587,7 +666,7 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
                     )
                 }
             }
-            is AreaResult.NeedsUser -> {
+            is AreaResult.NeedsUser -> if (authGate.generation() == startGen) {
                 if (allowRetry && !sessionCoordinator.isAutoReloginPaused() && renewSession(forceExtend = true)) {
                     return@synchronized runWebImport(nowMs, allowRetry = false)
                 }
@@ -601,7 +680,7 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
     }
 
     /** Hlavní import váhy a složení těla: upřednostňuje přímé webové přihlášení, jako zálohu používá OAuth. */
-    fun runImport(nowMs: Long): AreaResult? = synchronized(renewLock) {
+    fun runImport(nowMs: Long): AreaResult? = synchronized(importLock) {
         if (!sl.settings.withingsDirectEnabled) return@synchronized null
         if (loadWebSession()?.isConnected() == true) {
             return@synchronized runWebImport(nowMs)
@@ -930,6 +1009,11 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
     }
 
     companion object {
+        private const val KEY_EMAIL = WithingsSessionCoordinator.KEY_EMAIL
+        private const val KEY_PASSWORD = WithingsSessionCoordinator.KEY_PASSWORD
+        const val MANUAL_WAIT_TIMEOUT_MESSAGE =
+            "Synchronizace Withings na pozadí se stále nedokončila. Zkuste to prosím za chvíli znovu."
+
         private const val CLIENT_SECRET = "withings.clientsecret"
         const val WEB_SESSION_KEY = "withings.web.session"
         const val FAMILY_WEIGHT_PUSH_KIND = "family.weight.push"

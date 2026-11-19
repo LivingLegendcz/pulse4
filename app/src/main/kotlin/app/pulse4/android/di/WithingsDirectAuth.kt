@@ -227,6 +227,7 @@ class WithingsDirectAuth(
     private val webClient: WithingsWebClient,
     loadPersistedCookies: () -> String? = { null },
     savePersistedCookies: (String) -> Unit = {},
+    private val diagnostics: WithingsAuthDiagnostics? = null,
 ) {
     private val cookieJar = PersistentCookieJar(loadPersistedCookies, savePersistedCookies)
     private val client: OkHttpClient = OkHttpClient.Builder()
@@ -246,6 +247,28 @@ class WithingsDirectAuth(
     private var lastMfaUrl: String = "https://account.withings.com/new_workflow/email_check?r=https%3A%2F%2Fapp.withings.com%2F"
     private var lastHiddenFields: Map<String, String> = emptyMap()
     private val ua = "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
+
+    private fun trace(flow: WithingsAuthDiagnostics.Flow, step: String, res: okhttp3.Response) {
+        val finalUrl = res.request.url
+        diagnostics?.step(
+            flow = flow,
+            step = step,
+            url = finalUrl.toString(),
+            status = res.code,
+            toApp = finalUrl.host.equals("app.withings.com", ignoreCase = true),
+        )
+    }
+
+    private inline fun traced(flow: WithingsAuthDiagnostics.Flow, block: () -> WithingsLoginResult): WithingsLoginResult {
+        diagnostics?.mark(flow, "start")
+        val r = block()
+        diagnostics?.result(flow, r)
+        return r
+    }
+
+    private fun traceException(flow: WithingsAuthDiagnostics.Flow, e: Throwable) {
+        diagnostics?.mark(flow, "exception:${e::class.java.simpleName}")
+    }
 
     private fun isLoggedInUrl(url: HttpUrl): Boolean {
         return cookieJar.hasSession() || url.host.equals("app.withings.com", ignoreCase = true)
@@ -291,7 +314,11 @@ class WithingsDirectAuth(
      * na `account.withings.com`. Funguje i bez hesla (např. po přihlášení přes 8místný kód nebo Google/Apple),
      * dokud platí SSO relace na account.withings.com.
      */
-    fun trySilentSsoRefresh(): WithingsLoginResult {
+    fun trySilentSsoRefresh(shouldAbort: () -> Boolean = { false }): WithingsLoginResult =
+        traced(WithingsAuthDiagnostics.Flow.SILENT_SSO) { trySilentSsoRefreshInner(shouldAbort) }
+
+    private fun trySilentSsoRefreshInner(shouldAbort: () -> Boolean): WithingsLoginResult {
+        val flow = WithingsAuthDiagnostics.Flow.SILENT_SSO
         if (!cookieJar.hasAnyCookies()) {
             return WithingsLoginResult.Error("Žádné uložené cookies pro tiché obnovení.", WithingsAuthFailureKind.OTHER)
         }
@@ -303,6 +330,10 @@ class WithingsDirectAuth(
             )
             var lastStatus = 200
             for (u in urls) {
+                if (shouldAbort()) {
+                    diagnostics?.mark(flow, "aborted:manual_login")
+                    return WithingsLoginResult.Error(ABORTED_MESSAGE, WithingsAuthFailureKind.OTHER)
+                }
                 val req = Request.Builder()
                     .url(u)
                     .header("User-Agent", ua)
@@ -310,10 +341,11 @@ class WithingsDirectAuth(
                     .build()
                 client.newCall(req).execute().use { res ->
                     lastStatus = res.code
+                    trace(flow, "GET sso", res)
                     val finalHttpUrl = res.request.url
                     if (finalHttpUrl.host.equals("app.withings.com", ignoreCase = true) || cookieJar.hasSession()) {
-                        PLog.i("WithingsDirectAuth") { "trySilentSsoRefresh: SSO redirect succeeded via $u" }
-                        val fin = finishLogin()
+                        PLog.i("WithingsDirectAuth") { "trySilentSsoRefresh: SSO redirect succeeded via ${finalHttpUrl.encodedPath}" }
+                        val fin = finishLogin(flow)
                         if (fin is WithingsLoginResult.Ok) return fin
                     }
                 }
@@ -324,9 +356,11 @@ class WithingsDirectAuth(
                 else -> WithingsLoginResult.Error("Tiché SSO obnovení nevyústilo v aktivní relaci.", WithingsAuthFailureKind.OTHER)
             }
         } catch (e: IOException) {
+            traceException(flow, e)
             PLog.w("WithingsDirectAuth", e) { "trySilentSsoRefresh network exception: ${e.message}" }
             WithingsLoginResult.Error(e.message ?: "Chyba sítě při tichém obnovení relace.", WithingsAuthFailureKind.NETWORK)
         } catch (e: Exception) {
+            traceException(flow, e)
             PLog.w("WithingsDirectAuth", e) { "trySilentSsoRefresh exception: ${e.message}" }
             WithingsLoginResult.Error(e.message ?: "Chyba při tichém obnovení relace.", WithingsAuthFailureKind.OTHER)
         }
@@ -336,7 +370,11 @@ class WithingsDirectAuth(
      * Vyžádá zaslání 8místného přihlašovacího kódu na e-mail (funguje pro účty Google, Apple i účty bez hesla).
      * Vše probíhá na pozadí bez WebView.
      */
-    fun requestEmailCode(email: String): WithingsLoginResult {
+    fun requestEmailCode(email: String): WithingsLoginResult =
+        traced(WithingsAuthDiagnostics.Flow.EMAIL_CODE) { requestEmailCodeInner(email) }
+
+    private fun requestEmailCodeInner(email: String): WithingsLoginResult {
+        val flow = WithingsAuthDiagnostics.Flow.EMAIL_CODE
         cookieJar.clearSessionAndWorkflowCookies()
         val em = email.trim()
         if (em.isBlank() || !em.contains("@")) {
@@ -351,7 +389,7 @@ class WithingsDirectAuth(
                 .header("User-Agent", ua)
                 .get()
                 .build()
-            val html1 = client.newCall(req1).execute().use { it.body?.string().orEmpty() }
+            val html1 = client.newCall(req1).execute().use { trace(flow, "GET login", it); it.body?.string().orEmpty() }
             val hidden1 = parseHiddenInputs(html1)
 
             val bodyEmailBuilder = FormBody.Builder()
@@ -367,12 +405,13 @@ class WithingsDirectAuth(
                 .build()
 
             val (status2, html2, finalHttpUrl2) = client.newCall(req2).execute().use { res2 ->
+                trace(flow, "POST login", res2)
                 Triple(res2.code, res2.body?.string().orEmpty(), res2.request.url)
             }
             val finalUrl2 = finalHttpUrl2.toString()
 
             if (isLoggedInUrl(finalHttpUrl2)) {
-                return finishLogin()
+                return finishLogin(flow)
             }
             if (status2 == 429 || RATE_LIMIT_PATTERNS.any { html2.lowercase().contains(it) }) {
                 return WithingsLoginResult.Error(
@@ -406,8 +445,10 @@ class WithingsDirectAuth(
                 message = "Na e-mail $em byl odeslán 8místný přihlašovací kód Withings. Zadejte ho do pole níže."
             )
         } catch (e: IOException) {
+            traceException(flow, e)
             WithingsLoginResult.Error("Nepodařilo se spojit se serverem Withings. Zkontrolujte připojení a zkuste to znovu.", WithingsAuthFailureKind.NETWORK)
         } catch (e: Exception) {
+            traceException(flow, e)
             WithingsLoginResult.Error("Nepodařilo se vyžádat přihlašovací kód.", WithingsAuthFailureKind.OTHER)
         }
     }
@@ -459,7 +500,13 @@ class WithingsDirectAuth(
         }
     }
 
-    fun loginPassword(email: String, password: String): WithingsLoginResult {
+    /** [background] = přihlášení zapamatovaným heslem z obnovy na pozadí (jen pro diagnostiku). */
+    fun loginPassword(email: String, password: String, background: Boolean = false): WithingsLoginResult {
+        val flow = if (background) WithingsAuthDiagnostics.Flow.BACKGROUND_PASSWORD else WithingsAuthDiagnostics.Flow.MANUAL_PASSWORD
+        return traced(flow) { loginPasswordInner(email, password, flow) }
+    }
+
+    private fun loginPasswordInner(email: String, password: String, flow: WithingsAuthDiagnostics.Flow): WithingsLoginResult {
         if (password.isBlank()) {
             return WithingsLoginResult.Error("Zadejte heslo k účtu Withings.")
         }
@@ -477,9 +524,10 @@ class WithingsDirectAuth(
                 .get()
                 .build()
             client.newCall(req1).execute().use { res1 ->
+                trace(flow, "GET login", res1)
                 if (isLoggedInUrl(res1.request.url)) {
                     PLog.i("WithingsDirectAuth") { "loginPassword: req1 SSO already succeeded" }
-                    val fin = finishLogin()
+                    val fin = finishLogin(flow)
                     if (fin is WithingsLoginResult.Ok) return fin
                 }
             }
@@ -496,7 +544,7 @@ class WithingsDirectAuth(
                 .header("Referer", loginUrl)
                 .get()
                 .build()
-            val passGetHtml = client.newCall(passGetReq).execute().use { it.body?.string().orEmpty() }
+            val passGetHtml = client.newCall(passGetReq).execute().use { trace(flow, "GET password_check", it); it.body?.string().orEmpty() }
             val hiddenPass = parseHiddenInputs(passGetHtml)
 
             val bodyPassBuilder = FormBody.Builder()
@@ -512,16 +560,17 @@ class WithingsDirectAuth(
                 .build()
 
             val res3 = client.newCall(req3).execute()
+            trace(flow, "POST password_check", res3)
             val statusCode = res3.code
             val bodyText = res3.body?.string().orEmpty()
             val finalHttpUrl = res3.request.url
             val finalUrl = finalHttpUrl.toString()
             res3.close()
 
-            PLog.i("WithingsDirectAuth") { "loginPassword POST response: status=$statusCode, finalUrl=$finalUrl, hasSession=${cookieJar.hasSession()}" }
+            PLog.i("WithingsDirectAuth") { "loginPassword POST response: status=$statusCode, finalPath=${finalHttpUrl.encodedPath}, hasSession=${cookieJar.hasSession()}" }
 
             if (isLoggedInUrl(finalHttpUrl)) {
-                return finishLogin()
+                return finishLogin(flow)
             }
 
             val classified = classifyPasswordLoginResponse(
@@ -538,20 +587,24 @@ class WithingsDirectAuth(
                 }
                 lastHiddenFields = parseHiddenInputs(bodyText)
                 isAwaitingCode = true
-                PLog.i("WithingsDirectAuth") { "loginPassword requires 2FA: lastMfaUrl=$lastMfaUrl" }
+                PLog.i("WithingsDirectAuth") { "loginPassword requires 2FA" }
                 return classified
             }
             classified
         } catch (e: IOException) {
+            traceException(flow, e)
             PLog.w("WithingsDirectAuth", e) { "loginPassword network exception" }
             WithingsLoginResult.Error("Nepodařilo se spojit se serverem Withings. Zkontrolujte připojení a zkuste to znovu.", WithingsAuthFailureKind.NETWORK)
         } catch (e: Exception) {
+            traceException(flow, e)
             PLog.e("WithingsDirectAuth", e) { "loginPassword exception" }
             WithingsLoginResult.Error("Přihlášení se nezdařilo. Zkuste to prosím znovu.", WithingsAuthFailureKind.OTHER)
         }
     }
 
     companion object {
+        const val ABORTED_MESSAGE = "Tiché obnovení přerušeno kvůli ručnímu přihlášení."
+
         private val RATE_LIMIT_PATTERNS = listOf(
             "too many",
             "too_many_attempts",
@@ -629,7 +682,11 @@ class WithingsDirectAuth(
         }
     }
 
-    fun resumeMfa(code: String, emailFallback: String? = null): WithingsLoginResult {
+    fun resumeMfa(code: String, emailFallback: String? = null): WithingsLoginResult =
+        traced(WithingsAuthDiagnostics.Flow.MFA_CODE) { resumeMfaInner(code, emailFallback) }
+
+    private fun resumeMfaInner(code: String, emailFallback: String?): WithingsLoginResult {
+        val flow = WithingsAuthDiagnostics.Flow.MFA_CODE
         val em = emailFallback?.trim()?.takeIf { it.isNotBlank() }
             ?: pendingEmail?.takeIf { it.isNotBlank() }
             ?: return WithingsLoginResult.Error("Zadejte prosím i svůj e-mail účtu Withings.")
@@ -649,7 +706,7 @@ class WithingsDirectAuth(
                     .header("User-Agent", ua)
                     .get()
                     .build()
-                val initHtml = client.newCall(checkInitReq).execute().use { it.body?.string().orEmpty() }
+                val initHtml = client.newCall(checkInitReq).execute().use { trace(flow, "GET code_check", it); it.body?.string().orEmpty() }
                 lastHiddenFields = parseHiddenInputs(initHtml)
             }
 
@@ -670,13 +727,14 @@ class WithingsDirectAuth(
                 .build()
 
             val res = client.newCall(req).execute()
+            trace(flow, "POST code_check", res)
             val bodyText = res.body?.string().orEmpty()
             val finalHttpUrl = res.request.url
             val finalUrl = finalHttpUrl.toString()
             res.close()
 
             if (isLoggedInUrl(finalHttpUrl)) {
-                return finishLogin()
+                return finishLogin(flow)
             }
 
             if (bodyText.contains("Invalid code", ignoreCase = true) || hasVisibleAlertError(bodyText)) {
@@ -692,15 +750,17 @@ class WithingsDirectAuth(
                 return WithingsLoginResult.NeedsMfa(em, "Zadejte ještě dvoufázový kód (SMS / Authenticator).")
             }
 
-            finishLogin()
+            finishLogin(flow)
         } catch (e: IOException) {
+            traceException(flow, e)
             WithingsLoginResult.Error("Nepodařilo se spojit se serverem Withings. Zkontrolujte připojení a zkuste to znovu.", WithingsAuthFailureKind.NETWORK)
         } catch (e: Exception) {
+            traceException(flow, e)
             WithingsLoginResult.Error("Ověření kódu se nezdařilo. Zkuste to prosím znovu.", WithingsAuthFailureKind.OTHER)
         }
     }
 
-    private fun finishLogin(): WithingsLoginResult {
+    private fun finishLogin(flow: WithingsAuthDiagnostics.Flow): WithingsLoginResult {
         // Načteme ještě hlavní stránku app.withings.com, aby se případně nastavily finální cookies pro scalews.withings.com
         runCatching {
             val touchReq = Request.Builder()
@@ -708,7 +768,7 @@ class WithingsDirectAuth(
                 .header("User-Agent", ua)
                 .get()
                 .build()
-            client.newCall(touchReq).execute().close()
+            client.newCall(touchReq).execute().use { trace(flow, "GET app", it) }
         }
 
         val cookies = cookieJar.getCookieString()
@@ -716,6 +776,7 @@ class WithingsDirectAuth(
         PLog.i("WithingsDirectAuth") { "finishLogin: cookies=[${cookieJar.describe()}], hasSessionToken=${sessionToken != null}" }
         return try {
             val profiles = webClient.getUsersList(cookies, sessionToken)
+            diagnostics?.mark(flow, "getUsersList:${profiles.size}")
             PLog.i("WithingsDirectAuth") { "finishLogin: fetched ${profiles.size} profiles" }
             if (profiles.isEmpty()) {
                 WithingsLoginResult.Error("Přihlášeno k Withings, ale nebyl nalezen žádný profil.")
@@ -740,9 +801,11 @@ class WithingsDirectAuth(
                 WithingsLoginResult.Ok(session, profiles)
             }
         } catch (e: IOException) {
+            traceException(flow, e)
             PLog.w("WithingsDirectAuth", e) { "finishLogin network exception" }
             WithingsLoginResult.Error("Nepodařilo se spojit se serverem Withings. Zkontrolujte připojení a zkuste to znovu.", WithingsAuthFailureKind.NETWORK)
         } catch (e: Exception) {
+            traceException(flow, e)
             PLog.e("WithingsDirectAuth", e) { "finishLogin exception" }
             WithingsLoginResult.Error("Chyba při načtení profilů účtu Withings.", WithingsAuthFailureKind.OTHER)
         }

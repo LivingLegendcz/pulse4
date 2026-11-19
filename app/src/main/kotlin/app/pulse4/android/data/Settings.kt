@@ -64,6 +64,7 @@ enum class MapProvider(val title: String, val shortLabel: String, val subtitle: 
  * ani discovery hash gateway se jako adresa schránky nikdy nepoužijí.
  */
 class Settings(private val db: AppDatabase) {
+    private val cacheLock = Any()
     private val cache = ConcurrentHashMap<String, String>()
     private val missingKeys = ConcurrentHashMap.newKeySet<String>()
     @Volatile private var warmedUp = false
@@ -72,30 +73,60 @@ class Settings(private val db: AppDatabase) {
         cache[k]?.let { return it }
         if (warmedUp || missingKeys.contains(k)) return null
         val v = db.settings().get(k)
-        if (v != null) {
-            cache[k] = v
-        } else {
-            missingKeys.add(k)
+        synchronized(cacheLock) {
+            cache[k]?.let { return it }
+            if (warmedUp || missingKeys.contains(k)) return null
+            if (v != null) {
+                cache[k] = v
+            } else {
+                missingKeys.add(k)
+            }
         }
         return v
     }
 
     private fun get(k: String, d: String) = getRaw(k) ?: d
     internal fun put(k: String, v: String) {
-        cache[k] = v
-        missingKeys.remove(k)
         db.settings().put(SettingRow(k, v))
+        synchronized(cacheLock) {
+            cache[k] = v
+            missingKeys.remove(k)
+        }
+    }
+
+    private fun applyRowsToCache(rows: List<SettingRow>) {
+        synchronized(cacheLock) {
+            val fresh = rows.associate { it.key to it.value }
+            cache.keys.retainAll(fresh.keys)
+            cache.putAll(fresh)
+            missingKeys.clear()
+            warmedUp = true
+        }
+        refreshFlowsFromCache()
+    }
+
+    internal fun reloadFromDb() {
+        applyRowsToCache(db.settings().allNow())
+    }
+
+    internal fun invalidate(keys: Collection<String>? = null) {
+        synchronized(cacheLock) {
+            if (keys == null) {
+                cache.clear()
+                missingKeys.clear()
+                warmedUp = false
+            } else {
+                keys.forEach { k ->
+                    cache.remove(k)
+                    missingKeys.remove(k)
+                }
+            }
+        }
     }
 
     suspend fun warmUp() {
         withContext(Dispatchers.IO) {
-            val rows = db.settings().all().first()
-            rows.forEach { row ->
-                cache[row.key] = row.value
-                missingKeys.remove(row.key)
-            }
-            warmedUp = true
-            refreshFlowsFromCache()
+            applyRowsToCache(db.settings().all().first())
         }
     }
 
@@ -243,6 +274,21 @@ class Settings(private val db: AppDatabase) {
             .filter { it.isNotBlank() }
         set(v) = put("todayWidgetOrder", v.joinToString(","))
 
+    fun ownPlanId(lxmfDeliveryHash: String, legacyDeliveryHash: String? = null): String {
+        getRaw(KEY_OWN_PLAN_ID)?.takeIf { it.isNotBlank() }?.let { return it }
+        val legacyPlanId = legacyDeliveryHash?.takeIf { it.isNotBlank() }?.let { "plan-${it.take(8)}" }
+        val resolved = if (legacyPlanId != null && db.plans().head(legacyPlanId) != null) {
+            legacyPlanId
+        } else {
+            "plan-${lxmfDeliveryHash.take(8)}"
+        }
+        put(KEY_OWN_PLAN_ID, resolved)
+        return resolved
+    }
+
     /** Nastavení běží na pozadí v pracovních vláknech; volejte mimo hlavní vlákno. */
-    companion object { const val GATEWAY_DEFAULT_NAME = "Jihlava WoD Gateway – CZE" }
+    companion object {
+        const val GATEWAY_DEFAULT_NAME = "Jihlava WoD Gateway – CZE"
+        const val KEY_OWN_PLAN_ID = "training.ownPlanId"
+    }
 }

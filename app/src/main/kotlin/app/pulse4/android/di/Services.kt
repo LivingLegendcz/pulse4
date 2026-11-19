@@ -67,7 +67,10 @@ class ServiceLocator(internal val context: Context) {
 
     val outbox by lazy { OutboxManager(RoomOutboxStore(db)) }
     val sentLedger by lazy { RoomSentLedger(db) }
-    val bridge by lazy { ReticulumBridge(context, secrets, settings) }
+    val bridge by lazy {
+        ServiceMigrations.runOnce(this)
+        ReticulumBridge(context, secrets, settings)
+    }
     val planService by lazy { PlanService(RoomPlanStore(db)) }
     val planHandlers by lazy { PlanSyncHandlers(planService) }
     val transport by lazy {
@@ -1794,6 +1797,27 @@ object ServiceMigrations {
     private const val KEY_IDENTITY_V1 = "migration.lxmf_identity_v1"
     private const val KEY_ACCEPT_WEIGHT_V1 = "migration.accept_weight_default_v1"
     private const val KEY_FABRICATED_CLEANUP_V1 = "migration.fabricated_activity_cleanup_v1"
+    private const val KEY_FABRICATED_CLEANUP_V2 = "migration.fabricated_activity_cleanup_v2"
+    private const val CLEANUP_WORK_NAME = "fabricated-activity-cleanup"
+    private val FOOT_SPORTS = setOf(Sport.RUNNING, Sport.WALKING, Sport.HIKING)
+
+    private val identityMigrationLock = Any()
+    private val fabricatedCleanupLock = Any()
+
+    internal fun deriveSelfIdentityFromSecrets(secrets: SecretStore): Pair<String, String>? {
+        val privateKeyB64 = secrets.getString(SecretStore.RETICULUM_IDENTITY) ?: return null
+        val privBytes = runCatching { java.util.Base64.getDecoder().decode(privateKeyB64) }.getOrNull() ?: return null
+        if (privBytes.size < 32) return null
+        val edPriv = org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters(privBytes, 0)
+        val edPub = edPriv.generatePublicKey()
+        val xSeed = MessageDigest.getInstance("SHA-256").digest(privBytes)
+        val xPriv = org.bouncycastle.crypto.params.X25519PrivateKeyParameters(xSeed, 0)
+        val xPub = xPriv.generatePublicKey()
+        val pubKey64 = xPub.encoded + edPub.encoded
+        val publicKeyB64 = java.util.Base64.getEncoder().encodeToString(pubKey64)
+        val (lxmfHash, _) = deriveDeliveryHashes(publicKeyB64)
+        return publicKeyB64 to lxmfHash
+    }
 
     fun deriveDeliveryHashes(publicKeyB64: String): Pair<String, String> {
         val pubBytes = runCatching { java.util.Base64.getDecoder().decode(publicKeyB64) }.getOrNull()
@@ -1815,12 +1839,13 @@ object ServiceMigrations {
         settings: Settings,
         selfPublicKeyB64: String,
         json: kotlinx.serialization.json.Json = Wire.json,
-    ): Int {
+    ): Int = synchronized(identityMigrationLock) {
         val hashMap = LinkedHashMap<String, String>()
-        if (selfPublicKeyB64.isNotBlank()) {
-            val (lxmf, legacy) = deriveDeliveryHashes(selfPublicKeyB64)
-            if (legacy != lxmf) hashMap[legacy] = lxmf
-        }
+        val selfHashes: Pair<String, String>? = if (selfPublicKeyB64.isNotBlank()) {
+            deriveDeliveryHashes(selfPublicKeyB64).also { (lxmf, legacy) ->
+                if (legacy != lxmf) hashMap[legacy] = lxmf
+            }
+        } else null
         val contacts = db.contacts().allNow()
         for (c in contacts) {
             if (c.publicKeyB64.isBlank()) continue
@@ -1831,7 +1856,7 @@ object ServiceMigrations {
         }
         if (hashMap.isEmpty()) {
             settings.put(KEY_IDENTITY_V1, "1")
-            return 0
+            return@synchronized 0
         }
         fun mapId(id: String): String = hashMap[id] ?: id
         fun mapJsonHashes(raw: String): String {
@@ -1844,11 +1869,19 @@ object ServiceMigrations {
 
         var migrated = 0
         db.runInTransaction {
+            val contactById = HashMap<String, ContactRow>(contacts.size)
+            for (c in contacts) contactById[c.identity] = c
             for (c in contacts) {
                 val newId = mapId(c.identity)
                 if (newId != c.identity) {
+                    val existing = contactById[newId]
+                    if (existing == null || c.verifiedAtMs > existing.verifiedAtMs) {
+                        val updated = c.copy(identity = newId)
+                        db.contacts().upsert(updated)
+                        contactById[newId] = updated
+                    }
                     db.contacts().delete(c.identity)
-                    db.contacts().upsert(c.copy(identity = newId))
+                    contactById.remove(c.identity)
                     migrated++
                 }
             }
@@ -1864,10 +1897,30 @@ object ServiceMigrations {
             }
             for (row in db.grants().groupsNow()) {
                 val g = runCatching { json.decodeFromString(Group.serializer(), row.json) }.getOrNull() ?: continue
+                val newOwnerId = mapId(g.ownerId)
+                val newAdminId = mapId(g.adminId)
                 val newMembers = g.members.mapTo(LinkedHashSet()) { mapId(it) }
                 val newAdmins = g.admins.mapTo(LinkedHashSet()) { mapId(it) }
-                if (newMembers != g.members || newAdmins != g.admins) {
-                    val updated = g.copy(members = newMembers, admins = newAdmins)
+                val newHandover = g.pendingAdminHandover?.let { h ->
+                    h.copy(
+                        targetMemberId = mapId(h.targetMemberId),
+                        initiatedBy = mapId(h.initiatedBy),
+                    )
+                }
+                if (
+                    newOwnerId != g.ownerId ||
+                    newAdminId != g.adminId ||
+                    newMembers != g.members ||
+                    newAdmins != g.admins ||
+                    newHandover != g.pendingAdminHandover
+                ) {
+                    val updated = g.copy(
+                        ownerId = newOwnerId,
+                        adminId = newAdminId,
+                        members = newMembers,
+                        admins = newAdmins,
+                        pendingAdminHandover = newHandover,
+                    )
                     db.grants().upsertGroup(row.copy(json = json.encodeToString(Group.serializer(), updated)))
                     migrated++
                 }
@@ -1891,8 +1944,25 @@ object ServiceMigrations {
                 }
             }
             for (row in db.outbox().all()) {
+                if (
+                    row.state == app.pulse4.sync.DeliveryState.CANCELLED.name ||
+                    row.state == app.pulse4.sync.DeliveryState.SUPERSEDED.name
+                ) {
+                    continue
+                }
                 val newRec = mapId(row.recipient)
                 val decoded = runCatching { Wire.decode(row.wire) }.getOrNull()
+                val payloadHasLegacy = decoded != null && hashMap.keys.any { it in decoded.payload }
+                if (row.state == app.pulse4.sync.DeliveryState.QUEUED.name && payloadHasLegacy) {
+                    db.outbox().update(
+                        row.copy(
+                            recipient = newRec,
+                            state = app.pulse4.sync.DeliveryState.CANCELLED.name,
+                        )
+                    )
+                    migrated++
+                    continue
+                }
                 val newWire = if (decoded != null) {
                     val e = decoded.envelope
                     val mappedAuthor = mapId(e.author)
@@ -1909,16 +1979,31 @@ object ServiceMigrations {
             for (row in db.inbox().allSentNow()) {
                 val newRec = mapId(row.recipient)
                 if (newRec != row.recipient) {
+                    val existing = db.inbox().sent(newRec, row.objectKey)
+                    if (existing == null || row.version > existing.version) {
+                        db.inbox().putSent(row.copy(recipient = newRec))
+                    }
                     db.inbox().deleteSent(row.recipient, row.objectKey)
-                    db.inbox().putSent(row.copy(recipient = newRec))
                     migrated++
                 }
             }
             for (row in db.inbox().allReceivedNow()) {
                 val newAuthor = mapId(row.author)
+                val newPayload = mapJsonHashes(row.payload)
                 if (newAuthor != row.author) {
+                    val existing = db.inbox().received(newAuthor, row.objectType, row.objectId)
+                    if (existing == null || row.version > existing.version) {
+                        db.inbox().putObject(row.copy(author = newAuthor, payload = newPayload))
+                    } else {
+                        val existingPayload = mapJsonHashes(existing.payload)
+                        if (existingPayload != existing.payload) {
+                            db.inbox().putObject(existing.copy(payload = existingPayload))
+                        }
+                    }
                     db.inbox().removeObject(row.author, row.objectType, row.objectId)
-                    db.inbox().putObject(row.copy(author = newAuthor))
+                    migrated++
+                } else if (newPayload != row.payload) {
+                    db.inbox().putObject(row.copy(payload = newPayload))
                     migrated++
                 }
             }
@@ -1928,7 +2013,7 @@ object ServiceMigrations {
             for (row in db.plans().allRevisions()) {
                 val newJson = mapJsonHashes(row.json)
                 if (newJson != row.json) {
-                    db.plans().restoreRevision(row.copy(json = newJson))
+                    db.plans().replaceRevision(row.copy(json = newJson))
                     migrated++
                 }
             }
@@ -1939,11 +2024,11 @@ object ServiceMigrations {
                     migrated++
                 }
             }
-            val childRec = settings.getRaw("childRecipientIdentity")
+            val childRec = db.settings().get("childRecipientIdentity")
             if (!childRec.isNullOrBlank()) {
                 val mapped = mapId(childRec)
                 if (mapped != childRec) {
-                    settings.put("childRecipientIdentity", mapped)
+                    db.settings().put(SettingRow("childRecipientIdentity", mapped))
                     migrated++
                 }
             }
@@ -1956,9 +2041,20 @@ object ServiceMigrations {
                     }
                 }
             }
-            settings.put(KEY_IDENTITY_V1, "1")
+            if (selfHashes != null && db.settings().get(Settings.KEY_OWN_PLAN_ID).isNullOrBlank()) {
+                val (selfLxmf, selfLegacy) = selfHashes
+                val legacyPlanId = "plan-${selfLegacy.take(8)}"
+                val resolvedPlanId = if (db.plans().head(legacyPlanId) != null) {
+                    legacyPlanId
+                } else {
+                    "plan-${selfLxmf.take(8)}"
+                }
+                db.settings().put(SettingRow(Settings.KEY_OWN_PLAN_ID, resolvedPlanId))
+            }
         }
-        return migrated
+        settings.reloadFromDb()
+        settings.put(KEY_IDENTITY_V1, "1")
+        return@synchronized migrated
     }
 
     fun migrateAcceptWeightDefaultIfVerified(db: AppDatabase, settings: Settings, selfId: String) {
@@ -1974,12 +2070,32 @@ object ServiceMigrations {
         settings.put(KEY_ACCEPT_WEIGHT_V1, "1")
     }
 
+    internal fun isFabricated1KmLaps(act: Activity): Boolean {
+        val laps = act.laps
+        if (laps.isEmpty()) return false
+        val dist = act.distanceM ?: return false
+        val moving = act.movingTimeS ?: return false
+        if (dist < 1000.0 || moving <= 0.0) return false
+        val fullKm = (dist / 1000.0).toInt().coerceIn(1, 50)
+        if (laps.size != fullKm) return false
+        val basePace = moving / (dist / 1000.0)
+        return laps.all { lap ->
+            val k = lap.index
+            val expectedDur = basePace * (1.0 + kotlin.math.sin(k * 1.3) * 0.035)
+            lap.distanceM == 1000.0 &&
+                lap.descentM == null &&
+                lap.maxSpeedMps == null &&
+                lap.caloriesKcal == null &&
+                kotlin.math.abs(lap.durationS - expectedDur) < 0.05
+        }
+    }
+
     fun cleanLegacyFabricatedActivity(
         act: Activity,
         track: List<TrackPoint>,
         reparsedFit: ParsedFit? = null,
     ): Pair<Activity, List<TrackPoint>> {
-        val cleanedTrack = if (reparsedFit != null && reparsedFit.points.isNotEmpty()) {
+        var cleanedTrack = if (reparsedFit != null && reparsedFit.points.isNotEmpty()) {
             reparsedFit.points
         } else {
             track.map { pt ->
@@ -2011,68 +2127,244 @@ object ServiceMigrations {
             act.copy(
                 laps = mappedLaps,
                 avgCadence = reparsedFit.avgCadence ?: act.avgCadence,
+                maxCadence = reparsedFit.maxCadence ?: act.maxCadence,
                 powerZoneTimesS = if (act.avgPowerW == null) emptyList() else act.powerZoneTimesS,
             )
         } else {
+            val strippedLaps = if (isFabricated1KmLaps(act)) emptyList() else act.laps
+            val normalizedLaps = if (
+                strippedLaps.isNotEmpty() &&
+                act.sport in FOOT_SPORTS &&
+                act.avgCadence != null &&
+                act.avgCadence!! >= 110.0
+            ) {
+                val lapCads = strippedLaps.mapNotNull { it.avgCadence?.takeIf { c -> c > 0.0 } }
+                if (lapCads.isNotEmpty()) {
+                    val avgLapCad = lapCads.average()
+                    if (avgLapCad in 40.0..120.0 && kotlin.math.abs(act.avgCadence!! - avgLapCad * 2.0) <= act.avgCadence!! * 0.25) {
+                        strippedLaps.map { l -> l.avgCadence?.let { c -> l.copy(avgCadence = c * 2.0) } ?: l }
+                    } else strippedLaps
+                } else strippedLaps
+            } else strippedLaps
+            if (act.sport in FOOT_SPORTS && act.avgCadence != null && act.avgCadence!! >= 110.0) {
+                val trackCads = cleanedTrack.mapNotNull { it.cadence?.takeIf { c -> c > 0 } }
+                if (trackCads.isNotEmpty()) {
+                    val avgTrackCad = trackCads.average()
+                    if (avgTrackCad in 40.0..120.0 && kotlin.math.abs(act.avgCadence!! - avgTrackCad * 2.0) <= act.avgCadence!! * 0.25) {
+                        cleanedTrack = cleanedTrack.map { pt -> pt.cadence?.let { c -> pt.copy(cadence = c * 2) } ?: pt }
+                    }
+                }
+            }
             act.copy(
+                laps = normalizedLaps,
                 powerZoneTimesS = if (act.avgPowerW == null) emptyList() else act.powerZoneTimesS,
             )
         }
         return cleanedAct to cleanedTrack
     }
 
-    fun migrateLegacyFabricatedActivities(sl: ServiceLocator): Int {
-        if (sl.settings.getRaw(KEY_FABRICATED_CLEANUP_V1) != null) return 0
+    fun migrateLegacyFabricatedActivities(
+        sl: ServiceLocator,
+        batchSize: Int = 25,
+        onProgress: (processed: Int, total: Int) -> Unit = { _, _ -> },
+    ): Int = migrateLegacyFabricatedActivities(
+        db = sl.db,
+        settings = sl.settings,
+        fitDir = File(sl.context.noBackupFilesDir, "fit"),
+        decryptFit = { sl.vault.open(it) },
+        batchSize = batchSize,
+        onProgress = onProgress,
+    )
+
+    internal fun migrateLegacyFabricatedActivities(
+        db: AppDatabase,
+        settings: Settings,
+        fitDir: File,
+        decryptFit: (ByteArray) -> ByteArray,
+        batchSize: Int = 25,
+        onProgress: (processed: Int, total: Int) -> Unit = { _, _ -> },
+    ): Int = synchronized(fabricatedCleanupLock) {
+        if (settings.getRaw(KEY_FABRICATED_CLEANUP_V2) != null) return@synchronized 0
+        val allIds = db.activities().allIds()
+        if (allIds.isEmpty()) {
+            settings.put(KEY_FABRICATED_CLEANUP_V1, "1")
+            settings.put(KEY_FABRICATED_CLEANUP_V2, "1")
+            return@synchronized 0
+        }
         val trackSerializer = kotlinx.serialization.builtins.ListSerializer(TrackPoint.serializer())
-        val fitDir = File(sl.context.noBackupFilesDir, "fit")
+
+        val referencedFitHashes = allIds.mapNotNullTo(HashSet()) { id ->
+            id.removePrefix("fit-").substringBefore("-s").takeIf { id.startsWith("fit-") }
+        }
+        val unindexedFitSessions = HashMap<Long, List<ParsedFit>>()
+        if (allIds.any { it.startsWith("garmin-") } && fitDir.isDirectory) {
+            val extraFitFiles = fitDir.listFiles { f ->
+                f.isFile && f.name.endsWith(".fit.enc") && f.name.removeSuffix(".fit.enc") !in referencedFitHashes
+            }.orEmpty()
+            for (f in extraFitFiles) {
+                val sessions = runCatching {
+                    val bytes = decryptFit(f.readBytes())
+                    (FitImporter.parse(bytes) as? FitResult.Ok)?.sessions
+                }.getOrNull() ?: continue
+                sessions.firstOrNull()?.let { first ->
+                    unindexedFitSessions[first.startMs] = sessions
+                }
+            }
+        }
+
+        fun findGarminReparsedFit(act: Activity, sessionIdx: Int): ParsedFit? {
+            if (unindexedFitSessions.isEmpty()) return null
+            val exact = unindexedFitSessions[act.startUtcMs]?.getOrNull(sessionIdx)
+            if (exact != null && exact.sport == act.sport) return exact
+            for ((startMs, sessions) in unindexedFitSessions) {
+                if (kotlin.math.abs(startMs - act.startUtcMs) <= 2_000L) {
+                    val candidate = sessions.getOrNull(sessionIdx)
+                    if (candidate != null && candidate.sport == act.sport) return candidate
+                }
+            }
+            return null
+        }
+
         var cleanedCount = 0
-        sl.db.runInTransaction {
-            for (row in sl.db.activities().allNow()) {
+        var processed = 0
+        val effectiveBatchSize = batchSize.coerceAtLeast(1)
+        for (batchIds in allIds.chunked(effectiveBatchSize)) {
+            val updatedActivities = ArrayList<ActivityRow>()
+            val updatedTracks = ArrayList<TrackRow>()
+
+            // Keystore decrypt + FIT parse probíhá vždy mimo DB transakci (N-14).
+            for (id in batchIds) {
+                val row = db.activities().get(id) ?: continue
                 val act = runCatching { Wire.json.decodeFromString(Activity.serializer(), row.json) }.getOrNull() ?: continue
-                val trackRow = sl.db.activities().track(row.id)
+                val trackRow = db.activities().track(id)
                 val track = trackRow?.let {
                     runCatching { Wire.json.decodeFromString(trackSerializer, it.json) }.getOrNull()
                 }.orEmpty()
-                val fitHash = row.id.removePrefix("fit-").substringBefore("-s").takeIf { row.id.startsWith("fit-") }
+                val sessionIdx = id.substringAfter("-s", "").toIntOrNull() ?: 0
+                val fitHash = id.removePrefix("fit-").substringBefore("-s").takeIf { id.startsWith("fit-") }
                 val reparsed = fitHash?.let { h ->
                     val f = File(fitDir, "$h.fit.enc")
                     if (f.exists()) {
-                        val sessionIdx = row.id.substringAfter("-s", "").toIntOrNull() ?: 0
                         runCatching {
-                            val bytes = sl.vault.open(f.readBytes())
+                            val bytes = decryptFit(f.readBytes())
                             (FitImporter.parse(bytes) as? FitResult.Ok)?.sessions?.getOrNull(sessionIdx)
                         }.getOrNull()
                     } else null
-                }
+                } ?: if (id.startsWith("garmin-")) findGarminReparsedFit(act, sessionIdx) else null
+
                 val (newAct, newTrack) = cleanLegacyFabricatedActivity(act, track, reparsed)
                 if (newAct != act) {
-                    sl.db.activities().upsert(newAct.toRow(Wire.json.encodeToString(Activity.serializer(), newAct)))
-                    cleanedCount++
+                    updatedActivities.add(newAct.toRow(Wire.json.encodeToString(Activity.serializer(), newAct)))
                 }
                 if (trackRow != null && newTrack != track) {
-                    sl.db.activities().upsertTrack(TrackRow(row.id, Wire.json.encodeToString(trackSerializer, newTrack)))
-                    cleanedCount++
+                    updatedTracks.add(TrackRow(id, Wire.json.encodeToString(trackSerializer, newTrack)))
                 }
             }
-            sl.settings.put(KEY_FABRICATED_CLEANUP_V1, "1")
+
+            if (updatedActivities.isNotEmpty() || updatedTracks.isNotEmpty()) {
+                db.runInTransaction {
+                    updatedActivities.forEach { db.activities().upsert(it) }
+                    updatedTracks.forEach { db.activities().upsertTrack(it) }
+                }
+                cleanedCount += updatedActivities.size + updatedTracks.size
+            }
+            processed += batchIds.size
+            onProgress(processed, allIds.size)
         }
-        return cleanedCount
+        settings.put(KEY_FABRICATED_CLEANUP_V1, "1")
+        settings.put(KEY_FABRICATED_CLEANUP_V2, "1")
+        return@synchronized cleanedCount
+    }
+
+    fun scheduleFabricatedActivityCleanup(context: Context) {
+        runCatching {
+            val req = androidx.work.OneTimeWorkRequestBuilder<FabricatedActivityCleanupWorker>().build()
+            androidx.work.WorkManager.getInstance(context.applicationContext)
+                .enqueueUniqueWork(CLEANUP_WORK_NAME, androidx.work.ExistingWorkPolicy.KEEP, req)
+        }.onFailure { e ->
+            PLog.w("ServiceMigrations", e) { "Could not schedule fabricated activity cleanup worker" }
+        }
     }
 
     fun runOnce(sl: ServiceLocator) {
-        runCatching {
-            val info = sl.bridge.ensureStarted()
-            if (sl.settings.getRaw(KEY_IDENTITY_V1) == null) {
-                migrateLegacyPulseIdentities(sl.db, sl.settings, info.publicKeyB64)
+        synchronized(identityMigrationLock) {
+            runCatching {
+                val selfIdentity = deriveSelfIdentityFromSecrets(sl.secrets)
+                if (sl.settings.getRaw(KEY_IDENTITY_V1) == null) {
+                    if (selfIdentity != null) {
+                        migrateLegacyPulseIdentities(sl.db, sl.settings, selfIdentity.first)
+                    } else if (sl.db.contacts().allNow().isNotEmpty()) {
+                        migrateLegacyPulseIdentities(sl.db, sl.settings, "")
+                    }
+                }
+                if (selfIdentity != null) {
+                    migrateAcceptWeightDefaultIfVerified(sl.db, sl.settings, selfIdentity.second)
+                }
+            }.onFailure { e ->
+                PLog.w("ServiceMigrations", e) { "Identity/weight migration skipped or failed" }
             }
-            migrateAcceptWeightDefaultIfVerified(sl.db, sl.settings, info.deliveryHash)
-        }.onFailure { e ->
-            PLog.w("ServiceMigrations", e) { "Identity/weight migration skipped or failed" }
         }
+        if (sl.settings.getRaw(KEY_FABRICATED_CLEANUP_V2) == null) {
+            scheduleFabricatedActivityCleanup(sl.context)
+        }
+    }
+}
+
+class FabricatedActivityCleanupWorker(
+    ctx: Context,
+    params: androidx.work.WorkerParameters,
+) : androidx.work.CoroutineWorker(ctx, params) {
+    override suspend fun doWork(): Result = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        val sl = (applicationContext as app.pulse4.android.Pulse4App).services
+        val nm = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as? android.app.NotificationManager
+        ensureChannel(nm)
+        try {
+            ServiceMigrations.migrateLegacyFabricatedActivities(sl, batchSize = 25) { processed, total ->
+                setProgressAsync(androidx.work.workDataOf("processed" to processed, "total" to total))
+                updateNotification(nm, processed, total)
+            }
+            Result.success()
+        } catch (e: Exception) {
+            PLog.w("FabricatedActivityCleanupWorker", e) { "Batched activity cleanup failed" }
+            Result.retry()
+        } finally {
+            runCatching { nm?.cancel(NOTIFICATION_ID) }
+        }
+    }
+
+    private fun ensureChannel(nm: android.app.NotificationManager?) {
+        if (nm == null || nm.getNotificationChannel(CHANNEL_ID) != null) return
         runCatching {
-            migrateLegacyFabricatedActivities(sl)
-        }.onFailure { e ->
-            PLog.w("ServiceMigrations", e) { "Fabricated activity cleanup failed" }
+            val ch = android.app.NotificationChannel(
+                CHANNEL_ID,
+                "Optimalizace dat",
+                android.app.NotificationManager.IMPORTANCE_LOW,
+            ).apply {
+                description = "Jednorázová optimalizace dříve importovaných aktivit na pozadí."
+                setShowBadge(false)
+            }
+            nm.createNotificationChannel(ch)
         }
+    }
+
+    private fun updateNotification(nm: android.app.NotificationManager?, processed: Int, total: Int) {
+        if (nm == null || total <= 0) return
+        runCatching {
+            val notif = androidx.core.app.NotificationCompat.Builder(applicationContext, CHANNEL_ID)
+                .setSmallIcon(app.pulse4.android.R.mipmap.ic_launcher)
+                .setContentTitle("Pulse4 · optimalizace aktivit")
+                .setContentText("Zpracováno $processed / $total")
+                .setProgress(total, processed.coerceAtMost(total), false)
+                .setOngoing(true)
+                .setSilent(true)
+                .setPriority(androidx.core.app.NotificationCompat.PRIORITY_LOW)
+                .build()
+            nm.notify(NOTIFICATION_ID, notif)
+        }
+    }
+
+    private companion object {
+        const val CHANNEL_ID = "pulse4_migration_progress"
+        const val NOTIFICATION_ID = 4110
     }
 }

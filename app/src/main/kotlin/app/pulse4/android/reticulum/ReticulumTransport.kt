@@ -34,6 +34,7 @@ class ReticulumTransport(
 ) {
     private var receiver: Receiver? = null
     private val pumpLock = Any()
+    private val syncInboxLock = Any()
     private val inFlightWaitMs = 15_000L
     @Volatile
     private var pumpActiveCallback: ((Outcome) -> Unit)? = null
@@ -181,15 +182,6 @@ class ReticulumTransport(
                 }
             }
             try {
-                if (usePropagation) {
-                    runCatching {
-                        bridge.syncInbox { msg ->
-                            val outcome = processEventInternal(msg, deferredAcks)
-                            outcome is Outcome.Applied || outcome is Outcome.Duplicate || outcome is Outcome.Stale || outcome is Outcome.AckProcessed
-                        }
-                    }
-                }
-
                 val idleCapMs = if (sent > 0) windowMs else minOf(windowMs, if (bridge.isGatewayOnline || usePropagation) 1_500L else 500L)
                 val deadline = System.currentTimeMillis() + idleCapMs
                 while (true) {
@@ -204,6 +196,27 @@ class ReticulumTransport(
             }
             val inFlight = outbox.due(Long.MAX_VALUE / 2, localPeers = localPeers).size
             PumpStats(sent, received, rejected, inFlight)
+        }
+        // R3-14: Run syncInbox outside pumpLock so /get and Resource downloads do not block sending
+        var syncReceived = 0
+        var syncRejected = 0
+        if (usePropagation) {
+            synchronized(syncInboxLock) {
+                runCatching {
+                    bridge.syncInbox { msg ->
+                        val outcome = processEventInternal(msg, deferredAcks)
+                        when (outcome) {
+                            is Outcome.Rejected -> syncRejected++
+                            is Outcome.AckProcessed, is Outcome.Duplicate, is Outcome.Stale, null -> Unit
+                            else -> {
+                                syncReceived++
+                                onApplied()
+                            }
+                        }
+                        outcome is Outcome.Applied || outcome is Outcome.Duplicate || outcome is Outcome.Stale || outcome is Outcome.AckProcessed
+                    }
+                }
+            }
         }
         // NEW-5: Run ACK stamp PoW & dispatch outside pumpLock
         if (deferredAcks.isNotEmpty()) {
@@ -220,6 +233,11 @@ class ReticulumTransport(
                 }
             }
         }
-        return stats
+        return PumpStats(
+            sent = stats.sent,
+            received = stats.received + syncReceived,
+            rejected = stats.rejected + syncRejected,
+            pendingInFlight = stats.pendingInFlight,
+        )
     }
 }

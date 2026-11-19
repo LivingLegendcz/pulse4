@@ -304,4 +304,102 @@ class LinkResourceCoordinatorTest {
         assertEquals("evt-wd-1", failures.first().eventId)
         assertEquals(0, coord.activeOutboundCount())
     }
+
+    @Test
+    fun resourceRclEmitsRejectedByNodeFailureAndClearEmitsFailedForInFlight() {
+        val link = createActiveLink(mtu = 500)
+        val coord = LinkResourceCoordinator()
+        val pkts = mutableListOf<ByteArray>()
+        val resHashHex = coord.startOutbound(link, Random(7).nextBytes(2048), "evt-rcl-1") { pkts.add(it); true }
+        assertNotNull(resHashHex)
+        assertEquals(1, coord.activeOutboundCount())
+
+        val advPlain = link.decryptLinkPayload(packetHeader(pkts.first()).second.second)!!
+        val rclBody = packetHeader(RnsResourceReceiver.buildRejectPacket(link, advPlain)!!).second.second
+        val failures = mutableListOf<LinkResourceCoordinator.ResourceFailedResult>()
+        val (consumed, _) = coord.handleLinkData(
+            link = link,
+            contextByte = RnsContext.RESOURCE_RCL,
+            rawPayload = rclBody,
+            onFailure = { failures.add(it) },
+        ) { true }
+        assertTrue(consumed)
+        assertEquals(0, coord.activeOutboundCount())
+        assertEquals(1, failures.size)
+        assertEquals("evt-rcl-1", failures.first().eventId)
+        assertEquals("REJECTED_BY_NODE", failures.first().reason)
+
+        // Now verify clear() emits FAILED for in-flight outbound + inbound responses
+        assertNotNull(coord.startOutbound(link, Random(8).nextBytes(2048), "evt-clear-1") { true })
+        val reqId = ByteArray(16) { 0x42 }
+        coord.registerPendingResponse(reqId)
+        val respSender = RnsResourceSender(link, Random(9).nextBytes(2048), autoCompress = false, requestId = reqId, isResponse = true)
+        val respAdvBody = packetHeader(respSender.buildAdvertisementPacket()!!).second.second
+        coord.handleLinkData(link, RnsContext.RESOURCE_ADV, respAdvBody) { true }
+        assertEquals(1, coord.activeOutboundCount())
+        assertEquals(1, coord.activeInboundCount())
+
+        val cancelled = coord.clear("LINK_TEARDOWN")
+        assertEquals(0, coord.activeOutboundCount())
+        assertEquals(0, coord.activeInboundCount())
+        assertTrue(cancelled.any { it.eventId == "evt-clear-1" && it.reason == "LINK_TEARDOWN" })
+        assertTrue(cancelled.any { it.isResponse && it.reason == "LINK_TEARDOWN" })
+    }
+
+    @Test
+    fun partialMultiSegmentInboundCountsTowardConcurrencyCapAndExpiresAfter120sTtl() {
+        val link = createActiveLink(mtu = 32768)
+        val coord = LinkResourceCoordinator()
+        val t0 = 1_000_000L
+
+        fun completeFirstSegmentOnly(seed: Int) {
+            val sender = RnsResourceSender(link, Random(seed).nextBytes(1_200_000), autoCompress = false)
+            assertTrue(sender.split)
+            val advBody = packetHeader(sender.buildAdvertisementPacket(t0)!!).second.second
+            val toSender = ArrayDeque<ByteArray>()
+            coord.handleLinkData(link, RnsContext.RESOURCE_ADV, advBody, nowMs = t0) { toSender.addLast(it); true }
+            while (toSender.isNotEmpty()) {
+                val pkt = toSender.removeFirst()
+                val (ctx, body) = packetHeader(pkt).second
+                if (ctx == RnsContext.RESOURCE_REQ) {
+                    val dec = link.decryptLinkPayload(body)!!
+                    sender.handleRequest(dec).forEach { partPkt ->
+                        val (pCtx, pBody) = packetHeader(partPkt).second
+                        coord.handleLinkData(link, pCtx, pBody, nowMs = t0) { reply ->
+                            if (packetHeader(reply).first == RnsPacketType.DATA) toSender.addLast(reply)
+                            true
+                        }
+                    }
+                }
+            }
+        }
+
+        // Complete segment 1 for two direct multi-segment transfers -> both sit in partialMultiSegmentInbound
+        completeFirstSegmentOnly(101)
+        completeFirstSegmentOnly(102)
+        assertEquals(0, coord.activeInboundCount())
+        assertEquals(2, coord.partialMultiSegmentCountForTest())
+
+        // 3rd direct inbound at t0 + 10s must be rejected because 2 partials count toward MAX_CONCURRENT_DIRECT_INBOUND
+        val third = RnsResourceSender(link, Random(103).nextBytes(1024), autoCompress = false)
+        val thirdBody = packetHeader(third.buildAdvertisementPacket(t0 + 10_000L)!!).second.second
+        val replies = mutableListOf<ByteArray>()
+        coord.handleLinkData(link, RnsContext.RESOURCE_ADV, thirdBody, nowMs = t0 + 10_000L) {
+            replies.add(it); true
+        }
+        assertEquals(0, coord.activeInboundCount())
+        assertEquals(RnsContext.RESOURCE_RCL, packetHeader(replies.last()).second.first)
+
+        // Advance past 120s TTL -> watchdog evicts stale partial buffers
+        coord.tickWatchdog(t0 + LinkResourceCoordinator.PARTIAL_MULTI_SEGMENT_TTL_MS) { true }
+        assertEquals(0, coord.partialMultiSegmentCountForTest())
+
+        // Now a new direct inbound transfer is accepted
+        replies.clear()
+        coord.handleLinkData(link, RnsContext.RESOURCE_ADV, thirdBody, nowMs = t0 + LinkResourceCoordinator.PARTIAL_MULTI_SEGMENT_TTL_MS) {
+            replies.add(it); true
+        }
+        assertEquals(1, coord.activeInboundCount())
+        assertEquals(RnsContext.RESOURCE_REQ, packetHeader(replies.last()).second.first)
+    }
 }

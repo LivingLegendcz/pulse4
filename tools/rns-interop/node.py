@@ -53,6 +53,17 @@ restricted_router.auth_required = True
 restricted_router.allowed_list = []
 restricted_prop_dest = restricted_router.propagation_destination
 
+# Small-limit PN (propagation_limit=32 KB, sync_limit=32 KB) for testing PN size limit / RESOURCE_RCL
+small_limit_id = RNS.Identity()
+small_limit_router = LXMF.LXMRouter(
+    identity=small_limit_id,
+    storagepath=os.path.join(work, "lxmf_small_limit"),
+    propagation_limit=32,
+    sync_limit=32,
+)
+small_limit_router.enable_propagation()
+small_limit_prop_dest = small_limit_router.propagation_destination
+
 seed = bytes.fromhex(seed_hex)
 kid = RNS.Identity.from_bytes(hashlib.sha256(seed).digest() + seed)
 alice = RNS.Identity()
@@ -81,7 +92,29 @@ def _on_direct_delivery(message):
     if delivery_links and message.signature_validated:
         link = delivery_links[-1]
         if link.status == RNS.Link.ACTIVE:
-            if len(message.content) >= 1_200_000:
+            if message.title == b"trigger-malformed-adv":
+                import RNS.vendor.umsgpack as msgpack
+                fake_hash = b"\x11" * 32
+                fake_rand = b"\x22" * 4
+                for bad_n in (0x7fffffff, -1):
+                    bad_adv = msgpack.packb({
+                        "t": 1024,
+                        "d": 1024,
+                        "n": bad_n,
+                        "h": fake_hash,
+                        "r": fake_rand,
+                        "o": fake_hash,
+                        "i": 1,
+                        "l": 1,
+                        "q": None,
+                        "f": 0x01,
+                        "m": b"\x00" * 4,
+                    })
+                    RNS.Packet(link, bad_adv, context=RNS.Packet.RESOURCE_ADV).send()
+                py_after = LXMessage(kd, bob_in, b"after-malformed-adv", title="py-after-malformed", desired_method=LXMessage.DIRECT)
+                py_after.pack()
+                RNS.Resource(py_after.packed, link)
+            elif len(message.content) >= 1_200_000:
                 py_1m2 = LXMessage(kd, bob_in, os.urandom(1_250_000), title="py-1m2-resource", desired_method=LXMessage.DIRECT)
                 py_1m2.pack()
                 RNS.Resource(py_1m2.packed, link)
@@ -106,6 +139,14 @@ lxmf_large_data = m_large.packed[:16] + kd.encrypt(m_large.packed[16:])
 router.lxmf_propagation(lxmf_large_data, stamp_value=20, stamp_data=os.urandom(32))
 py_large_kt_tid = RNS.Identity.full_hash(lxmf_large_data).hex()
 
+multi_raw = os.urandom(1_250_000)
+m_multi = LXMessage(kd, src_in, multi_raw, title="py-multi-get", desired_method=LXMessage.PROPAGATED)
+m_multi.pack()
+lxmf_multi_data = m_multi.packed[:16] + kd.encrypt(m_multi.packed[16:])
+router.lxmf_propagation(lxmf_multi_data, stamp_value=20, stamp_data=os.urandom(32))
+py_multi_kt_tid = RNS.Identity.full_hash(lxmf_multi_data).hex()
+py_multi_kt_sha256 = hashlib.sha256(multi_raw).hexdigest()
+
 announces_seen = []
 
 class AnnounceHandler:
@@ -121,6 +162,7 @@ info = {
     "lxmf": LXMF._version.__version__,
     "prop_dest": prop_dest.hash.hex(),
     "restricted_prop_dest": restricted_prop_dest.hash.hex(),
+    "small_limit_prop_dest": small_limit_prop_dest.hash.hex(),
     "node_transport_id": RNS.Transport.identity.hash.hex(),
     "alice_pub": alice.get_public_key().hex(),
     "alice_lxmf_dest": src_in.hash.hex(),
@@ -130,6 +172,8 @@ info = {
     "kotlin_lxmf_dest": kd.hash.hex(),
     "py_to_kt_tid": py_to_kt_tid,
     "py_large_kt_tid": py_large_kt_tid,
+    "py_multi_kt_tid": py_multi_kt_tid,
+    "py_multi_kt_sha256": py_multi_kt_sha256,
     "stamp_cost": router.propagation_stamp_cost,
     "stamp_flex": router.propagation_stamp_cost_flexibility,
 }
@@ -137,6 +181,7 @@ with open(os.path.join(work, "info.json"), "w") as f:
     json.dump(info, f)
 router.announce_propagation_node()
 restricted_router.announce_propagation_node()
+small_limit_router.announce_propagation_node()
 bob_in.announce()
 print("READY", json.dumps(info), flush=True)
 
@@ -163,9 +208,11 @@ while True:
                     })
             except Exception as e:
                 verified_kt_msgs.append({"tid": k.hex(), "error": str(e)})
+    small_limit_entries = {k.hex(): v[0].hex() for k, v in list(small_limit_router.propagation_entries.items())}
     with open(os.path.join(work, "entries.json"), "w") as f:
         json.dump({
             "entries": entries,
+            "small_limit_entries": small_limit_entries,
             "kt_to_py": verified_kt_msgs,
             "direct_kt_to_py": direct_kt_to_py,
             "announces": announces_seen,

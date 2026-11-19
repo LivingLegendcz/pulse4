@@ -16,6 +16,7 @@ internal class LinkResourceCoordinator {
     companion object {
         const val MAX_CONCURRENT_DIRECT_INBOUND = 2
         const val DEFAULT_MAX_RESPONSE_SIZE = RnsResourceConstants.DEFAULT_MAX_DECOMPRESSED_SIZE
+        const val PARTIAL_MULTI_SEGMENT_TTL_MS = 120_000L
     }
 
     data class ActiveOutbound(
@@ -64,14 +65,38 @@ internal class LinkResourceCoordinator {
     private val partialMultiSegmentInbound = ConcurrentHashMap<String, PendingMultiSegmentInbound>()
     private val expectedResponseLock = Any()
     private var expectedResponse: PendingResponseExpectation? = null
+    internal var accessGuard: (() -> Unit)? = null
 
-    fun activeOutboundCount(): Int = outbound.size
-    fun activeInboundCount(): Int = inbound.size
+    fun activeOutboundCount(): Int {
+        accessGuard?.invoke()
+        return outbound.size
+    }
+
+    fun activeInboundCount(): Int {
+        accessGuard?.invoke()
+        return inbound.size
+    }
+
+    internal fun partialMultiSegmentCountForTest(): Int {
+        accessGuard?.invoke()
+        return partialMultiSegmentInbound.size
+    }
+
+    private fun evictExpiredPartialMultiSegmentInbound(nowMs: Long) {
+        partialMultiSegmentInbound.entries.removeIf { entry ->
+            val expired = nowMs - entry.value.updatedAtMs >= PARTIAL_MULTI_SEGMENT_TTL_MS
+            if (expired && entry.value.isResponse) {
+                clearPendingResponse(entry.value.requestId)
+            }
+            expired
+        }
+    }
 
     fun registerPendingResponse(
         requestId: ByteArray,
         maxResponseSize: Int = DEFAULT_MAX_RESPONSE_SIZE,
     ) {
+        accessGuard?.invoke()
         synchronized(expectedResponseLock) {
             expectedResponse = PendingResponseExpectation(
                 requestId = requestId.copyOf(),
@@ -81,6 +106,7 @@ internal class LinkResourceCoordinator {
     }
 
     fun clearPendingResponse(requestId: ByteArray? = null) {
+        accessGuard?.invoke()
         synchronized(expectedResponseLock) {
             val current = expectedResponse ?: return
             if (requestId == null || MessageDigest.isEqual(current.requestId, requestId)) {
@@ -94,6 +120,7 @@ internal class LinkResourceCoordinator {
      * is currently transferring (or awaiting its next multi-segment advertisement), or null otherwise.
      */
     fun activeResponseLastActivityMs(requestId: ByteArray): Long? {
+        accessGuard?.invoke()
         var latest: Long? = null
         for (receiver in inbound.values) {
             val reqId = receiver.adv.requestId
@@ -110,13 +137,36 @@ internal class LinkResourceCoordinator {
         return latest
     }
 
-    fun clear() {
-        outbound.values.forEach { it.sender.handleCancel() }
+    fun clear(reason: String = "LINK_TEARDOWN"): List<ResourceFailedResult> {
+        accessGuard?.invoke()
+        val failures = mutableListOf<ResourceFailedResult>()
+        for ((hashHex, entry) in outbound.entries.toList()) {
+            entry.sender.handleCancel()
+            failures += ResourceFailedResult(
+                eventId = entry.eventId,
+                resourceHashHex = hashHex,
+                isResponse = entry.sender.isResponse,
+                requestId = entry.sender.requestId,
+                reason = reason,
+            )
+        }
         outbound.clear()
-        inbound.values.forEach { it.handleCancel() }
+        for ((hashHex, receiver) in inbound.entries.toList()) {
+            receiver.handleCancel()
+            if (receiver.adv.isResponse) {
+                failures += ResourceFailedResult(
+                    eventId = null,
+                    resourceHashHex = hashHex,
+                    isResponse = true,
+                    requestId = receiver.adv.requestId,
+                    reason = reason,
+                )
+            }
+        }
         inbound.clear()
         partialMultiSegmentInbound.clear()
         clearPendingResponse(null)
+        return failures
     }
 
     /**
@@ -130,6 +180,7 @@ internal class LinkResourceCoordinator {
         eventId: String,
         sendPacket: (ByteArray) -> Boolean,
     ): String? {
+        accessGuard?.invoke()
         val sender = RnsResourceSender(link = link, data = data, autoCompress = true)
         val advPkt = sender.buildAdvertisementPacket() ?: return null
         outbound[sender.hashHex] = ActiveOutbound(eventId = eventId, sender = sender)
@@ -149,8 +200,10 @@ internal class LinkResourceCoordinator {
     fun handleProof(
         contextByte: Byte,
         payload: ByteArray,
+        onFailure: (ResourceFailedResult) -> Unit = {},
         sendPacket: (ByteArray) -> Boolean = { false },
     ): ResourceProofResult? {
+        accessGuard?.invoke()
         if (contextByte != RnsContext.RESOURCE_PRF || payload.size != 64) return null
         val hashHex = RnsCrypto.bytesToHex(payload.copyOfRange(0, 32))
         val entry = outbound[hashHex] ?: return null
@@ -158,16 +211,46 @@ internal class LinkResourceCoordinator {
         outbound.remove(hashHex)
 
         if (entry.sender.segmentIndex < entry.sender.totalSegments) {
-            val nextSender = entry.sender.nextSegment() ?: return null
+            val nextSender = entry.sender.nextSegment()
+            if (nextSender == null) {
+                onFailure(
+                    ResourceFailedResult(
+                        eventId = entry.eventId,
+                        resourceHashHex = hashHex,
+                        isResponse = entry.sender.isResponse,
+                        requestId = entry.sender.requestId,
+                        reason = "NEXT_SEGMENT_FAILED",
+                    ),
+                )
+                return null
+            }
             val advPkt = nextSender.buildAdvertisementPacket()
             if (advPkt != null) {
                 outbound[nextSender.hashHex] = ActiveOutbound(eventId = entry.eventId, sender = nextSender)
                 if (!sendPacket(advPkt)) {
                     outbound.remove(nextSender.hashHex)
                     nextSender.handleCancel()
+                    onFailure(
+                        ResourceFailedResult(
+                            eventId = entry.eventId,
+                            resourceHashHex = nextSender.hashHex,
+                            isResponse = entry.sender.isResponse,
+                            requestId = entry.sender.requestId,
+                            reason = "NEXT_SEGMENT_SEND_FAILED",
+                        ),
+                    )
                 }
             } else {
                 nextSender.handleCancel()
+                onFailure(
+                    ResourceFailedResult(
+                        eventId = entry.eventId,
+                        resourceHashHex = nextSender.hashHex,
+                        isResponse = entry.sender.isResponse,
+                        requestId = entry.sender.requestId,
+                        reason = "NEXT_SEGMENT_ADV_FAILED",
+                    ),
+                )
             }
             return null
         }
@@ -187,10 +270,14 @@ internal class LinkResourceCoordinator {
         contextByte: Byte,
         rawPayload: ByteArray,
         packetHash: ByteArray? = null,
+        nowMs: Long = System.currentTimeMillis(),
+        onFailure: (ResourceFailedResult) -> Unit = {},
         sendPacket: (ByteArray) -> Boolean,
     ): Pair<Boolean, ResourceInboundResult?> {
+        accessGuard?.invoke()
         return when (contextByte) {
             RnsContext.RESOURCE_ADV -> {
+                evictExpiredPartialMultiSegmentInbound(nowMs)
                 val dec = link.decryptLinkPayload(rawPayload) ?: return true to null
                 val adv = RnsResourceAdvertisement.unpack(dec)
                 if (adv == null) {
@@ -221,11 +308,22 @@ internal class LinkResourceCoordinator {
                     }
                     maxDecompressedSize = expected.maxResponseSize
                 } else {
-                    if (adv.segmentIndex == 1 &&
-                        inbound.values.count { !it.adv.isResponse } >= MAX_CONCURRENT_DIRECT_INBOUND
-                    ) {
-                        RnsResourceReceiver.buildRejectPacket(link, dec)?.let(sendPacket)
-                        return true to null
+                    if (adv.segmentIndex == 1) {
+                        val activeDirectOriginalHashes = HashSet<String>()
+                        for (receiver in inbound.values) {
+                            if (!receiver.adv.isResponse) {
+                                activeDirectOriginalHashes.add(receiver.originalHashHex)
+                            }
+                        }
+                        for (partial in partialMultiSegmentInbound.values) {
+                            if (!partial.isResponse) {
+                                activeDirectOriginalHashes.add(partial.originalHashHex)
+                            }
+                        }
+                        if (activeDirectOriginalHashes.size >= MAX_CONCURRENT_DIRECT_INBOUND) {
+                            RnsResourceReceiver.buildRejectPacket(link, dec)?.let(sendPacket)
+                            return true to null
+                        }
                     }
                     maxDecompressedSize = RnsResourceConstants.DEFAULT_MAX_DECOMPRESSED_SIZE
                 }
@@ -263,6 +361,7 @@ internal class LinkResourceCoordinator {
                     maxDecompressedSize = maxDecompressedSize,
                     priorSegmentsData = priorData,
                     priorMetadata = priorMeta,
+                    nowMs = nowMs,
                 )
                 if (accepted != null) {
                     val (receiver, reqPkt) = accepted
@@ -277,7 +376,7 @@ internal class LinkResourceCoordinator {
             RnsContext.RESOURCE_REQ -> {
                 val dec = link.decryptLinkPayload(rawPayload) ?: return true to null
                 for (entry in outbound.values) {
-                    val pkts = entry.sender.handleRequest(dec, requestPacketHash = packetHash)
+                    val pkts = entry.sender.handleRequest(dec, requestPacketHash = packetHash, nowMs = nowMs)
                     if (pkts.isNotEmpty()) {
                         pkts.forEach { sendPacket(it) }
                         break
@@ -292,7 +391,7 @@ internal class LinkResourceCoordinator {
                     val hashHex = RnsCrypto.bytesToHex(dec.copyOfRange(0, 32))
                     val receiver = inbound[hashHex]
                     if (receiver != null) {
-                        receiver.handleHashmapUpdate(dec).forEach { sendPacket(it) }
+                        receiver.handleHashmapUpdate(dec, nowMs = nowMs).forEach { sendPacket(it) }
                     }
                 }
                 true to null
@@ -301,11 +400,12 @@ internal class LinkResourceCoordinator {
             RnsContext.RESOURCE -> {
                 // DATA(RESOURCE) parts are not packet-layer link-encrypted; RnsResourceReceiver
                 // verifies part map hashes and decrypts the assembled stream.
+                evictExpiredPartialMultiSegmentInbound(nowMs)
                 var completed: ResourceInboundResult? = null
                 for (receiver in inbound.values) {
                     val prevCount = receiver.receivedCount
                     val prevStatus = receiver.status
-                    val outPkts = receiver.handlePart(rawPayload)
+                    val outPkts = receiver.handlePart(rawPayload, nowMs = nowMs)
                     val changed = receiver.receivedCount != prevCount || receiver.status != prevStatus || outPkts.isNotEmpty()
                     if (!changed) continue
 
@@ -324,7 +424,7 @@ internal class LinkResourceCoordinator {
                                         requestId = receiver.adv.requestId,
                                         data = data,
                                         metadata = receiver.assembledMetadata,
-                                        updatedAtMs = System.currentTimeMillis(),
+                                        updatedAtMs = nowMs,
                                     )
                                 }
                             } else {
@@ -345,6 +445,18 @@ internal class LinkResourceCoordinator {
                         RnsResourceStatus.CORRUPT, RnsResourceStatus.FAILED -> {
                             inbound.remove(receiver.hashHex)
                             partialMultiSegmentInbound.remove(receiver.originalHashHex)
+                            if (receiver.adv.isResponse) {
+                                clearPendingResponse(receiver.adv.requestId)
+                            }
+                            onFailure(
+                                ResourceFailedResult(
+                                    eventId = null,
+                                    resourceHashHex = receiver.hashHex,
+                                    isResponse = receiver.adv.isResponse,
+                                    requestId = receiver.adv.requestId,
+                                    reason = "RESOURCE_${receiver.status.name}",
+                                ),
+                            )
                         }
                         else -> Unit
                     }
@@ -360,6 +472,18 @@ internal class LinkResourceCoordinator {
                     inbound.remove(hashHex)?.let { receiver ->
                         receiver.handleCancel()
                         partialMultiSegmentInbound.remove(receiver.originalHashHex)
+                        if (receiver.adv.isResponse) {
+                            clearPendingResponse(receiver.adv.requestId)
+                        }
+                        onFailure(
+                            ResourceFailedResult(
+                                eventId = null,
+                                resourceHashHex = hashHex,
+                                isResponse = receiver.adv.isResponse,
+                                requestId = receiver.adv.requestId,
+                                reason = "RESOURCE_CANCELLED",
+                            ),
+                        )
                     }
                 }
                 true to null
@@ -369,7 +493,18 @@ internal class LinkResourceCoordinator {
                 val dec = link.decryptLinkPayload(rawPayload) ?: return true to null
                 if (dec.size >= 32) {
                     val hashHex = RnsCrypto.bytesToHex(dec.copyOfRange(0, 32))
-                    outbound.remove(hashHex)?.sender?.handleReject()
+                    outbound.remove(hashHex)?.let { entry ->
+                        entry.sender.handleReject()
+                        onFailure(
+                            ResourceFailedResult(
+                                eventId = entry.eventId,
+                                resourceHashHex = hashHex,
+                                isResponse = entry.sender.isResponse,
+                                requestId = entry.sender.requestId,
+                                reason = "REJECTED_BY_NODE",
+                            ),
+                        )
+                    }
                 }
                 true to null
             }
@@ -379,7 +514,8 @@ internal class LinkResourceCoordinator {
     }
 
     /**
-     * Runs one watchdog tick over active outbound and inbound Resources (`Resource.py:590-672`).
+     * Runs one watchdog tick over active outbound and inbound Resources (`Resource.py:590-672`),
+     * and evicts expired partial multi-segment inbound buffers past [PARTIAL_MULTI_SEGMENT_TTL_MS].
      * Retries advertisements/part-requests on timeout and removes/reports transfers whose retries
      * are exhausted.
      */
@@ -387,6 +523,8 @@ internal class LinkResourceCoordinator {
         nowMs: Long = System.currentTimeMillis(),
         sendPacket: (ByteArray) -> Boolean,
     ): List<ResourceFailedResult> {
+        accessGuard?.invoke()
+        evictExpiredPartialMultiSegmentInbound(nowMs)
         val failures = mutableListOf<ResourceFailedResult>()
 
         val outEntries = outbound.entries.toList()
@@ -400,7 +538,7 @@ internal class LinkResourceCoordinator {
                     resourceHashHex = hashHex,
                     isResponse = entry.sender.isResponse,
                     requestId = entry.sender.requestId,
-                    reason = "RESOURCE_TIMEOUT",
+                    reason = if (entry.sender.status == RnsResourceStatus.REJECTED) "REJECTED_BY_NODE" else "RESOURCE_TIMEOUT",
                 )
             }
         }

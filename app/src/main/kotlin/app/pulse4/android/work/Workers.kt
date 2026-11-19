@@ -33,6 +33,7 @@ class ImportWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx
         if (PulseSyncService.hasFreshHeartbeat(System.currentTimeMillis()) && !isManual) {
             return@withContext Result.success()
         }
+        sl.awaitMigrations()
         val now = System.currentTimeMillis()
         // 1. Garmin proaktivní keepalive a import
         runCatching { sl.garminExt.ensureSession() }
@@ -57,6 +58,7 @@ class ImportWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx
 class ShareWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val sl = applicationContext.services
+        sl.awaitMigrations()
         if (sl.settings.networkMode == NetworkMode.MANUAL && !inputData.getBoolean(KEY_MANUAL, false)) return@withContext Result.success()
         val now = System.currentTimeMillis()
         runCatching {

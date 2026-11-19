@@ -134,11 +134,11 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         val sl = (application as Pulse4App).services
         CoroutineScope(Dispatchers.IO).launch {
-            if (sl.vault.probeCriticalSecrets(sl.secrets) != null) {
+            sl.awaitMigrations()
+            if (sl.recoveryIssue.value != null) {
                 return@launch
             }
             runCatching {
-                sl.settings.warmUp()
                 val u = sl.settings.unitSystem
                 val _mp = sl.settings.mapProvider
                 val z = runCatching { ZoneId.of(sl.settings.zoneId) }.getOrDefault(ZoneId.systemDefault())
@@ -291,7 +291,7 @@ private data class Dest(val route: String, val label: String, val icon: androidx
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun Root(sl: app.pulse4.android.di.ServiceLocator, onCompletePlayUpdate: () -> Unit = {}) {
-    val recoveryIssue by sl.vault.recoveryIssue.collectAsState()
+    val recoveryIssue by sl.recoveryIssue.collectAsState()
     val recoveryScope = rememberCoroutineScope()
     val issue = recoveryIssue
     if (issue != null) {
@@ -301,7 +301,7 @@ private fun Root(sl: app.pulse4.android.di.ServiceLocator, onCompletePlayUpdate:
             onRecovered = {
                 recoveryScope.launch(Dispatchers.IO) {
                     runCatching {
-                        sl.settings.warmUp()
+                        sl.runMigrationsAfterRecovery()
                         val u = sl.settings.unitSystem
                         val z = runCatching { ZoneId.of(sl.settings.zoneId) }.getOrDefault(ZoneId.systemDefault())
                         val updatedFmt = Fmt(z, units = u)
@@ -415,7 +415,7 @@ private fun Root(sl: app.pulse4.android.di.ServiceLocator, onCompletePlayUpdate:
             }
         },
     ) { pad ->
-        val gwHealth by sl.bridge.gatewayHealth.collectAsState()
+        val gwHealth by sl.gatewayHealth.collectAsState()
         var dismissedUnreachableKey by remember { mutableStateOf<String?>(null) }
         val healthKey = "${gwHealth.host}:${gwHealth.port}"
         val showUnreachableBar =

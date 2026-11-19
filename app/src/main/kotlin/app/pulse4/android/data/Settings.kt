@@ -6,7 +6,6 @@ import app.pulse4.ui.UnitSystem
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.builtins.ListSerializer
 import java.util.concurrent.ConcurrentHashMap
@@ -63,8 +62,12 @@ enum class MapProvider(val title: String, val shortLabel: String, val subtitle: 
  * aplikace nesmí záviset na jediném uzlu. Propagation uzel je samostatná služba se svou destination – transport ID
  * ani discovery hash gateway se jako adresa schránky nikdy nepoužijí.
  */
-class Settings(private val db: AppDatabase) {
+class Settings(private val dbProvider: () -> AppDatabase) {
+    constructor(db: AppDatabase) : this({ db })
+
+    private val db: AppDatabase get() = dbProvider()
     private val cacheLock = Any()
+    private val reloadLock = Any()
     private val cache = ConcurrentHashMap<String, String>()
     private val missingKeys = ConcurrentHashMap.newKeySet<String>()
     @Volatile private var warmedUp = false
@@ -106,7 +109,9 @@ class Settings(private val db: AppDatabase) {
     }
 
     internal fun reloadFromDb() {
-        applyRowsToCache(db.settings().allNow())
+        synchronized(reloadLock) {
+            applyRowsToCache(db.settings().allNow())
+        }
     }
 
     internal fun invalidate(keys: Collection<String>? = null) {
@@ -126,7 +131,9 @@ class Settings(private val db: AppDatabase) {
 
     suspend fun warmUp() {
         withContext(Dispatchers.IO) {
-            applyRowsToCache(db.settings().all().first())
+            synchronized(reloadLock) {
+                applyRowsToCache(db.settings().allNow())
+            }
         }
     }
 

@@ -190,7 +190,7 @@ class ServiceMigrationsRoomTest {
             db.familyLinks().upsert(FamilyLinkRow(familyLink.id, selfLegacy, peerLegacy, "VERIFIED", 2L, Wire.json.encodeToString(FamilyLink.serializer(), familyLink)))
             db.pendingRequests().upsert(PendingRequestRow("pr-1", "FAMILY_LINK_REQUEST", peerLegacy, selfLegacy, "PENDING", 1_000L, """{"from":"$peerLegacy","to":"$selfLegacy"}"""))
 
-            // Outbox: QUEUED membership.update & family.link.request with legacy IDs in payload -> CANCELLED
+            // Outbox: QUEUED membership.update & family.link.request with legacy IDs in payload -> rewritten in QUEUED state (R3-5)
             val queuedGroupMsg = MessageBuilder(selfLegacy) { "ev-queued-grp" }.build(
                 recipient = peerLegacy,
                 kind = Kinds.MEMBERSHIP_UPDATE,
@@ -324,9 +324,27 @@ class ServiceMigrationsRoomTest {
             assertEquals(peerLxmf, settings.getRaw("childRecipientIdentity"))
             assertEquals("1", settings.getRaw("migration.lxmf_identity_v1"))
 
-            // R2-6: Outbox QUEUED items with legacy payload cancelled; non-QUEUED rewritten
-            assertEquals(DeliveryState.CANCELLED.name, db.outbox().find("ev-queued-grp")?.state)
-            assertEquals(DeliveryState.CANCELLED.name, db.outbox().find("ev-queued-link")?.state)
+            // R3-5: Outbox QUEUED items with legacy payload rewritten in QUEUED state with new lxmf IDs & valid contentHash; non-QUEUED rewritten
+            val migratedQueuedGrp = assertNotNull(db.outbox().find("ev-queued-grp"))
+            assertEquals(DeliveryState.QUEUED.name, migratedQueuedGrp.state)
+            assertEquals(peerLxmf, migratedQueuedGrp.recipient)
+            val decodedQueuedGrp = assertNotNull(Wire.decode(migratedQueuedGrp.wire))
+            assertEquals(selfLxmf, decodedQueuedGrp.envelope.author)
+            assertEquals(peerLxmf, decodedQueuedGrp.envelope.recipient)
+            assertEquals(Wire.hashOf(decodedQueuedGrp.payload), decodedQueuedGrp.envelope.contentHash)
+            assertTrue(selfLxmf in decodedQueuedGrp.payload)
+            assertFalse(selfLegacy in decodedQueuedGrp.payload)
+
+            val migratedQueuedLink = assertNotNull(db.outbox().find("ev-queued-link"))
+            assertEquals(DeliveryState.QUEUED.name, migratedQueuedLink.state)
+            assertEquals(peerLxmf, migratedQueuedLink.recipient)
+            val decodedQueuedLink = assertNotNull(Wire.decode(migratedQueuedLink.wire))
+            assertEquals(selfLxmf, decodedQueuedLink.envelope.author)
+            assertEquals(peerLxmf, decodedQueuedLink.envelope.recipient)
+            assertEquals(Wire.hashOf(decodedQueuedLink.payload), decodedQueuedLink.envelope.contentHash)
+            assertTrue(selfLxmf in decodedQueuedLink.payload)
+            assertFalse(selfLegacy in decodedQueuedLink.payload)
+
             val migratedStored = assertNotNull(db.outbox().find("ev-stored"))
             assertEquals(DeliveryState.STORED_IN_PROPAGATION.name, migratedStored.state)
             assertEquals(peerLxmf, migratedStored.recipient)
@@ -613,6 +631,92 @@ class ServiceMigrationsRoomTest {
             } finally {
                 fitDir.deleteRecursively()
             }
+        }
+    }
+
+    @Test
+    fun `R3-2 per-file Throwable and OOM are skipped without aborting cleanup and 3 failed worker runs give up`() {
+        withTempDb { _, db ->
+            val startMs = 1_700_000_000_000L
+            val act = Activity(
+                id = "fit-badhash",
+                provider = Provider.GARMIN_PERSONAL,
+                accountId = "garmin-main",
+                externalId = "badhash",
+                sport = Sport.RUNNING,
+                startUtcMs = startMs,
+                zoneId = "UTC",
+                totalTimeS = 600.0,
+                movingTimeS = 600.0,
+                distanceM = 2000.0,
+                avgPowerW = null,
+                powerZoneTimesS = listOf(10.0),
+            )
+            db.activities().upsert(act.toRow(Wire.json.encodeToString(Activity.serializer(), act)))
+            val settings = Settings(db)
+            val fitDir = File.createTempFile("fit-oom-dir-", "").apply { delete(); mkdirs() }
+            try {
+                File(fitDir, "badhash.fit.enc").writeBytes(byteArrayOf(1, 2, 3))
+                File(fitDir, "extra.fit.enc").writeBytes(byteArrayOf(4, 5, 6))
+
+                // Simulate OutOfMemoryError when decrypting a corrupt/huge FIT file -> skipped per file, activity still cleaned, flag set
+                val cleaned = ServiceMigrations.migrateLegacyFabricatedActivities(
+                    db = db,
+                    settings = settings,
+                    fitDir = fitDir,
+                    decryptFit = { throw OutOfMemoryError("simulated huge FIT") },
+                    batchSize = 25,
+                )
+                assertEquals(1, cleaned)
+                assertEquals("1", settings.getRaw("migration.fabricated_activity_cleanup_v2"))
+                val repaired = Wire.json.decodeFromString(Activity.serializer(), db.activities().get("fit-badhash")!!.json)
+                assertTrue(repaired.powerZoneTimesS.isEmpty())
+            } finally {
+                fitDir.deleteRecursively()
+            }
+        }
+
+        // Verify 3-failure retry cap gives up and persists V2 flag so worker never loops forever
+        withTempDb { _, db ->
+            val settings = Settings(db)
+            var attempts = 0
+            // Failure 1 -> throws, counter = 1, flag unset
+            try {
+                ServiceMigrations.runFabricatedCleanupWithRetryCap(settings, maxFailures = 3) {
+                    attempts++
+                    throw OutOfMemoryError("boom 1")
+                }
+            } catch (_: OutOfMemoryError) {}
+            assertEquals("1", settings.getRaw("migration.fabricated_activity_cleanup_failures"))
+            assertNull(settings.getRaw("migration.fabricated_activity_cleanup_v2"))
+
+            // Failure 2 -> throws, counter = 2, flag unset
+            try {
+                ServiceMigrations.runFabricatedCleanupWithRetryCap(settings, maxFailures = 3) {
+                    attempts++
+                    throw RuntimeException("boom 2")
+                }
+            } catch (_: RuntimeException) {}
+            assertEquals("2", settings.getRaw("migration.fabricated_activity_cleanup_failures"))
+            assertNull(settings.getRaw("migration.fabricated_activity_cleanup_v2"))
+
+            // Failure 3 -> gives up cleanly (returns false), counter = 3, V2 flag SET
+            val ok = ServiceMigrations.runFabricatedCleanupWithRetryCap(settings, maxFailures = 3) {
+                attempts++
+                throw OutOfMemoryError("boom 3")
+            }
+            assertFalse(ok)
+            assertEquals(3, attempts)
+            assertEquals("3", settings.getRaw("migration.fabricated_activity_cleanup_failures"))
+            assertEquals("1", settings.getRaw("migration.fabricated_activity_cleanup_v2"))
+
+            // Subsequent run skips immediately
+            assertTrue(
+                ServiceMigrations.runFabricatedCleanupWithRetryCap(settings, maxFailures = 3) {
+                    attempts++
+                }
+            )
+            assertEquals(3, attempts)
         }
     }
 

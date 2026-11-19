@@ -62,15 +62,15 @@ if [[ ! -f "$WORK_DIR/node/info.json" ]]; then
   exit 1
 fi
 
-read -r PROP_DEST ALICE_PUB ALICE_DEST BOB_PUB BOB_DEST PY_TID STAMP_COST STAMP_FLEX < <("$VENV/bin/python" -c '
+read -r PROP_DEST RESTRICTED_PROP_DEST ALICE_PUB ALICE_DEST BOB_PUB BOB_DEST PY_TID PY_LARGE_TID STAMP_COST STAMP_FLEX < <("$VENV/bin/python" -c '
 import json, sys
 d = json.load(open(sys.argv[1]))
-print(d["prop_dest"], d["alice_pub"], d["alice_lxmf_dest"], d["bob_pub"], d["bob_lxmf_dest"], d["py_to_kt_tid"], d["stamp_cost"], d["stamp_flex"])
+print(d["prop_dest"], d["restricted_prop_dest"], d["alice_pub"], d["alice_lxmf_dest"], d["bob_pub"], d["bob_lxmf_dest"], d["py_to_kt_tid"], d["py_large_kt_tid"], d["stamp_cost"], d["stamp_flex"])
 ' "$WORK_DIR/node/info.json")
 
 "$JAVA_HOME/bin/java" -cp "$WORK_DIR/out:$RNS_CORE_JAR:$BCPROV_JAR:$COMMONS_COMPRESS_JAR:$KOTLIN_STDLIB" \
   interop.InteropHarnessKt \
-  "$PORT" "$SEED_HEX" "$PROP_DEST" "$ALICE_PUB" "$ALICE_DEST" "$PY_TID" "$STAMP_COST" "$STAMP_FLEX" "$KEEPALIVE_SECS" "$BOB_PUB" "$BOB_DEST"
+  "$PORT" "$SEED_HEX" "$PROP_DEST" "$ALICE_PUB" "$ALICE_DEST" "$PY_TID" "$STAMP_COST" "$STAMP_FLEX" "$KEEPALIVE_SECS" "$BOB_PUB" "$BOB_DEST" "$RESTRICTED_PROP_DEST" "$PY_LARGE_TID"
 
 sleep 1
 "$VENV/bin/python" -c '
@@ -78,10 +78,12 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 msgs = d.get("kt_to_py", [])
 assert any(m.get("sig_valid") and m.get("content") == "hello from kotlin rns-core" for m in msgs), f"Missing verified kt->py msg: {msgs}"
-print("[2b] PASS: Kotlin -> Python LXMF message verified on PN:", msgs)
+assert not any(m.get("title") == "bad-stamp-resource" for m in msgs), f"Bad-stamp Resource deposit was unexpectedly stored: {msgs}"
+print("[2b] PASS: Kotlin -> Python LXMF message verified on PN (and bad-stamp Resource rejected):", msgs)
 direct_msgs = d.get("direct_kt_to_py", [])
 assert any(m.get("sig_valid") and m.get("content_len") == 16384 for m in direct_msgs), f"Missing verified 16KB kt->py Resource LXMF msg: {direct_msgs}"
-print("[5a] PASS: Kotlin -> Python 16KB LXMF via RNS.Resource verified:", direct_msgs)
+assert any(m.get("sig_valid") and m.get("content_len") == 1250000 for m in direct_msgs), f"Missing verified 1.2MB multi-segment kt->py Resource LXMF msg: {direct_msgs}"
+print("[5a] PASS: Kotlin -> Python 16KB + 1.2MB multi-segment LXMF via RNS.Resource verified:", direct_msgs)
 ' "$WORK_DIR/node/entries.json"
 
 echo "ALL INTEROP CHECKS PASSED"

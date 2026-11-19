@@ -35,7 +35,14 @@ object LxmfCodec {
     const val LEGACY_DELIVERY_APP_NAME = "pulse.delivery"
     const val OFFER_REQUEST_PATH = "/offer"
     const val MESSAGE_GET_PATH = "/get"
+    const val ERROR_NO_IDENTITY = 0xF0
+    const val ERROR_NO_ACCESS = 0xF1
+    const val ERROR_INVALID_KEY = 0xF3
+    const val ERROR_INVALID_DATA = 0xF4
     const val ERROR_INVALID_STAMP = 0xF5
+    const val ERROR_THROTTLED = 0xF6
+    const val ERROR_NOT_FOUND = 0xFD
+    const val ERROR_TIMEOUT = 0xFE
 
     /**
      * Zabalí a podepíše LXMF zprávu podle standardního wire formátu:
@@ -222,12 +229,17 @@ object LxmfCodec {
     /**
      * Dvoufázový `/get` požadavek dle `LXMRouter.message_get_request`:
      * - Fáze 1: `[null, null]` -> vrací seznam dostupných transient ID
-     * - Fáze 2: `[wantIds, haveIds]` -> stáhne `wantIds` a smaže `haveIds`
+     * - Fáze 2: `[wantIds, haveIds, transferLimitKb]` -> stáhne `wantIds` (s limitem v KB, `LXMRouter.py:1746`) a smaže `haveIds`
      */
     fun buildGetMessagesRequest(
         wantIds: List<ByteArray>? = null,
         haveIds: List<ByteArray>? = null,
-    ): List<Any?> = listOf(wantIds, haveIds)
+        transferLimitKb: Int? = null,
+    ): List<Any?> = if (transferLimitKb != null) {
+        listOf(wantIds, haveIds, transferLimitKb)
+    } else {
+        listOf(wantIds, haveIds)
+    }
 }
 
 /**
@@ -238,14 +250,26 @@ object LxmfStamper {
     const val PN_WORKBLOCK_ROUNDS = 1000
     const val PEERING_WORKBLOCK_ROUNDS = 25
     const val STAMP_SIZE = 32
+    const val MAX_ACCEPTABLE_STAMP_COST = 24
+
+    fun defaultMaxAttemptsForCost(targetCost: Int): Long {
+        if (targetCost <= 0) return 1L
+        val clamped = targetCost.coerceAtMost(MAX_ACCEPTABLE_STAMP_COST)
+        return (1L shl clamped) * 8L
+    }
 
     fun transientId(destPlusEncrypted: ByteArray): ByteArray =
         MessageDigest.getInstance("SHA-256").digest(destPlusEncrypted)
 
-    fun workblock(material: ByteArray, expandRounds: Int = DEFAULT_WORKBLOCK_ROUNDS): ByteArray {
+    fun workblock(
+        material: ByteArray,
+        expandRounds: Int = DEFAULT_WORKBLOCK_ROUNDS,
+        isCancelled: () -> Boolean = { false },
+    ): ByteArray {
         val out = ByteArray(expandRounds * 256)
         val sha = MessageDigest.getInstance("SHA-256")
         for (n in 0 until expandRounds) {
+            if ((n and 0x3F) == 0 && isCancelled()) return ByteArray(0)
             val nPack = MsgPack.encode(n.toLong())
             val salt = sha.digest(material + nPack)
             val block = RnsCrypto.hkdfSha256(ikm = material, salt = salt, length = 256)
@@ -279,19 +303,38 @@ object LxmfStamper {
         material: ByteArray,
         targetCost: Int,
         expandRounds: Int = DEFAULT_WORKBLOCK_ROUNDS,
-        maxAttempts: Int = 1_000_000,
+        maxAttempts: Int,
+        isCancelled: () -> Boolean = { false },
+    ): ByteArray? = generateStamp(
+        material = material,
+        targetCost = targetCost,
+        expandRounds = expandRounds,
+        maxAttempts = maxAttempts.toLong(),
+        isCancelled = isCancelled,
+    )
+
+    fun generateStamp(
+        material: ByteArray,
+        targetCost: Int,
+        expandRounds: Int = DEFAULT_WORKBLOCK_ROUNDS,
+        maxAttempts: Long = defaultMaxAttemptsForCost(targetCost),
         isCancelled: () -> Boolean = { false },
     ): ByteArray? {
+        if (isCancelled()) return null
+        if (targetCost > MAX_ACCEPTABLE_STAMP_COST) return null
         if (targetCost <= 0) return ByteArray(STAMP_SIZE).also { SecureRandom().nextBytes(it) }
-        val wb = workblock(material, expandRounds)
+        val wb = workblock(material, expandRounds, isCancelled)
+        if (wb.isEmpty() || isCancelled()) return null
         val rng = SecureRandom()
         val candidate = ByteArray(STAMP_SIZE)
-        repeat(maxAttempts) { attempt ->
-            if ((attempt and 0x3FF) == 0 && isCancelled()) return null
+        var attempt = 0L
+        while (attempt < maxAttempts) {
+            if ((attempt and 0xFFL) == 0L && isCancelled()) return null
             rng.nextBytes(candidate)
             if (stampValue(wb, candidate) >= targetCost) {
                 return candidate.copyOf()
             }
+            attempt++
         }
         return null
     }

@@ -11,6 +11,7 @@ import android.net.wifi.WifiManager
 import app.pulse4.android.data.NetworkMode
 import app.pulse4.android.data.Settings
 import app.pulse4.android.security.SecretStore
+import app.pulse4.domain.PLog
 import app.pulse4.sync.E2eeEnvelope
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
@@ -25,6 +26,7 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.crypto.Cipher
 import javax.crypto.Mac
 import javax.crypto.spec.GCMParameterSpec
@@ -61,6 +63,15 @@ data class BridgeInfo(
 
 enum class GatewayHealthState { UNCONFIGURED, CONNECTING, ONLINE, UNREACHABLE }
 
+enum class PropagationAccessState { UNKNOWN, OK, NO_IDENTITY, NO_ACCESS, THROTTLED, UNUSABLE_STAMP_COST }
+
+data class PropagationNodeStatus(
+    val state: PropagationAccessState = PropagationAccessState.UNKNOWN,
+    val detail: String? = null,
+    val stampCost: Int? = null,
+    val throttledUntilMs: Long = 0L,
+)
+
 data class GatewayHealth(
     val host: String = "",
     val port: Int = 4242,
@@ -90,16 +101,44 @@ internal typealias EncryptedEnvelope = E2eeEnvelope
  * 2. Tier 1: Lokální Wi-Fi přenos s nulovou konfigurací přes Android NSD (mDNS) a vestavěný mikro-server.
  * 3. Tier 2: Směrování přes Reticulum (RNS) TCP uzel v internetu s HDLC paketovým rámováním a nativní LXMF Propagation schránkou.
  */
-class ReticulumBridge(
-    private val context: Context,
-    private val secrets: SecretStore,
-    private val settings: Settings,
+class ReticulumBridge internal constructor(
+    private val context: Context?,
+    private val secrets: SecretStore?,
+    private val settings: Settings?,
+    private val filesDirOverride: java.io.File?,
+    private val identitySeedOverride: ByteArray?,
+    private val propagationNodeOverride: (() -> String)?,
+    private val networkModeOverride: (() -> NetworkMode)?,
 ) {
+    constructor(context: Context, secrets: SecretStore, settings: Settings) : this(
+        context = context,
+        secrets = secrets,
+        settings = settings,
+        filesDirOverride = null,
+        identitySeedOverride = null,
+        propagationNodeOverride = null,
+        networkModeOverride = null,
+    )
+
+    private fun currentNetworkMode(): NetworkMode = networkModeOverride?.invoke() ?: settings?.networkMode ?: NetworkMode.MANUAL
+    private fun currentPropagationNode(): String = propagationNodeOverride?.invoke() ?: settings?.propagationNode ?: ""
+    private fun currentGatewayHost(): String = settings?.gatewayHost ?: ""
+    private fun currentGatewayPort(): Int = settings?.gatewayPort ?: 4242
+    private fun systemService(name: String): Any? = context?.applicationContext?.getSystemService(name)
+    private fun resolveFilesDir(): java.io.File = filesDirOverride ?: context!!.filesDir
+    private fun readIdentitySecret(): String? =
+        identitySeedOverride?.let { Base64.getEncoder().encodeToString(it) } ?: secrets?.getString(SecretStore.RETICULUM_IDENTITY)
+    private fun writeIdentitySecret(b64: String) {
+        secrets?.putString(SecretStore.RETICULUM_IDENTITY, b64)
+    }
     var info: BridgeInfo? = null
         private set
 
     private val _gatewayHealth = MutableStateFlow(GatewayHealth())
     val gatewayHealth: StateFlow<GatewayHealth> get() = _gatewayHealth
+
+    private val _propagationStatus = MutableStateFlow(PropagationNodeStatus())
+    val propagationStatus: StateFlow<PropagationNodeStatus> get() = _propagationStatus
 
     fun reportGatewayUnreachableForTest(host: String, port: Int, reason: String? = "Nedostupný") {
         _gatewayHealth.value = GatewayHealth(
@@ -118,22 +157,53 @@ class ReticulumBridge(
     private val localPeerMap = ConcurrentHashMap<String, String>() // deliveryHash -> "http://ip:port"
     internal val routingState = GatewayRoutingState()
 
-    private data class PendingDeposit(val eventId: String, val packetHash32: ByteArray, val sentAtMs: Long)
+    internal sealed interface GetResponse {
+        data class Messages(val items: List<Any?>) : GetResponse
+        data class Error(val code: Int) : GetResponse
+    }
+
+    private data class PendingDeposit(
+        val eventId: String,
+        val packetHash32: ByteArray,
+        val sentAtMs: Long,
+        val linkIdHex: String,
+        val cacheKey: String,
+    )
+
+    private data class PostProofDeposit(
+        val eventId: String,
+        val linkIdHex: String,
+        val cacheKey: String,
+        val provedAtMs: Long,
+    )
+
     private val pendingLinkProofs = ConcurrentHashMap<String, PendingDeposit>()
+    private val pendingPostProofDeposits = ConcurrentHashMap<String, PostProofDeposit>()
+    private val activeLinkPacketDeposits = ConcurrentHashMap<String, MutableList<Pair<String, String>>>() // linkIdHex -> [(eventId, cacheKey)]
+    private val cachedPropagationDeposits = ConcurrentHashMap<String, ByteArray>() // cacheKey -> lxd bytes
+    private val eventToCacheKeys = ConcurrentHashMap<String, MutableSet<String>>() // eventId -> set of cacheKeys
+    private val depositBuildLocks = ConcurrentHashMap<String, Any>()
     @Volatile
-    private var lastDepositEventId: String? = null
-    private val cachedPropagationDeposits = ConcurrentHashMap<String, ByteArray>()
+    internal var postProofGraceMs: Long = 2_000L
+    @Volatile
+    private var lastCachePruneMs: Long = 0L
     private val downloadedTransientIds = LinkedHashSet<String>()
     private val pendingPurgeIds = LinkedHashSet<String>()
     private val getRequestLock = Any()
-    private var pendingGetResponse: CompletableFuture<List<Any?>>? = null
+    private var pendingGetResponse: CompletableFuture<GetResponse>? = null
     private var pendingGetRequestId: ByteArray? = null
     private val resourceCoordinator = LinkResourceCoordinator()
+    private val resourceDispatcher = Dispatchers.Default.limitedParallelism(1)
     private var propagationKeepaliveJob: Job? = null
     @Volatile
     private var lastPropagationInboundMs: Long = 0L
     @Volatile
     private var propagationFractionalStampCost: Int? = null
+    @Volatile
+    private var propagationThrottledUntilMs: Long = 0L
+    @Volatile
+    private var throttleBackoffMs: Long = 0L
+    private val bridgeStopped = AtomicBoolean(false)
     private val localServerSemaphore = Semaphore(4)
     @Volatile
     private var legacyDeliveryHash: String? = null
@@ -192,7 +262,7 @@ class ReticulumBridge(
                 try {
                     handler(ev)
                 } catch (e: Throwable) {
-                    android.util.Log.e("PulseSync", "Chyba obsluhy onEventReceived", e)
+                    PLog.e("PulseSync", e) { "Chyba obsluhy onEventReceived" }
                     synchronized(pendingEvents) { pendingEvents.add(ev) }
                 }
             }
@@ -245,18 +315,20 @@ class ReticulumBridge(
     @Synchronized
     fun ensureStarted(): BridgeInfo {
         info?.let { return it }
+        bridgeStopped.set(false)
         if (!scope.isActive) {
             scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         }
-        if (settings.networkMode != NetworkMode.MANUAL) {
+        pruneDepositCacheIfDue()
+        if (currentNetworkMode() != NetworkMode.MANUAL) {
             acquireMulticast()
         }
 
-        var privateKeyB64 = secrets.getString(SecretStore.RETICULUM_IDENTITY)
+        var privateKeyB64 = readIdentitySecret()
         if (privateKeyB64 == null) {
             val seed = ByteArray(32).also { SecureRandom().nextBytes(it) }
             privateKeyB64 = Base64.getEncoder().encodeToString(seed)
-            secrets.putString(SecretStore.RETICULUM_IDENTITY, privateKeyB64)
+            writeIdentitySecret(privateKeyB64)
         }
 
         val privBytes = Base64.getDecoder().decode(privateKeyB64)
@@ -296,13 +368,13 @@ class ReticulumBridge(
         )
         info = bi
 
-        if (settings.networkMode != NetworkMode.MANUAL) {
+        if (currentNetworkMode() != NetworkMode.MANUAL) {
             startNsd(bi.deliveryHash)
         }
         registerWifiCallback(bi.deliveryHash)
         registerDefaultNetworkCallback()
 
-        if (settings.networkMode != NetworkMode.LOCAL_ONLY && settings.networkMode != NetworkMode.MANUAL) {
+        if (currentNetworkMode() != NetworkMode.LOCAL_ONLY && currentNetworkMode() != NetworkMode.MANUAL) {
             startGatewayClient()
         }
 
@@ -313,6 +385,7 @@ class ReticulumBridge(
 
     @Synchronized
     fun stop() {
+        bridgeStopped.set(true)
         releaseMulticast()
         stopNsdDiscovery()
         registrationListener?.let { old -> runCatching { nsdManager?.unregisterService(old) } }
@@ -322,7 +395,7 @@ class ReticulumBridge(
             nsdResolving = false
         }
 
-        val cm = context.applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        val cm = systemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
         wifiNetworkCallback?.let { cb -> runCatching { cm?.unregisterNetworkCallback(cb) } }
         wifiNetworkCallback = null
         defaultNetworkCallback?.let { cb -> runCatching { cm?.unregisterNetworkCallback(cb) } }
@@ -346,7 +419,13 @@ class ReticulumBridge(
             propagationLink = null
             propagationLinkConnecting = false
         }
+        clearLinkTracking(emitFailures = false)
         resourceCoordinator.clear()
+        synchronized(getRequestLock) {
+            pendingGetResponse?.cancel(false)
+            pendingGetResponse = null
+            pendingGetRequestId = null
+        }
         routingState.onConnectionChanged(clearEndpoint = true)
 
         localServerJob?.cancel()
@@ -361,13 +440,13 @@ class ReticulumBridge(
 
     private fun registerWifiCallback(selfHash: String) {
         if (wifiNetworkCallback != null) return
-        val cm = context.applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+        val cm = systemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
         val req = NetworkRequest.Builder()
             .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
             .build()
         val cb = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
-                if (settings.networkMode != NetworkMode.MANUAL) {
+                if (currentNetworkMode() != NetworkMode.MANUAL) {
                     acquireMulticast()
                     startNsd(selfHash)
                 }
@@ -384,7 +463,7 @@ class ReticulumBridge(
 
     private fun registerDefaultNetworkCallback() {
         if (defaultNetworkCallback != null) return
-        val cm = context.applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+        val cm = systemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
         val cb = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
                 routingState.onConnectionChanged()
@@ -400,7 +479,7 @@ class ReticulumBridge(
 
     private fun acquireMulticast() {
         if (multicastLock?.isHeld == true) return
-        val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager ?: return
+        val wifi = systemService(Context.WIFI_SERVICE) as? WifiManager ?: return
         multicastLock = wifi.createMulticastLock("pulse4-sync").apply { setReferenceCounted(false); acquire() }
     }
 
@@ -440,9 +519,9 @@ class ReticulumBridge(
                     }
                 }
             }
-            android.util.Log.i("PulseSync", "Lokální server spuštěn na portu ${server.localPort}")
+            PLog.i("PulseSync") { "Lokální server spuštěn na portu ${server.localPort}" }
         } catch (e: Exception) {
-            android.util.Log.w("PulseSync", "Nelze spustit lokální server: ${e.message}")
+            PLog.w("PulseSync") { "Nelze spustit lokální server: ${e.message}" }
         }
     }
 
@@ -519,7 +598,7 @@ class ReticulumBridge(
             out.write(resp.toByteArray(Charsets.UTF_8))
             out.flush()
         } catch (e: Exception) {
-            android.util.Log.w("PulseSync", "Chyba obsluhy lokálního spojení: ${e.message}")
+            PLog.w("PulseSync") { "Chyba obsluhy lokálního spojení: ${e.message}" }
         } finally {
             runCatching { socket.close() }
         }
@@ -530,7 +609,7 @@ class ReticulumBridge(
     private fun startNsd(selfHash: String) {
         val server = localServerSocket ?: return
         val port = server.localPort
-        val nsd = context.applicationContext.getSystemService(Context.NSD_SERVICE) as? NsdManager ?: return
+        val nsd = systemService(Context.NSD_SERVICE) as? NsdManager ?: return
         nsdManager = nsd
 
         discoveryListener?.let { old -> runCatching { nsd.stopServiceDiscovery(old) } }
@@ -633,18 +712,18 @@ class ReticulumBridge(
     /** Manuální registrace peer endpointu (užitečné při spojení emulátor-telefon bez mDNS) */
     fun registerLocalPeer(destHash: String, endpointUrl: String) {
         localPeerMap[destHash] = endpointUrl
-        android.util.Log.i("PulseSync", "Manuálně zaregistrován peer endpoint: $destHash -> $endpointUrl")
+        PLog.i("PulseSync") { "Manuálně zaregistrován peer endpoint: $destHash -> $endpointUrl" }
     }
 
     fun clearLocalPeers() {
         localPeerMap.clear()
-        android.util.Log.i("PulseSync", "Vyčištěna tabulka lokálních peerů")
+        PLog.i("PulseSync") { "Vyčištěna tabulka lokálních peerů" }
     }
 
     /** Spustí klientské spojení k Reticulum TCP uzlu v internetu */
     @Synchronized
     fun startGatewayClient() {
-        val host = settings.gatewayHost.trim()
+        val host = currentGatewayHost().trim()
         if (host.isBlank()) {
             tcpJob?.cancel()
             val oldSocket = tcpSocket
@@ -656,7 +735,7 @@ class ReticulumBridge(
             runCatching { oldSocket?.close() }
             return
         }
-        val port = settings.gatewayPort.takeIf { it > 0 } ?: 4242
+        val port = currentGatewayPort().takeIf { it > 0 } ?: 4242
 
         if (tcpJob?.isActive == true &&
             isGatewayOnline &&
@@ -694,7 +773,7 @@ class ReticulumBridge(
                 var currentSocket: Socket? = null
                 var wasConnectedThisAttempt = false
                 try {
-                    android.util.Log.i("PulseSync", "Připojování k Reticulum gateway $host:$port...")
+                    PLog.i("PulseSync") { "Připojování k Reticulum gateway $host:$port..." }
                     val s = Socket()
                     currentSocket = s
                     s.tcpNoDelay = true
@@ -709,11 +788,11 @@ class ReticulumBridge(
                         isGatewayOnline = true
                     }
                     _gatewayHealth.value = GatewayHealth(host = host, port = port, state = GatewayHealthState.ONLINE)
-                    android.util.Log.i("PulseSync", "Úspěšně připojeno k Reticulum gateway $host:$port")
+                    PLog.i("PulseSync") { "Úspěšně připojeno k Reticulum gateway $host:$port" }
 
                     // Odešli úvodní Announce paket a Path Request pro propagation uzel i registrované kontakty
                     sendRnsAnnounce()
-                    val propHash = settings.propagationNode.trim()
+                    val propHash = currentPropagationNode().trim()
                     if (propHash.length == 32) {
                         requestPathIfNeeded(propHash, force = true)
                     }
@@ -737,7 +816,11 @@ class ReticulumBridge(
                                     val frame = frameBuffer.toByteArray()
                                     frameBuffer.reset()
                                     val unescaped = hdlcUnescape(frame)
-                                    handleIncomingRnsPacket(unescaped)
+                                    try {
+                                        handleIncomingRnsPacket(unescaped, dispatchResourceAsync = true)
+                                    } catch (t: Throwable) {
+                                        PLog.e("PulseSync", t) { "Chyba zpracování příchozího RNS paketu" }
+                                    }
                                 }
                             } else if (frameBuffer.size() < maxFrameBytes) {
                                 frameBuffer.write(b.toInt())
@@ -764,7 +847,7 @@ class ReticulumBridge(
                             )
                         }
                     }
-                    android.util.Log.w("PulseSync", "Chyba Reticulum gateway spojení ($host:$port): ${e.message}")
+                    PLog.w("PulseSync") { "Chyba Reticulum gateway spojení ($host:$port): ${e.message}" }
                 } finally {
                     synchronized(this@ReticulumBridge) {
                         if (tcpSocket === currentSocket) {
@@ -780,7 +863,13 @@ class ReticulumBridge(
                         propagationLink = null
                         propagationLinkConnecting = false
                     }
+                    clearLinkTracking(emitFailures = true, failureReason = "LINK_CLOSED")
                     resourceCoordinator.clear()
+                    synchronized(getRequestLock) {
+                        pendingGetResponse?.cancel(false)
+                        pendingGetResponse = null
+                        pendingGetRequestId = null
+                    }
                     routingState.onConnectionChanged(clearEndpoint = true)
                     runCatching { currentSocket?.close() }
                 }
@@ -798,7 +887,7 @@ class ReticulumBridge(
 
     private fun hasActiveNetwork(host: String): Boolean {
         if (host == "127.0.0.1" || host.equals("localhost", ignoreCase = true)) return true
-        val cm = context.applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return true
+        val cm = systemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return true
         val net = cm.activeNetwork ?: return false
         val caps = cm.getNetworkCapabilities(net) ?: return false
         return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) ||
@@ -806,7 +895,25 @@ class ReticulumBridge(
             caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
     }
 
-    private fun handleIncomingRnsPacket(packet: ByteArray) {
+    internal fun handleIncomingRnsPacketForTest(packet: ByteArray) {
+        try {
+            handleIncomingRnsPacket(packet, dispatchResourceAsync = false)
+        } catch (t: Throwable) {
+            PLog.e("PulseSync", t) { "Chyba testovacího zpracování RNS paketu" }
+        }
+    }
+
+    private fun isResourceLinkContext(contextByte: Byte): Boolean = when (contextByte) {
+        RnsContext.RESOURCE,
+        RnsContext.RESOURCE_ADV,
+        RnsContext.RESOURCE_REQ,
+        RnsContext.RESOURCE_HMU,
+        RnsContext.RESOURCE_ICL,
+        RnsContext.RESOURCE_RCL -> true
+        else -> false
+    }
+
+    private fun handleIncomingRnsPacket(packet: ByteArray, dispatchResourceAsync: Boolean = false) {
         if (packet.size < 19) return
         val flags = packet[0].toInt() and 0xFF
         val headerType = (flags and 0x40) shr 6
@@ -815,7 +922,7 @@ class ReticulumBridge(
         if (headerType == 1 && packet.size >= 18) {
             val tId = packet.copyOfRange(2, 18)
             if (routingState.updateGatewayTransportId(tId)) {
-                android.util.Log.i("PulseSync", "Zjištěno Transport ID internetové brány: ${bytesToHex(tId)}")
+                PLog.i("PulseSync") { "Zjištěno Transport ID internetové brány: ${bytesToHex(tId)}" }
             }
         } else if (headerType == 0 && packet.size >= 51) {
             val destBytes = packet.copyOfRange(2, 18)
@@ -825,7 +932,7 @@ class ReticulumBridge(
             if (destHex.equals("6b9f66014d9853faab220fba47d02761", ignoreCase = true)) {
                 val tId = packet.copyOfRange(35, 51)
                 if (routingState.updateGatewayTransportId(tId)) {
-                    android.util.Log.i("PulseSync", "Zjištěno Transport ID internetové brány z path request: ${bytesToHex(tId)}")
+                    PLog.i("PulseSync") { "Zjištěno Transport ID internetové brány z path request: ${bytesToHex(tId)}" }
                 }
             }
         }
@@ -836,17 +943,29 @@ class ReticulumBridge(
             if (parsed != null && parsed.verified) {
                 val destLower = parsed.destinationHash.lowercase()
                 routingState.recordDiscoveredDestination(destLower, parsed.publicKey64)
-                if (destLower == settings.propagationNode.trim().lowercase()) {
+                if (destLower == currentPropagationNode().trim().lowercase()) {
                     LxmfCodec.parsePropagationAnnounceAppData(parsed.appData)?.let { info ->
                         propagationNodeInfo = info
                         val rawList = runCatching { MsgPack.decode(parsed.appData).first as? List<*> }.getOrNull()
                         val fracList = rawList?.getOrNull(7) as? List<*>
                         val fracCost = (fracList?.getOrNull(0) as? Number)?.toDouble()
-                        propagationFractionalStampCost = fracCost?.let { kotlin.math.ceil(it).toInt().coerceIn(0, 24) }
-                        android.util.Log.i(
-                            "PulseSync",
+                        propagationFractionalStampCost = fracCost?.let { kotlin.math.ceil(it).toInt() }
+                        val effectiveCost = effectiveRequiredStampCost(info)
+                        if (effectiveCost > LxmfStamper.MAX_ACCEPTABLE_STAMP_COST) {
+                            _propagationStatus.value = PropagationNodeStatus(
+                                state = PropagationAccessState.UNUSABLE_STAMP_COST,
+                                detail = "Požadovaná cena stampu ($effectiveCost) překračuje limit ${LxmfStamper.MAX_ACCEPTABLE_STAMP_COST}",
+                                stampCost = effectiveCost,
+                            )
+                        } else if (_propagationStatus.value.state == PropagationAccessState.UNUSABLE_STAMP_COST) {
+                            _propagationStatus.value = PropagationNodeStatus(
+                                state = PropagationAccessState.UNKNOWN,
+                                stampCost = effectiveCost,
+                            )
+                        }
+                        PLog.i("PulseSync") {
                             "Aktualizováno info LXMF propagation uzlu: accepting=${info.acceptingMessages}, stampCost=${info.stampCost}, limit=${info.perTransferLimitKb}KB"
-                        )
+                        }
                     }
                 }
             }
@@ -874,26 +993,34 @@ class ReticulumBridge(
             val link = propagationLink
             if (link != null && destHex.equals(link.linkIdHex, ignoreCase = true)) {
                 link.touchInbound()
-                lastPropagationInboundMs = System.currentTimeMillis()
+                lastPropagationInboundMs = link.lastInboundMs
                 if (contextByte == RnsContext.LRPROOF) {
                     val rttPkt = link.handleLinkProof(payload)
                     if (rttPkt != null) {
                         sendRawRnsPacket(rttPkt)
                         startPropagationKeepalive(link)
-                        android.util.Log.i("PulseSync", "RNS Link k LXMF uzlu aktivní (id=${link.linkIdHex}, mtu=${link.negotiatedMtu})")
+                        PLog.i("PulseSync") { "RNS Link k LXMF uzlu aktivní (id=${link.linkIdHex}, mtu=${link.negotiatedMtu})" }
                     }
                 } else if (contextByte == RnsContext.NONE && payload.size >= 96) {
                     val pktHashHex = bytesToHex(payload.copyOfRange(0, 32))
                     val pending = pendingLinkProofs.remove(pktHashHex)
-                    if (pending != null && link.verifyPacketProof(payload, pending.packetHash32)) {
-                        removeCachedDeposit(pending.eventId)
+                    if (pending != null && pending.linkIdHex == link.linkIdHex && link.verifyPacketProof(payload, pending.packetHash32)) {
+                        removeActivePacketDeposit(link.linkIdHex, pending.eventId)
+                        removeCachedDepositByKey(pending.cacheKey, pending.eventId)
                         emitEvent(BridgeEvent.Delivery(pending.eventId, "STORED", null))
                     }
                 } else if (contextByte == RnsContext.RESOURCE_PRF) {
-                    val resProof = resourceCoordinator.handleProof(contextByte, payload)
-                    if (resProof != null) {
-                        removeCachedDeposit(resProof.eventId)
-                        emitEvent(BridgeEvent.Delivery(resProof.eventId, "STORED", null))
+                    val handlePrf = {
+                        try {
+                            handleInboundResourceProof(link, contextByte, payload)
+                        } catch (t: Throwable) {
+                            PLog.e("PulseSync", t) { "Chyba zpracování RESOURCE_PRF" }
+                        }
+                    }
+                    if (dispatchResourceAsync) {
+                        scope.launch(resourceDispatcher) { handlePrf() }
+                    } else {
+                        handlePrf()
                     }
                 }
             }
@@ -904,40 +1031,58 @@ class ReticulumBridge(
 
         val activeLink = propagationLink
         if (activeLink != null && destHex.equals(activeLink.linkIdHex, ignoreCase = true)) {
-            lastPropagationInboundMs = System.currentTimeMillis()
+            activeLink.touchInbound()
+            lastPropagationInboundMs = activeLink.lastInboundMs
             if (contextByte == RnsContext.KEEPALIVE) { // KEEPALIVE (0xFA) - nešifrovaný
-                activeLink.touchInbound()
                 if (payload.size == 1 && payload[0] == 0xFF.toByte()) {
                     activeLink.buildKeepaliveResponsePacket()?.let { sendRawRnsPacket(it) }
                 }
                 return
             }
             if (contextByte == RnsContext.LINKCLOSE) { // LINKCLOSE (0xFC) - jen po dešifrování a ověření link_id
-                if (activeLink.verifyAndHandleLinkClose(payload)) {
-                    synchronized(propagationLinkLock) {
-                        if (propagationLink === activeLink) {
-                            propagationLink = null
-                            propagationLinkConnecting = false
+                val handleClose = {
+                    try {
+                        if (activeLink.verifyAndHandleLinkClose(payload)) {
+                            tearDownPropagationLink(activeLink, remoteClosed = true)
                         }
+                    } catch (t: Throwable) {
+                        PLog.e("PulseSync", t) { "Chyba zpracování LINKCLOSE" }
                     }
-                    resourceCoordinator.clear()
-                    propagationKeepaliveJob?.cancel()
-                    propagationKeepaliveJob = null
+                }
+                if (dispatchResourceAsync) {
+                    scope.launch(resourceDispatcher) { handleClose() }
+                } else {
+                    handleClose()
                 }
                 return
             }
-            val (consumedResource, completedResource) = resourceCoordinator.handleLinkData(
-                link = activeLink,
-                contextByte = contextByte,
-                rawPayload = payload,
-                sendPacket = ::sendRawRnsPacket,
-            )
-            if (consumedResource) {
-                completedResource?.let { handleCompletedInboundResource(it) }
+            if (isResourceLinkContext(contextByte)) {
+                val pktHash = runCatching { RnsCrypto.packetHash(packet) }.getOrNull()
+                val handleRes = {
+                    try {
+                        val (consumedResource, completedResource) = resourceCoordinator.handleLinkData(
+                            link = activeLink,
+                            contextByte = contextByte,
+                            rawPayload = payload,
+                            sendPacket = ::sendRawRnsPacket,
+                            packetHash = pktHash,
+                        )
+                        if (consumedResource) {
+                            completedResource?.let { handleCompletedInboundResource(it) }
+                        }
+                    } catch (t: Throwable) {
+                        PLog.e("PulseSync", t) { "Chyba zpracování RNS Resource paketu" }
+                    }
+                }
+                if (dispatchResourceAsync) {
+                    scope.launch(resourceDispatcher) { handleRes() }
+                } else {
+                    handleRes()
+                }
                 return
             }
             val decrypted = activeLink.decryptLinkPayload(payload) ?: return
-            handlePropagationLinkPayload(contextByte, decrypted)
+            handlePropagationLinkPayload(activeLink, contextByte, decrypted)
             return
         }
 
@@ -947,27 +1092,76 @@ class ReticulumBridge(
             (legacyHash != null && destHex.equals(legacyHash, ignoreCase = true))
         ) {
             val body = String(payload, Charsets.UTF_8)
-            android.util.Log.i("PulseSync", "Příchozí RNS DATA paket určen pro naši adresu ($destHex, len=${payload.size}), předávám k dešifrování...")
+            PLog.i("PulseSync") { "Příchozí RNS DATA paket určen pro naši adresu ($destHex, len=${payload.size}), předávám k dešifrování..." }
             processIncomingEncryptedEnvelope(body, selfHash)
         } else {
-            android.util.Log.d("PulseSync", "Přeskočen RNS paket pro jinou adresu: $destHex (naše=$selfHash)")
+            PLog.d("PulseSync") { "Přeskočen RNS paket pro jinou adresu: $destHex (naše=$selfHash)" }
+        }
+    }
+
+    private fun handleInboundResourceProof(link: RnsLinkSession, contextByte: Byte, payload: ByteArray) {
+        val resProof = resourceCoordinator.handleProof(contextByte, payload, ::sendRawRnsPacket) ?: return
+        val cacheKey = eventToCacheKeys[resProof.eventId]?.firstOrNull() ?: ""
+        val postProof = PostProofDeposit(
+            eventId = resProof.eventId,
+            linkIdHex = link.linkIdHex,
+            cacheKey = cacheKey,
+            provedAtMs = System.currentTimeMillis(),
+        )
+        pendingPostProofDeposits[resProof.resourceHashHex] = postProof
+        val graceMs = postProofGraceMs
+        if (graceMs <= 0L) {
+            pendingPostProofDeposits.remove(resProof.resourceHashHex)
+            if (link.state == RnsLinkSession.State.ACTIVE && propagationLink === link) {
+                if (cacheKey.isNotEmpty()) removeCachedDepositByKey(cacheKey, resProof.eventId)
+                emitEvent(BridgeEvent.Delivery(resProof.eventId, "STORED", null))
+            }
+        } else {
+            scope.launch {
+                delay(graceMs)
+                val stillPending = pendingPostProofDeposits.remove(resProof.resourceHashHex) ?: return@launch
+                val currentLink = propagationLink
+                if (currentLink != null &&
+                    currentLink === link &&
+                    currentLink.linkIdHex == stillPending.linkIdHex &&
+                    currentLink.state == RnsLinkSession.State.ACTIVE
+                ) {
+                    if (stillPending.cacheKey.isNotEmpty()) {
+                        removeCachedDepositByKey(stillPending.cacheKey, stillPending.eventId)
+                    }
+                    emitEvent(BridgeEvent.Delivery(stillPending.eventId, "STORED", null))
+                }
+            }
+        }
+    }
+
+    private fun parseGetResponseValue(raw: Any?): GetResponse {
+        return when (raw) {
+            is Number -> GetResponse.Error(raw.toInt())
+            is List<*> -> GetResponse.Messages(raw)
+            else -> GetResponse.Messages(emptyList())
         }
     }
 
     private fun handleCompletedInboundResource(result: LinkResourceCoordinator.ResourceInboundResult) {
         if (result.isResponse) {
-            val decoded = runCatching { MsgPack.decode(result.data).first }.getOrNull() as? List<*>
-            val responseData: List<Any?> = when {
-                decoded == null -> emptyList()
-                decoded.size == 2 && decoded[0] is ByteArray && decoded[1] is List<*> ->
-                    @Suppress("UNCHECKED_CAST") (decoded[1] as List<Any?>)
-                else -> decoded
+            val decoded = runCatching { MsgPack.decode(result.data).first }.getOrNull()
+            val decodedList = decoded as? List<*>
+            val embeddedReqId = (decodedList?.takeIf { it.size == 2 && it[0] is ByteArray }?.get(0)) as? ByteArray
+            val actualId = result.requestId ?: embeddedReqId
+            val payloadValue: Any? = if (decodedList != null && decodedList.size == 2 && decodedList[0] is ByteArray) {
+                decodedList[1]
+            } else {
+                decoded
             }
+            val parsedResponse = parseGetResponseValue(payloadValue)
             synchronized(getRequestLock) {
                 val expectedId = pendingGetRequestId
-                val actualId = result.requestId
-                if (expectedId == null || actualId == null || MessageDigest.isEqual(expectedId, actualId)) {
-                    pendingGetResponse?.complete(responseData)
+                if (expectedId != null && actualId != null && MessageDigest.isEqual(expectedId, actualId)) {
+                    pendingGetRequestId = null
+                    pendingGetResponse?.complete(parsedResponse)
+                    pendingGetResponse = null
+                    resourceCoordinator.clearPendingResponse(actualId)
                 }
             }
             return
@@ -986,28 +1180,44 @@ class ReticulumBridge(
         processIncomingEncryptedEnvelope(String(result.data, Charsets.UTF_8), selfHash)
     }
 
-    private fun handlePropagationLinkPayload(contextByte: Byte, plaintext: ByteArray) {
+    private fun handlePropagationLinkPayload(link: RnsLinkSession, contextByte: Byte, plaintext: ByteArray) {
         if (contextByte == RnsContext.NONE) {
             val list = runCatching { MsgPack.decode(plaintext).first as? List<*> }.getOrNull()
             val code = (list?.firstOrNull() as? Number)?.toInt()
             if (code == LxmfCodec.ERROR_INVALID_STAMP) {
-                val evId = lastDepositEventId
-                if (evId != null) {
-                    removeCachedDeposit(evId)
+                val affected = mutableListOf<Pair<String, String>>()
+                activeLinkPacketDeposits.remove(link.linkIdHex)?.let { affected.addAll(it) }
+                pendingLinkProofs.entries.removeIf { entry ->
+                    if (entry.value.linkIdHex == link.linkIdHex) {
+                        affected.add(entry.value.eventId to entry.value.cacheKey)
+                        true
+                    } else false
+                }
+                pendingPostProofDeposits.entries.removeIf { entry ->
+                    if (entry.value.linkIdHex == link.linkIdHex) {
+                        affected.add(entry.value.eventId to entry.value.cacheKey)
+                        true
+                    } else false
+                }
+                for ((evId, cacheKey) in affected.distinctBy { it.first }) {
+                    removeCachedDepositByKey(cacheKey, evId)
                     emitEvent(BridgeEvent.Delivery(evId, "FAILED", "ERROR_INVALID_STAMP"))
                 }
-                android.util.Log.w("PulseSync", "LXMF propagation node odmítl stamp (ERROR_INVALID_STAMP)")
+                PLog.w("PulseSync") { "LXMF propagation node odmítl stamp (ERROR_INVALID_STAMP)" }
             }
             return
         }
         if (contextByte == RnsContext.RESPONSE) { // RNS Link RESPONSE [requestId, responseData]
             val decoded = runCatching { MsgPack.decode(plaintext).first }.getOrNull() as? List<*> ?: return
             val respReqId = decoded.getOrNull(0) as? ByteArray
-            val responseData = decoded.getOrNull(1) as? List<*>
+            val parsedResponse = parseGetResponseValue(decoded.getOrNull(1))
             synchronized(getRequestLock) {
                 val expectedId = pendingGetRequestId
-                if (expectedId == null || (respReqId != null && MessageDigest.isEqual(expectedId, respReqId))) {
-                    pendingGetResponse?.complete(responseData ?: emptyList<Any?>())
+                if (expectedId != null && respReqId != null && MessageDigest.isEqual(expectedId, respReqId)) {
+                    pendingGetRequestId = null
+                    pendingGetResponse?.complete(parsedResponse)
+                    pendingGetResponse = null
+                    resourceCoordinator.clearPendingResponse(respReqId)
                 }
             }
         }
@@ -1046,49 +1256,140 @@ class ReticulumBridge(
         }
     }
 
-    private fun tearDownPropagationLink(link: RnsLinkSession? = null) {
+    private fun clearLinkTracking(
+        linkIdHex: String? = null,
+        emitFailures: Boolean = false,
+        failureReason: String = "LINK_CLOSED",
+        deleteCacheOnPostProofFailure: Boolean = false,
+    ) {
+        val failedProofs = mutableListOf<PendingDeposit>()
+        pendingLinkProofs.entries.removeIf { entry ->
+            if (linkIdHex == null || entry.value.linkIdHex == linkIdHex) {
+                failedProofs.add(entry.value)
+                true
+            } else {
+                false
+            }
+        }
+        val failedPostProofs = mutableListOf<PostProofDeposit>()
+        pendingPostProofDeposits.entries.removeIf { entry ->
+            if (linkIdHex == null || entry.value.linkIdHex == linkIdHex) {
+                failedPostProofs.add(entry.value)
+                true
+            } else {
+                false
+            }
+        }
+        if (linkIdHex == null) {
+            activeLinkPacketDeposits.clear()
+        } else {
+            activeLinkPacketDeposits.remove(linkIdHex)
+        }
+        if (emitFailures) {
+            for (p in failedProofs) {
+                emitEvent(BridgeEvent.Delivery(p.eventId, "FAILED", failureReason))
+            }
+            for (p in failedPostProofs) {
+                if (deleteCacheOnPostProofFailure && p.cacheKey.isNotEmpty()) {
+                    removeCachedDepositByKey(p.cacheKey, p.eventId)
+                }
+                emitEvent(BridgeEvent.Delivery(p.eventId, "FAILED", failureReason))
+            }
+        }
+    }
+
+    private fun removeActivePacketDeposit(linkIdHex: String, eventId: String) {
+        activeLinkPacketDeposits[linkIdHex]?.let { list ->
+            synchronized(list) {
+                list.removeIf { it.first == eventId }
+            }
+        }
+    }
+
+    private fun tearDownPropagationLink(link: RnsLinkSession? = null, remoteClosed: Boolean = false) {
+        val closedLinkId: String?
         synchronized(propagationLinkLock) {
             val current = propagationLink ?: return
             if (link != null && current !== link) return
+            closedLinkId = current.linkIdHex
             current.close()
             propagationLink = null
             propagationLinkConnecting = false
         }
+        clearLinkTracking(
+            linkIdHex = closedLinkId,
+            emitFailures = true,
+            failureReason = if (remoteClosed) "LINK_CLOSED_AFTER_PROOF" else "LINK_TEARDOWN",
+            deleteCacheOnPostProofFailure = remoteClosed,
+        )
         resourceCoordinator.clear()
+        synchronized(getRequestLock) {
+            pendingGetResponse?.cancel(false)
+            pendingGetResponse = null
+            pendingGetRequestId = null
+        }
         propagationKeepaliveJob?.cancel()
         propagationKeepaliveJob = null
     }
 
     private fun startPropagationKeepalive(link: RnsLinkSession) {
-        lastPropagationInboundMs = System.currentTimeMillis()
+        lastPropagationInboundMs = link.lastInboundMs
         propagationKeepaliveJob?.cancel()
         propagationKeepaliveJob = scope.launch {
             while (isActive && link.state == RnsLinkSession.State.ACTIVE && propagationLink === link) {
                 val now = System.currentTimeMillis()
                 val intervalMs = link.keepaliveIntervalMs.coerceAtLeast(5_000L)
-                val inboundIdleMs = now - lastPropagationInboundMs
+                // NEW-4 / N-13: rely on RnsLinkSession.lastInboundMs for stale detection
+                val inboundIdleMs = now - link.lastInboundMs
                 if (inboundIdleMs > intervalMs * 2 + 10_000L) {
                     tearDownPropagationLink(link)
                     break
                 }
-                // NEW-4: tear down link if an outbound deposit PROOF is missing beyond 30s
-                val staleProof = pendingLinkProofs.entries.firstOrNull { now - it.value.sentAtMs > 30_000L }
+                // NEW-4: tear down link if an outbound deposit PROOF is missing beyond 30s on THIS link
+                val staleProof = pendingLinkProofs.entries.firstOrNull {
+                    it.value.linkIdHex == link.linkIdHex && now - it.value.sentAtMs > 30_000L
+                }
                 if (staleProof != null) {
                     pendingLinkProofs.remove(staleProof.key)
                     emitEvent(BridgeEvent.Delivery(staleProof.value.eventId, "FAILED", "PROOF_TIMEOUT"))
                     tearDownPropagationLink(link)
                     break
                 }
+                // N-10: Resource watchdog tick
+                val resourceFailures = resourceCoordinator.tickWatchdog(now, ::sendRawRnsPacket)
+                for (f in resourceFailures) {
+                    if (f.eventId != null) {
+                        pendingPostProofDeposits.entries.removeIf { it.value.eventId == f.eventId }
+                        emitEvent(BridgeEvent.Delivery(f.eventId, "FAILED", f.reason))
+                    }
+                    if (f.isResponse) {
+                        synchronized(getRequestLock) {
+                            val expectedId = pendingGetRequestId
+                            if (expectedId != null && f.requestId != null && MessageDigest.isEqual(expectedId, f.requestId)) {
+                                pendingGetResponse?.cancel(false)
+                                pendingGetResponse = null
+                                pendingGetRequestId = null
+                            }
+                        }
+                    }
+                }
                 if (now - link.lastActivityMs >= intervalMs) {
                     link.buildKeepalivePacket()?.let { sendRawRnsPacket(it) }
                 }
-                delay(minOf(intervalMs / 2, 10_000L).coerceAtLeast(1_000L))
+                val hasActiveResources =
+                    resourceCoordinator.activeOutboundCount() > 0 || resourceCoordinator.activeInboundCount() > 0
+                val sleepMs = if (hasActiveResources) {
+                    500L
+                } else {
+                    minOf(intervalMs / 2, 10_000L).coerceAtLeast(1_000L)
+                }
+                delay(sleepMs)
             }
         }
     }
 
     private fun ensurePropagationLink(timeoutMs: Long = 2500L): RnsLinkSession? {
-        val propHash = settings.propagationNode.trim().lowercase()
+        val propHash = currentPropagationNode().trim().lowercase()
         if (propHash.length != 32 || !isGatewayOnline) return null
 
         var propPubKey = routingState.getDiscoveredPublicKey(propHash)
@@ -1188,10 +1489,10 @@ class ReticulumBridge(
                 writer.write(framed)
                 writer.flush()
             }
-            android.util.Log.i("PulseSync", "Odeslán RNS paket ${rawPacket.size}B pro $destHashHex přes internet uzel (routed=${tId != null})")
+            PLog.i("PulseSync") { "Odeslán RNS paket ${rawPacket.size}B pro $destHashHex přes internet uzel (routed=${tId != null})" }
             true
         } catch (e: Exception) {
-            android.util.Log.w("PulseSync", "Selhalo odeslání RNS paketu přes uzel: ${e.message}")
+            PLog.w("PulseSync") { "Selhalo odeslání RNS paketu přes uzel: ${e.message}" }
             false
         }
     }
@@ -1241,15 +1542,15 @@ class ReticulumBridge(
                 writer.write(framed)
                 writer.flush()
             }
-            android.util.Log.i("PulseSync", "Odeslán RNS Announce pro ${selfInfo.deliveryHash} (${rawPacket.size}B)")
+            PLog.i("PulseSync") { "Odeslán RNS Announce pro ${selfInfo.deliveryHash} (${rawPacket.size}B)" }
         } catch (e: Exception) {
-            android.util.Log.w("PulseSync", "Chyba při odesílání RNS Announce: ${e.message}")
+            PLog.w("PulseSync") { "Chyba při odesílání RNS Announce: ${e.message}" }
         }
     }
 
     private fun signAnnounceData(data: ByteArray): ByteArray {
         val priv = ed25519PrivKey ?: run {
-            val privB64 = secrets.getString(SecretStore.RETICULUM_IDENTITY) ?: ""
+            val privB64 = readIdentitySecret() ?: ""
             val privBytes = runCatching { Base64.getDecoder().decode(privB64) }.getOrDefault(ByteArray(32))
             Ed25519PrivateKeyParameters(privBytes, 0).also { ed25519PrivKey = it }
         }
@@ -1260,7 +1561,7 @@ class ReticulumBridge(
     }
 
     fun applyPropagationNode() {
-        if (settings.networkMode == NetworkMode.MANUAL) {
+        if (currentNetworkMode() == NetworkMode.MANUAL) {
             releaseMulticast()
             stopNsdDiscovery()
             tcpJob?.cancel()
@@ -1272,7 +1573,7 @@ class ReticulumBridge(
             _gatewayHealth.value = GatewayHealth(state = GatewayHealthState.UNCONFIGURED)
             return
         }
-        if (settings.networkMode != NetworkMode.LOCAL_ONLY) {
+        if (currentNetworkMode() != NetworkMode.LOCAL_ONLY) {
             startGatewayClient()
         } else {
             tcpJob?.cancel()
@@ -1320,7 +1621,7 @@ class ReticulumBridge(
         registeredContacts[destHex] = publicKeyB64
         registeredContacts[legacyDestHex] = publicKeyB64
         legacyToPrimaryContact[legacyDestHex] = destHex
-        if (isGatewayOnline && settings.networkMode != NetworkMode.LOCAL_ONLY) {
+        if (isGatewayOnline && currentNetworkMode() != NetworkMode.LOCAL_ONLY) {
             requestPathIfNeeded(destHex)
         }
         return destHex
@@ -1349,11 +1650,11 @@ class ReticulumBridge(
             if (reachable) return true
             localPeerMap.remove(destHash, localEndpoint)
         }
-        if (settings.networkMode == NetworkMode.LOCAL_ONLY) return false
+        if (currentNetworkMode() == NetworkMode.LOCAL_ONLY) return false
         if (isGatewayOnline) {
             requestPathIfNeeded(destHash)
         }
-        val propReady = usePropagation && settings.propagationNode.trim().length == 32
+        val propReady = usePropagation && currentPropagationNode().trim().length == 32
         return isGatewayOnline && (propReady || registeredContacts.containsKey(destHash))
     }
 
@@ -1372,7 +1673,8 @@ class ReticulumBridge(
         if (localEndpoint != null) {
             val directDelivered = sendLocalRawHttp(localEndpoint, jsonPayload)
             if (directDelivered) {
-                android.util.Log.i("PulseSync", "Zpráva pro $destHash úspěšně doručena přímo přes lokální Wi-Fi: $localEndpoint")
+                PLog.i("PulseSync") { "Zpráva pro $destHash úspěšně doručena přímo přes lokální Wi-Fi: $localEndpoint" }
+                purgeDepositCache(eventId, destHash)
                 emitEvent(BridgeEvent.Delivery(eventId, "HANDED", null))
                 return
             } else {
@@ -1382,10 +1684,10 @@ class ReticulumBridge(
         }
 
         // 2. Přenos přes Reticulum (RNS) TCP uzel v internetu (přímý RNS paket + volitelně LXMF Propagation)
-        if (settings.networkMode != NetworkMode.LOCAL_ONLY) {
+        if (currentNetworkMode() != NetworkMode.LOCAL_ONLY) {
             val payloadBytes = jsonPayload.toByteArray(Charsets.UTF_8)
             val rnsDelivered = sendOverGateway(destHash, payloadBytes)
-            val propHash = settings.propagationNode.trim()
+            val propHash = currentPropagationNode().trim()
             val depositedToLink = if (propagated && propHash.length == 32 && isGatewayOnline) {
                 sendViaLxmfPropagation(destHash, payloadBytes, eventId)
             } else {
@@ -1420,45 +1722,104 @@ class ReticulumBridge(
                 statusLine.contains(" 200 ") || statusLine.contains(" 204 ")
             }
         }.onFailure { e ->
-            android.util.Log.w("PulseSync", "Přímé Wi-Fi odeslání na $localEndpoint selhalo: ${e.message}")
+            PLog.w("PulseSync") { "Přímé Wi-Fi odeslání na $localEndpoint selhalo: ${e.message}" }
         }.getOrDefault(false)
     }
 
-    private fun depositCacheFile(eventId: String): java.io.File {
-        val dir = java.io.File(context.filesDir, "rns_deposit_cache").apply { mkdirs() }
-        val key = bytesToHex(MessageDigest.getInstance("SHA-256").digest(eventId.toByteArray(Charsets.UTF_8)))
-        return java.io.File(dir, "$key.lxd")
+    private fun depositCacheDir(): java.io.File =
+        java.io.File(resolveFilesDir(), "rns_deposit_cache").apply { mkdirs() }
+
+    private fun depositCacheKey(eventId: String, recipientHash: String, pnHash: String): String {
+        val raw = "$eventId:${recipientHash.lowercase()}:${pnHash.lowercase()}"
+        return bytesToHex(MessageDigest.getInstance("SHA-256").digest(raw.toByteArray(Charsets.UTF_8)))
     }
 
-    private fun getCachedDeposit(eventId: String): ByteArray? {
-        cachedPropagationDeposits[eventId]?.let { return it }
-        val f = runCatching { depositCacheFile(eventId) }.getOrNull() ?: return null
+    private fun depositCacheFileByKey(cacheKey: String): java.io.File =
+        java.io.File(depositCacheDir(), "$cacheKey.lxd")
+
+    private fun getCachedDepositByKey(cacheKey: String, eventId: String): ByteArray? {
+        cachedPropagationDeposits[cacheKey]?.let { return it }
+        val f = runCatching { depositCacheFileByKey(cacheKey) }.getOrNull() ?: return null
         if (!f.exists()) return null
         return runCatching { f.readBytes() }.getOrNull()?.also {
-            cachedPropagationDeposits[eventId] = it
+            cachedPropagationDeposits[cacheKey] = it
+            eventToCacheKeys.computeIfAbsent(eventId) { ConcurrentHashMap.newKeySet() }.add(cacheKey)
         }
     }
 
-    private fun putCachedDeposit(eventId: String, bytes: ByteArray) {
+    private fun putCachedDepositByKey(cacheKey: String, eventId: String, bytes: ByteArray) {
         if (cachedPropagationDeposits.size > 256) {
             cachedPropagationDeposits.clear()
         }
-        cachedPropagationDeposits[eventId] = bytes
-        runCatching { depositCacheFile(eventId).writeBytes(bytes) }
+        cachedPropagationDeposits[cacheKey] = bytes
+        eventToCacheKeys.computeIfAbsent(eventId) { ConcurrentHashMap.newKeySet() }.add(cacheKey)
+        runCatching { depositCacheFileByKey(cacheKey).writeBytes(bytes) }
     }
 
-    private fun removeCachedDeposit(eventId: String) {
-        cachedPropagationDeposits.remove(eventId)
-        runCatching { depositCacheFile(eventId).delete() }
+    private fun removeCachedDepositByKey(cacheKey: String, eventId: String? = null) {
+        if (cacheKey.isNotEmpty()) {
+            cachedPropagationDeposits.remove(cacheKey)
+            runCatching { depositCacheFileByKey(cacheKey).delete() }
+        }
+        if (eventId != null && cacheKey.isNotEmpty()) {
+            eventToCacheKeys[eventId]?.remove(cacheKey)
+        }
+    }
+
+    fun purgeDepositCache(eventId: String, recipientHash: String? = null) {
+        eventToCacheKeys.remove(eventId)?.forEach { key ->
+            removeCachedDepositByKey(key, eventId)
+        }
+        if (recipientHash != null) {
+            val primaryDest = legacyToPrimaryContact[recipientHash] ?: recipientHash
+            val pnHash = currentPropagationNode().trim().lowercase()
+            if (pnHash.isNotEmpty()) {
+                val key = depositCacheKey(eventId, primaryDest, pnHash)
+                removeCachedDepositByKey(key, eventId)
+            }
+        }
+    }
+
+    internal fun pruneDepositCache(
+        nowMs: Long = System.currentTimeMillis(),
+        maxAgeMs: Long = 30L * 24L * 3600L * 1000L,
+    ): Int {
+        val dir = runCatching { java.io.File(resolveFilesDir(), "rns_deposit_cache") }.getOrNull() ?: return 0
+        if (!dir.exists()) return 0
+        val cutoff = nowMs - maxAgeMs
+        var deleted = 0
+        dir.listFiles()?.forEach { file ->
+            if (file.isFile && file.name.endsWith(".lxd") && file.lastModified() in 1L until cutoff) {
+                val key = file.name.removeSuffix(".lxd")
+                cachedPropagationDeposits.remove(key)
+                if (runCatching { file.delete() }.getOrDefault(false)) {
+                    deleted++
+                }
+            }
+        }
+        return deleted
+    }
+
+    private fun pruneDepositCacheIfDue(nowMs: Long = System.currentTimeMillis()) {
+        if (nowMs - lastCachePruneMs < 3_600_000L) return
+        lastCachePruneMs = nowMs
+        runCatching { pruneDepositCache(nowMs) }
+    }
+
+    private fun effectiveRequiredStampCost(info: LxmfPropagationNodeInfo? = propagationNodeInfo): Int {
+        if (info != null) return maxOf(0, info.stampCost - info.stampCostFlexibility)
+        return propagationFractionalStampCost ?: 13
     }
 
     /**
      * Pre-computes encrypted LXMF + PoW stamp for [eventId] outside `pumpLock` (NEW-5, NEW-7).
      */
     fun preparePropagationDeposit(destHash: String, content: String, eventId: String) {
-        if (getCachedDeposit(eventId) != null) return
         val selfInfo = info ?: return
         val primaryDestHash = legacyToPrimaryContact[destHash] ?: destHash
+        val pnHash = currentPropagationNode().trim().lowercase()
+        val cacheKey = depositCacheKey(eventId, primaryDestHash, pnHash)
+        if (getCachedDepositByKey(cacheKey, eventId) != null) return
         val encryptedEnvelope = runCatching { encryptPayload(selfInfo.deliveryHash, primaryDestHash, content, eventId) }.getOrNull()
             ?: return
         val payloadBytes = BridgeEnvelopeCrypto.encode(encryptedEnvelope).toByteArray(Charsets.UTF_8)
@@ -1467,43 +1828,61 @@ class ReticulumBridge(
 
     private fun buildOrLoadPropagationLxd(destHash: String, payloadBytes: ByteArray, eventId: String): ByteArray? {
         val primaryDestHash = legacyToPrimaryContact[destHash] ?: destHash
-        getCachedDeposit(eventId)?.let { return it }
-        val selfInfo = info ?: return null
-        val edPriv = ed25519PrivKey ?: return null
-        val recPub64B64 = registeredContacts[primaryDestHash] ?: return null
-        val recPubBytes = Base64.getDecoder().decode(recPub64B64)
-        if (recPubBytes.size < 64) return null
-        val recXPub32 = recPubBytes.copyOfRange(0, 32)
-        val recIdent16 = MessageDigest.getInstance("SHA-256").digest(recPubBytes.copyOf(64)).copyOf(16)
+        val pnHash = currentPropagationNode().trim().lowercase()
+        val cacheKey = depositCacheKey(eventId, primaryDestHash, pnHash)
+        val lock = depositBuildLocks.computeIfAbsent(eventId) { Any() }
+        return synchronized(lock) {
+            getCachedDepositByKey(cacheKey, eventId)?.let { return@synchronized it }
+            val selfInfo = info ?: return@synchronized null
+            val edPriv = ed25519PrivKey ?: return@synchronized null
+            val recPub64B64 = registeredContacts[primaryDestHash] ?: return@synchronized null
+            val recPubBytes = Base64.getDecoder().decode(recPub64B64)
+            if (recPubBytes.size < 64) return@synchronized null
+            val recXPub32 = recPubBytes.copyOfRange(0, 32)
+            val recIdent16 = MessageDigest.getInstance("SHA-256").digest(recPubBytes.copyOf(64)).copyOf(16)
 
-        val lxmfWire = LxmfCodec.pack(
-            destinationHash = primaryDestHash,
-            sourceHash = selfInfo.deliveryHash,
-            edPriv = edPriv,
-            content = payloadBytes,
-        )
-        val encrypted = LxmfCodec.encryptPropagationPayload(
-            lxmfWire = lxmfWire,
-            recipientX25519Pub32 = recXPub32,
-            recipientIdentityHash16 = recIdent16,
-        )
-        val transientId = LxmfStamper.transientId(encrypted)
-        val baseCost = propagationFractionalStampCost
-            ?: propagationNodeInfo?.let { maxOf(0, it.stampCost - it.stampCostFlexibility) }
-            ?: 13
-        val targetCost = baseCost.coerceIn(0, 24)
-        val stamp = runBlocking(Dispatchers.Default) {
-            LxmfStamper.generateStamp(
-                material = transientId,
-                targetCost = targetCost,
-                expandRounds = LxmfStamper.PN_WORKBLOCK_ROUNDS,
+            val targetCost = effectiveRequiredStampCost()
+            if (targetCost > LxmfStamper.MAX_ACCEPTABLE_STAMP_COST) {
+                _propagationStatus.value = PropagationNodeStatus(
+                    state = PropagationAccessState.UNUSABLE_STAMP_COST,
+                    detail = "Požadovaná cena stampu ($targetCost) překračuje limit ${LxmfStamper.MAX_ACCEPTABLE_STAMP_COST}",
+                    stampCost = targetCost,
+                )
+                return@synchronized null
+            }
+
+            val lxmfWire = LxmfCodec.pack(
+                destinationHash = primaryDestHash,
+                sourceHash = selfInfo.deliveryHash,
+                edPriv = edPriv,
+                content = payloadBytes,
             )
-        } ?: return null
-        return (encrypted + stamp).also { putCachedDeposit(eventId, it) }
+            val encrypted = LxmfCodec.encryptPropagationPayload(
+                lxmfWire = lxmfWire,
+                recipientX25519Pub32 = recXPub32,
+                recipientIdentityHash16 = recIdent16,
+            )
+            val transientId = LxmfStamper.transientId(encrypted)
+            val stamp = runBlocking(Dispatchers.Default) {
+                LxmfStamper.generateStamp(
+                    material = transientId,
+                    targetCost = targetCost,
+                    expandRounds = LxmfStamper.PN_WORKBLOCK_ROUNDS,
+                    isCancelled = {
+                        bridgeStopped.get() ||
+                            !scope.isActive ||
+                            currentPropagationNode().trim().lowercase() != pnHash
+                    },
+                )
+            } ?: return@synchronized null
+            (encrypted + stamp).also { putCachedDepositByKey(cacheKey, eventId, it) }
+        }
     }
 
     private fun sendViaLxmfPropagation(destHash: String, payloadBytes: ByteArray, eventId: String): Boolean = runCatching {
         val primaryDestHash = legacyToPrimaryContact[destHash] ?: destHash
+        val pnHash = currentPropagationNode().trim().lowercase()
+        val cacheKey = depositCacheKey(eventId, primaryDestHash, pnHash)
         val lxd = buildOrLoadPropagationLxd(primaryDestHash, payloadBytes, eventId) ?: return false
 
         val depositEnvelope = LxmfCodec.packPropagationDepositRaw(lxd)
@@ -1515,69 +1894,173 @@ class ReticulumBridge(
                 eventId = eventId,
                 sendPacket = ::sendRawRnsPacket,
             ) ?: return false
-            lastDepositEventId = eventId
-            android.util.Log.i(
-                "PulseSync",
+            PLog.i("PulseSync") {
                 "Zahájen RNS Resource deposit pro $primaryDestHash (${depositEnvelope.size}B > MDU ${link.mdu}B, res=${resHashHex.take(8)})"
-            )
+            }
             return true
         }
         val pkt = link.buildEncryptedLinkPacket(context = RnsContext.NONE, plaintext = depositEnvelope) ?: return false
         val pktHash = RnsCrypto.packetHash(pkt)
         val pktHashHex = bytesToHex(pktHash)
-        pendingLinkProofs[pktHashHex] = PendingDeposit(eventId, pktHash, System.currentTimeMillis())
-        lastDepositEventId = eventId
+        pendingLinkProofs[pktHashHex] = PendingDeposit(
+            eventId = eventId,
+            packetHash32 = pktHash,
+            sentAtMs = System.currentTimeMillis(),
+            linkIdHex = link.linkIdHex,
+            cacheKey = cacheKey,
+        )
+        val linkList = activeLinkPacketDeposits.computeIfAbsent(link.linkIdHex) { mutableListOf() }
+        synchronized(linkList) {
+            linkList.add(eventId to cacheKey)
+        }
         sendRawRnsPacket(pkt).also { ok ->
             if (ok) {
-                android.util.Log.i("PulseSync", "Odeslán LXMF deposit pro $primaryDestHash (${depositEnvelope.size}B, čeká na PROOF)")
+                PLog.i("PulseSync") { "Odeslán LXMF deposit pro $primaryDestHash (${depositEnvelope.size}B, čeká na PROOF)" }
             } else {
                 pendingLinkProofs.remove(pktHashHex)
+                removeActivePacketDeposit(link.linkIdHex, eventId)
             }
         }
     }.getOrDefault(false)
 
-    private fun awaitGetResponse(link: RnsLinkSession, reqData: List<Any?>, timeoutMs: Long = 15_000L): List<Any?>? {
-        val future = CompletableFuture<List<Any?>>()
+    private fun sendIdentifyOnLink(link: RnsLinkSession, force: Boolean = false): Boolean {
+        if (!force && link.identified) return true
+        val xPriv = x25519PrivKey ?: return false
+        val xPub = xPriv.generatePublicKey().encoded
+        val edPriv = ed25519PrivKey ?: return false
+        val edPub = edPriv.generatePublicKey().encoded
+        val idPkt = link.buildIdentifyPacket(xPub + edPub, edPriv) ?: return false
+        return sendRawRnsPacket(idPkt)
+    }
+
+    private fun awaitGetResponse(link: RnsLinkSession, reqData: List<Any?>, timeoutMs: Long = 15_000L): GetResponse? {
+        val future = CompletableFuture<GetResponse>()
         val (reqId, reqPkt) = link.buildRequestPacket(LxmfCodec.MESSAGE_GET_PATH, reqData) ?: return null
         synchronized(getRequestLock) {
             pendingGetResponse?.cancel(false)
             pendingGetResponse = future
             pendingGetRequestId = reqId
         }
+        resourceCoordinator.registerPendingResponse(reqId, maxResponseSize = RnsResourceConstants.DEFAULT_MAX_DECOMPRESSED_SIZE)
         if (!sendRawRnsPacket(reqPkt)) {
+            synchronized(getRequestLock) {
+                if (pendingGetResponse === future) {
+                    pendingGetResponse = null
+                    pendingGetRequestId = null
+                }
+            }
+            resourceCoordinator.clearPendingResponse(reqId)
             tearDownPropagationLink(link)
             return null
         }
-        val result = runCatching { future.get(timeoutMs, TimeUnit.MILLISECONDS) }.getOrNull()
+
+        val startMs = System.currentTimeMillis()
+        var lastProgressMs = startMs
+        val hardCapMs = 300_000L
+        var result: GetResponse? = null
+        while (System.currentTimeMillis() - startMs < hardCapMs) {
+            result = runCatching { future.get(500L, TimeUnit.MILLISECONDS) }.getOrNull()
+            if (result != null || future.isDone || future.isCancelled) break
+            val now = System.currentTimeMillis()
+            val resActivity = resourceCoordinator.activeResponseLastActivityMs(reqId)
+            if (resActivity != null && resActivity > lastProgressMs) {
+                lastProgressMs = resActivity
+            }
+            val effectiveIdleLimit = if (resActivity != null) maxOf(timeoutMs, 30_000L) else timeoutMs
+            if (now - lastProgressMs >= effectiveIdleLimit) {
+                break
+            }
+        }
+        synchronized(getRequestLock) {
+            if (pendingGetResponse === future) {
+                pendingGetResponse = null
+                pendingGetRequestId = null
+            }
+        }
+        resourceCoordinator.clearPendingResponse(reqId)
         if (result == null) {
             tearDownPropagationLink(link)
         }
         return result
     }
 
+    private fun executeGetWithErrorHandling(
+        link: RnsLinkSession,
+        reqData: List<Any?>,
+        allowRetryOnNoIdentity: Boolean = true,
+    ): GetResponse.Messages? {
+        val resp = awaitGetResponse(link, reqData) ?: return null
+        return when (resp) {
+            is GetResponse.Messages -> {
+                throttleBackoffMs = 0L
+                propagationThrottledUntilMs = 0L
+                if (_propagationStatus.value.state != PropagationAccessState.UNUSABLE_STAMP_COST) {
+                    _propagationStatus.value = PropagationNodeStatus(
+                        state = PropagationAccessState.OK,
+                        stampCost = effectiveRequiredStampCost(),
+                    )
+                }
+                resp
+            }
+            is GetResponse.Error -> when (resp.code) {
+                LxmfCodec.ERROR_NO_IDENTITY -> {
+                    _propagationStatus.value = PropagationNodeStatus(
+                        state = PropagationAccessState.NO_IDENTITY,
+                        detail = "Uzel požaduje identifikaci linku (NO_IDENTITY)",
+                    )
+                    if (allowRetryOnNoIdentity && sendIdentifyOnLink(link, force = true)) {
+                        executeGetWithErrorHandling(link, reqData, allowRetryOnNoIdentity = false)
+                    } else {
+                        tearDownPropagationLink(link)
+                        null
+                    }
+                }
+                LxmfCodec.ERROR_NO_ACCESS -> {
+                    _propagationStatus.value = PropagationNodeStatus(
+                        state = PropagationAccessState.NO_ACCESS,
+                        detail = "Uzel odepřel přístup ke schránce (NO_ACCESS)",
+                    )
+                    PLog.w("PulseSync") { "LXMF propagation node vrátil ERROR_NO_ACCESS (0xF1)" }
+                    tearDownPropagationLink(link)
+                    null
+                }
+                LxmfCodec.ERROR_THROTTLED -> {
+                    val nextBackoff = if (throttleBackoffMs <= 0L) 30_000L else minOf(throttleBackoffMs * 2L, 300_000L)
+                    throttleBackoffMs = nextBackoff
+                    val untilMs = System.currentTimeMillis() + nextBackoff
+                    propagationThrottledUntilMs = untilMs
+                    _propagationStatus.value = PropagationNodeStatus(
+                        state = PropagationAccessState.THROTTLED,
+                        detail = "Uzel omezil rychlost požadavků (THROTTLED)",
+                        throttledUntilMs = untilMs,
+                    )
+                    PLog.w("PulseSync") { "LXMF propagation node vrátil ERROR_THROTTLED (0xF6), backoff ${nextBackoff}ms" }
+                    null
+                }
+                else -> {
+                    PLog.w("PulseSync") { "LXMF propagation node vrátil chybu /get: 0x${resp.code.toString(16)}" }
+                    null
+                }
+            }
+        }
+    }
+
     /** Vyzvedne čekající zašifrované zprávy z LXMF propagation uzlu přes aktivní RNS Link (dvoufázový /get + purge). */
     fun syncInbox(onEnvelope: ((BridgeEvent.Message) -> Boolean)? = null) {
-        if (settings.networkMode == NetworkMode.LOCAL_ONLY) return
-        val propHash = settings.propagationNode.trim()
+        if (currentNetworkMode() == NetworkMode.LOCAL_ONLY) return
+        val propHash = currentPropagationNode().trim()
         if (propHash.length != 32 || !isGatewayOnline) return
+        val now = System.currentTimeMillis()
+        if (now < propagationThrottledUntilMs) return
         val selfInfo = info ?: return
         val xPriv = x25519PrivKey ?: return
         val selfIdBytes = hexToBytes(selfInfo.identityHash)
         val link = ensurePropagationLink() ?: return
-        if (!link.identified) {
-            val xPub = xPriv.generatePublicKey().encoded
-            val edPriv = ed25519PrivKey
-            val edPub = edPriv?.generatePublicKey()?.encoded
-            if (edPriv != null && edPub != null) {
-                link.buildIdentifyPacket(xPub + edPub, edPriv)?.let { idPkt ->
-                    sendRawRnsPacket(idPkt)
-                }
-            }
-        }
+        sendIdentifyOnLink(link, force = false)
 
         // Fáze 1: [null, null] -> seznam dostupných transient ID
-        val availableList = awaitGetResponse(link, LxmfCodec.buildGetMessagesRequest(null, null)) ?: return
-        val availableIds = availableList.mapNotNull { it as? ByteArray }
+        val phase1 = executeGetWithErrorHandling(link, LxmfCodec.buildGetMessagesRequest(null, null)) ?: return
+        val availableIds = phase1.items.mapNotNull { it as? ByteArray }
         val wants = synchronized(downloadedTransientIds) {
             availableIds.filter { bytesToHex(it) !in downloadedTransientIds }.take(32)
         }
@@ -1586,15 +2069,20 @@ class ReticulumBridge(
         }
         if (wants.isEmpty() && haves.isEmpty()) return
 
-        // Fáze 2: [wants, haves, limit] -> stažení nových zpráv a purge již zpracovaných
-        val transferLimitBytes = ((propagationNodeInfo?.perTransferLimitKb ?: 256L).coerceIn(64L, 2048L) * 1024L).toInt()
-        val responseMessages = awaitGetResponse(link, listOf(wants, haves, transferLimitBytes)) ?: return
+        // Fáze 2: [wants, haves, limit] -> stažení nových zpráv (limit v KB dle LXMRouter.py:1746) a purge již zpracovaných
+        val nodeLimitKb = propagationNodeInfo?.perTransferLimitKb?.takeIf { it > 0L } ?: 256L
+        val transferLimitKb = minOf(nodeLimitKb, 2048L).coerceAtLeast(32L).toInt()
+        val phase2 = executeGetWithErrorHandling(
+            link = link,
+            reqData = LxmfCodec.buildGetMessagesRequest(wants, haves, transferLimitKb),
+        ) ?: return
+        // N-4: purge IDs only after Phase 2 succeeds without error
         if (haves.isNotEmpty()) {
             synchronized(pendingPurgeIds) {
                 haves.forEach { pendingPurgeIds.remove(bytesToHex(it)) }
             }
         }
-        for (item in responseMessages) {
+        for (item in phase2.items) {
             val storedBytes = item as? ByteArray ?: continue
             val tidHex = bytesToHex(LxmfStamper.transientId(storedBytes))
             val lxmfWire = LxmfCodec.unpackPropagationMessage(storedBytes, xPriv, selfIdBytes) ?: continue
@@ -1640,10 +2128,10 @@ class ReticulumBridge(
         )
         return if (result != null) {
             val (dec, msg) = result
-            android.util.Log.i("PulseSync", "Úspěšně dešifrována zpráva od ${msg.source} (v=${dec.version}, len=${msg.content.length})")
+            PLog.i("PulseSync") { "Úspěšně dešifrována zpráva od ${msg.source} (v=${dec.version}, len=${msg.content.length})" }
             msg
         } else {
-            android.util.Log.w("PulseSync", "Dešifrování nebo ověření podpisu příchozí obálky selhalo")
+            PLog.w("PulseSync") { "Dešifrování nebo ověření podpisu příchozí obálky selhalo" }
             null
         }
     }
@@ -1699,11 +2187,44 @@ class ReticulumBridge(
         }
     }
 
+    internal fun setGatewayOnlineForTest(online: Boolean) {
+        isGatewayOnline = online
+    }
+
+    internal fun setPropagationLinkForTest(link: RnsLinkSession?) {
+        synchronized(propagationLinkLock) {
+            propagationLink = link
+        }
+    }
+
+    internal fun addPendingPurgeIdForTest(tidHex: String) {
+        synchronized(pendingPurgeIds) {
+            pendingPurgeIds.add(tidHex)
+        }
+    }
+
+    internal fun pendingPurgeIdsSnapshotForTest(): Set<String> = synchronized(pendingPurgeIds) {
+        pendingPurgeIds.toSet()
+    }
+
+    internal fun pendingLinkProofsCountForTest(): Int = pendingLinkProofs.size
+    internal fun pendingPostProofsCountForTest(): Int = pendingPostProofDeposits.size
+    internal fun activeOutboundResourceCountForTest(): Int = resourceCoordinator.activeOutboundCount()
+
+    internal fun sendViaLxmfPropagationForTest(destHash: String, payloadBytes: ByteArray, eventId: String): Boolean =
+        sendViaLxmfPropagation(destHash, payloadBytes, eventId)
+
+    internal fun resetThrottleForTest() {
+        propagationThrottledUntilMs = 0L
+        throttleBackoffMs = 0L
+    }
+
     fun statusJson(): String {
         val hasLocal = localServerSocket != null && !localServerSocket!!.isClosed
         val peerCount = localPeerMap.size
         val gwOnline = isGatewayOnline
         val lxmfReady = propagationLink?.state == RnsLinkSession.State.ACTIVE
-        return """{"status":"online","interfaces":[{"name":"Local Wi-Fi (mDNS)","online":$hasLocal,"peers":$peerCount},{"name":"Reticulum TCP Gateway","online":$gwOnline},{"name":"LXMF Propagation","online":$lxmfReady}]}"""
+        val propStatus = _propagationStatus.value
+        return """{"status":"online","propagationAccess":"${propStatus.state.name}","interfaces":[{"name":"Local Wi-Fi (mDNS)","online":$hasLocal,"peers":$peerCount},{"name":"Reticulum TCP Gateway","online":$gwOnline},{"name":"LXMF Propagation","online":$lxmfReady,"accessState":"${propStatus.state.name}"}]}"""
     }
 }

@@ -43,6 +43,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -462,7 +463,28 @@ data class SeriesItem(
     val color: Color,
     val values: List<Double?>,
     val unit: String = "",
+    /** Draw the line dashed – secondary cue for series whose colors may be hard to tell apart. */
+    val dashed: Boolean = false,
 )
+
+/** Line style of a series in [MultiSeriesLineChart]. */
+internal enum class SeriesLineStyle { SOLID, DASHED, DOTTED }
+
+/**
+ * With more than 4 visible series color alone is not enough, so styles rotate
+ * solid / dashed / dotted. [forceDashed] series are at least dashed.
+ */
+internal fun seriesLineStyle(index: Int, seriesCount: Int, forceDashed: Boolean = false): SeriesLineStyle {
+    val rotated = if (seriesCount > 4) SeriesLineStyle.entries[index.coerceAtLeast(0) % 3] else SeriesLineStyle.SOLID
+    return if (forceDashed && rotated == SeriesLineStyle.SOLID) SeriesLineStyle.DASHED else rotated
+}
+
+private fun seriesLinePathEffect(index: Int, seriesCount: Int, forceDashed: Boolean): PathEffect? =
+    when (seriesLineStyle(index, seriesCount, forceDashed)) {
+        SeriesLineStyle.SOLID -> null
+        SeriesLineStyle.DASHED -> PathEffect.dashPathEffect(floatArrayOf(16f, 10f))
+        SeriesLineStyle.DOTTED -> PathEffect.dashPathEffect(floatArrayOf(2f, 9f))
+    }
 
 /**
  * Zformátuje změnu metriky:
@@ -885,7 +907,16 @@ fun MultiSeriesLineChart(
                                 drawPath(
                                     strokePath,
                                     color = s.color,
-                                    style = Stroke(width = 4.5f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                                    style = Stroke(
+                                        width = 4.5f,
+                                        cap = StrokeCap.Round,
+                                        join = StrokeJoin.Round,
+                                        pathEffect = seriesLinePathEffect(
+                                            index = visibleSeries.indexOf(s),
+                                            seriesCount = visibleSeries.size,
+                                            forceDashed = s.dashed
+                                        )
+                                    )
                                 )
                                 if (pts.size <= 35) {
                                     for (pt in pts) {
@@ -1562,9 +1593,9 @@ fun WeightCompositionStackedAreaChart(
     xLabels: List<String> = emptyList(),
     modifier: Modifier = Modifier,
 ) {
-    val weightColor = Color(0xFF2DD4BF)
-    val muscleColor = Color(0xFF10B981)
-    val fatColor = Color(0xFFF59E0B)
+    val weightColor = MetricPalette.Weight
+    val muscleColor = MetricPalette.Muscle
+    val fatColor = MetricPalette.Fat
     val bandColor = weightColor.copy(alpha = 0.14f)
     val cursorColor = Color(0xFFFFFFFF)
 
@@ -1824,7 +1855,7 @@ fun WeightCompositionStackedAreaChart(
                         val p = pts[0]
                         val barW = (size.width * 0.35f).coerceAtLeast(40f)
                         val leftX = (p.xPos - barW / 2f).coerceAtLeast(0f)
-                        // Svaly (zelená)
+                        // Svaly (modrá)
                         drawRect(
                             color = muscleColor.copy(alpha = 0.42f),
                             topLeft = Offset(leftX, p.muscleTopY),
@@ -1932,10 +1963,16 @@ fun WeightCompositionStackedAreaChart(
                                 cubicTo(midX, prev.fatTopY, midX, curr.fatTopY, curr.xPos, curr.fatTopY)
                             }
                         }
+                        // Fat boundary is dashed so it stays distinguishable from muscle even without color.
                         drawPath(
                             fatStroke,
                             color = fatColor,
-                            style = Stroke(width = 3.0f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                            style = Stroke(
+                                width = 3.0f,
+                                cap = StrokeCap.Round,
+                                join = StrokeJoin.Round,
+                                pathEffect = PathEffect.dashPathEffect(floatArrayOf(14f, 9f))
+                            )
                         )
 
                         val weightStroke = Path().apply {

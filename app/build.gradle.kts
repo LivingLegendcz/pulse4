@@ -26,8 +26,8 @@ android {
 
         // Google Play vyzaduje pro kazde nove vydani
         // vyssi versionCode nez u predchoziho vydani.
-        versionCode = 5
-        versionName = "0.2.0"
+        versionCode = 6
+        versionName = "0.2.1"
 
         // HTTPS App Link pro navrat z Withings OAuth.
         // Vlastni domena se statickym assetlinks.json.

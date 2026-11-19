@@ -86,10 +86,21 @@ sealed interface WithingsUiState {
  * Podporuje jak hlavní profil rodiče, tak volbu dětského profilu a automatické přeposílání
  * dětských měření přes šifrovaný P2P kanál Reticulum přímo do telefonu dítěte.
  */
-class WithingsService(private val context: Context, private val sl: ServiceLocator) {
+class WithingsService internal constructor(
+    private val context: Context,
+    private val sl: ServiceLocator,
+    private val http: app.pulse4.provider.HttpGateway,
+    private val selfIdProvider: () -> String,
+) {
+    constructor(context: Context, sl: ServiceLocator) : this(
+        context = context,
+        sl = sl,
+        http = OkHttpGateway(),
+        selfIdProvider = { sl.bridge.ensureStarted().deliveryHash },
+    )
+
     private val vault = SecretTokenVault(sl.secrets, "withings.tokens")
     private val childVault = SecretTokenVault(sl.secrets, "withings.child.tokens")
-    private val http = OkHttpGateway()
     private val webClient by lazy {
         WithingsWebClient(http)
     }
@@ -894,11 +905,14 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
         val childRecipient = sl.settings.childRecipientIdentity
         if (childRecipient.isBlank()) return 0
         val toForward = mutableListOf<app.pulse4.domain.MetricObservation>()
+        // R4-6: dítě dostává VŽDY jen data svého pevně navázaného Withings profilu – nezávisle na tom,
+        // který dětský profil je zrovna vybraný v nastavení Withings. Bez platné vazby se neposílá nic.
+        val boundUid = childWebUidFor(childRecipient) ?: return 0
 
-        // 1. Pokud má rodič připojený Web Connector s vybraným dětským profilem:
+        // 1. Pokud má rodič připojený Web Connector: stáhneme přímo navázaný profil dítěte.
         val webSession = loadWebSession()
-        val webChildId = webSession?.childUserId
-        if (webChildId != null && webSession.isConnected()) {
+        val webChildId = boundUid.toLongOrNull()
+        if (webChildId != null && webSession != null && webSession.isConnected()) {
             runCatching {
                 val fromSec = (nowMs - 30L * 86_400_000L) / 1000L
                 val childGroups = webClient.getMeasures(
@@ -920,7 +934,7 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
 
         // 2. Pokud má rodič připojený OAuth token přímo pro dětský profil ve Withingsu (`childVault`):
         val cUid = childVault.load()?.userId
-        if (cUid != null && childSession.isConnected()) {
+        if (cUid != null && childSession.isConnected() && cUid.toString() == boundUid) {
             runCatching {
                 val api = WithingsApi(config(), childSession, http)
                 val from = nowMs - 30L * 86_400_000L
@@ -937,8 +951,8 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
         }
 
         // 3. Pokud je zapnuté automatické přeposílání dětského váhového pásma z Withings (např. 12–45 kg):
-        val childWebUid = loadWebSession()?.childUserId?.toString() ?: cUid?.toString()
-        if (sl.settings.childWeightAutoForward && childWebUid != null) {
+        val childWebUid = boundUid
+        if (sl.settings.childWeightAutoForward) {
             val cMin = sl.settings.childWeightMinKg
             val cMax = sl.settings.childWeightMaxKg
             val today = LocalDate.now(ZoneId.of(sl.settings.zoneId))
@@ -976,7 +990,8 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
      * a na IO vlákně spustí odeslání + případný čerstvý Withings fetch.
      */
     internal fun onFamilyWeightSnapshotRequest(childRecipient: String, nowMs: Long): Int {
-        if (childRecipient.isBlank()) return 0
+        // R4-6: jen aktuálně nastavené dítě (handler to ověřuje také; zde obrana do hloubky).
+        if (childRecipient.isBlank() || childRecipient != sl.settings.childRecipientIdentity) return 0
         val candidates = collectCachedChildObservations(childRecipient, nowMs)
         val queued = forwardToChild(candidates, childRecipient, nowMs)
         if (sl.settings.networkMode != app.pulse4.android.data.NetworkMode.MANUAL) {
@@ -994,28 +1009,37 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
         childRecipient: String,
         nowMs: Long,
     ): List<app.pulse4.domain.MetricObservation> {
+        // R4-6: bez platné vazby (odebrané dítě, profil zmizel z účtu) se neposílá nic – ani z cache či outboxu.
+        val childWebUid = childWebUidFor(childRecipient) ?: return emptyList()
         val cutoffMs = nowMs - 30L * 86_400_000L
         val collected = LinkedHashMap<String, app.pulse4.domain.MetricObservation>()
         cachedChildObservationsByRecipient[childRecipient].orEmpty()
             .filter { !it.deleted && it.startUtcMs >= cutoffMs }
             .forEach { collected[it.id] = it }
 
-        val cUid = childVault.load()?.userId
-        val childWebUid = loadWebSession()?.childUserId?.toString() ?: cUid?.toString()
-        if (sl.settings.childWeightAutoForward && childWebUid != null) {
+        // R4-6: DB je zdroj pravdy – cache ani outbox nesmí přebít smazání v DB. Smazaný řádek BEZ záznamu ve vyřazených
+        // (tombstone z Withings / Health Connect, úklid) se neposílá. Vyřazená měření (markWrong = „není moje“, typicky
+        // dětská vážení vyřazená z grafu rodiče) zůstávají platnými daty dítěte.
+        val today = LocalDate.now(ZoneId.of(sl.settings.zoneId))
+        val excludedIds = sl.db.exclusions().allIds().toHashSet()
+        val dbRows = sl.db.observations()
+            .ofTypesIncludingDeleted(CHILD_ACCEPTED_TYPES.map { it.name }, today.minusDays(31).toString(), today.plusDays(1).toString())
+            .map { it.toDomain() }
+        val tombstonedIds = dbRows.filter { it.deleted && it.id !in excludedIds }.mapTo(HashSet()) { it.id }
+
+        if (sl.settings.childWeightAutoForward) {
             val cMin = sl.settings.childWeightMinKg
             val cMax = sl.settings.childWeightMaxKg
-            val today = LocalDate.now(ZoneId.of(sl.settings.zoneId))
-            sl.db.observations()
-                .ofTypesIncludingDeleted(listOf(MetricType.WEIGHT.name), today.minusDays(30).toString(), today.toString())
-                .map { it.toDomain() }
+            dbRows
                 .filter {
-                    !it.deleted &&
+                    it.type == MetricType.WEIGHT &&
+                        it.id !in tombstonedIds &&
+                        it.startUtcMs >= cutoffMs &&
                         it.provider == Provider.WITHINGS_API &&
                         it.accountId == childWebUid &&
                         it.value in cMin..cMax
                 }
-                .forEach { collected.putIfAbsent(it.id, it) }
+                .forEach { collected[it.id] = it.copy(deleted = false) }
         }
 
         // Záložní obnova z předchozích položek outboxu (např. po restartu aplikace v offline režimu)
@@ -1030,7 +1054,121 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
                 }
             }
         }
+        if (tombstonedIds.isNotEmpty()) {
+            tombstonedIds.forEach { collected.remove(it) }
+            cachedChildObservationsByRecipient[childRecipient]?.let { cached ->
+                cachedChildObservationsByRecipient =
+                    cachedChildObservationsByRecipient + (childRecipient to cached.filter { it.id !in tombstonedIds })
+            }
+        }
         return collected.values.toList()
+    }
+
+    // ───────────── R4-6: pevná vazba dítě (RNS identita) ↔ dětský Withings profil (uid) ─────────────
+    // Vazba se nastaví jednou při přidání dítěte a automaticky se NIKDY nemění. Změna = odebrat dítě a přidat znovu.
+
+    /** Aktuálně vybraný dětský profil Withings (web konektor nebo OAuth) – jen pro jednorázovou migraci. */
+    private fun currentChildWebUid(): String? =
+        loadWebSession()?.childUserId?.toString() ?: childVault.load()?.userId?.toString()
+
+    /**
+     * Jednorázová migrace stávajících instalací: přesně jedno nastavené dítě + vybraný dětský profil → vazba.
+     * Po jejím proběhnutí (flag) se už nic automaticky neváže.
+     */
+    private fun migrateChildBindingOnce() {
+        if (sl.settings.getRaw(KEY_CHILD_BINDING_MIGRATION) != null) return
+        val child = sl.settings.childRecipientIdentity
+        val uid = currentChildWebUid()
+        if (child.isNotBlank() && uid != null && boundUidRaw(child) == null) {
+            sl.settings.put(childWebUidKey(child), uid)
+        }
+        sl.settings.put(KEY_CHILD_BINDING_MIGRATION, "1")
+    }
+
+    private fun boundUidRaw(childRecipient: String): String? =
+        sl.settings.getRaw(childWebUidKey(childRecipient))?.takeIf { it.isNotBlank() }
+
+    /** Withings uid pevně navázané na dítě [childRecipient] (nebo `null`). */
+    internal fun boundChildWebUid(childRecipient: String): String? {
+        if (childRecipient.isBlank()) return null
+        migrateChildBindingOnce()
+        return boundUidRaw(childRecipient)
+    }
+
+    /** Dětské Withings profily, ze kterých rodič vybírá při přidání dítěte. */
+    fun childProfileCandidates(): List<WithingsUserProfile> {
+        val fromWeb = loadWebSession()?.allProfiles.orEmpty().filter { it.isChild }
+        if (fromWeb.isNotEmpty()) return fromWeb
+        val oauthUid = childVault.load()?.userId ?: return emptyList()
+        return listOf(WithingsUserProfile(id = oauthUid.toLongOrNull() ?: return emptyList(), firstName = "", lastName = ""))
+    }
+
+    /**
+     * Přidání dítěte: naváže [childRecipient] na Withings profil [withingsUid] a nastaví ho jako příjemce.
+     * Existující jinou vazbu NEpřepisuje (vrací `false`) – nejdřív je nutné dítě odebrat.
+     */
+    fun addChild(childRecipient: String, withingsUid: String): Boolean {
+        if (childRecipient.isBlank() || withingsUid.isBlank()) return false
+        val existing = boundChildWebUid(childRecipient)
+        if (existing != null && existing != withingsUid) return false
+        sl.settings.put(childWebUidKey(childRecipient), withingsUid)
+        sl.settings.childRecipientIdentity = childRecipient
+        return true
+    }
+
+    /** Přepne příjemce mezi už přidanými dětmi; vazbu nemění. */
+    fun selectChildRecipient(childRecipient: String): Boolean {
+        if (boundChildWebUid(childRecipient) == null) return false
+        sl.settings.childRecipientIdentity = childRecipient
+        return true
+    }
+
+    /** Odebrání dítěte: smaže vazbu na Withings profil, cache a případně zruší výběr příjemce. */
+    fun removeChild(childRecipient: String) {
+        if (childRecipient.isBlank()) return
+        migrateChildBindingOnce()
+        sl.settings.put(childWebUidKey(childRecipient), "")
+        cachedChildObservationsByRecipient = cachedChildObservationsByRecipient - childRecipient
+        if (sl.settings.childRecipientIdentity == childRecipient) sl.settings.childRecipientIdentity = ""
+    }
+
+    enum class ChildBindingStatus { UNBOUND, OK, PROFILE_MISSING }
+
+    data class ChildWithingsBinding(
+        val childRecipient: String,
+        val withingsUid: String?,
+        val profileName: String?,
+        val status: ChildBindingStatus,
+    )
+
+    /** Stav vazby pro UI rodinného nastavení (jméno profilu, varování při zmizelém profilu). */
+    fun childBinding(childRecipient: String): ChildWithingsBinding {
+        val uid = boundChildWebUid(childRecipient)
+            ?: return ChildWithingsBinding(childRecipient, null, null, ChildBindingStatus.UNBOUND)
+        val profiles = loadWebSession()?.allProfiles.orEmpty()
+        val profile = profiles.firstOrNull { it.id.toString() == uid }
+        val oauthUid = childVault.load()?.userId
+        // Profil ověřujeme proti seznamu profilů účtu; bez známého seznamu (a bez OAuth) nelze posoudit → OK.
+        val missing = profile == null && oauthUid != uid && profiles.isNotEmpty()
+        return ChildWithingsBinding(
+            childRecipient = childRecipient,
+            withingsUid = uid,
+            profileName = profile?.displayName,
+            status = if (missing) ChildBindingStatus.PROFILE_MISSING else ChildBindingStatus.OK,
+        )
+    }
+
+    /** uid, jehož data smí dostat [childRecipient]; `null` = nic nepřeposílat (bez vazby nebo profil zmizel z účtu). */
+    internal fun childWebUidFor(childRecipient: String): String? {
+        val b = childBinding(childRecipient)
+        return when (b.status) {
+            ChildBindingStatus.OK -> b.withingsUid
+            ChildBindingStatus.PROFILE_MISSING -> {
+                PLog.w("Withings") { "Bound child Withings profile no longer on the account; not forwarding" }
+                null
+            }
+            ChildBindingStatus.UNBOUND -> null
+        }
     }
 
     private fun forwardToChild(
@@ -1043,7 +1181,7 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
         cachedChildObservationsByRecipient[childRecipient].orEmpty().forEach { merged[it.id] = it }
         observations.forEach { merged[it.id] = it }
         cachedChildObservationsByRecipient = cachedChildObservationsByRecipient + (childRecipient to merged.values.toList())
-        val self = sl.bridge.ensureStarted().deliveryHash
+        val self = selfIdProvider()
         return forwardChildObservations(
             observations = observations,
             childRecipient = childRecipient,
@@ -1063,6 +1201,10 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
         private const val CLIENT_SECRET = "withings.clientsecret"
         const val WEB_SESSION_KEY = "withings.web.session"
         const val FAMILY_WEIGHT_PUSH_KIND = "family.weight.push"
+        private const val CHILD_WEB_UID_KEY_PREFIX = "family.child_withings_uid."
+        private const val KEY_CHILD_BINDING_MIGRATION = "migration.child_withings_uid_v1"
+
+        internal fun childWebUidKey(childRecipient: String): String = CHILD_WEB_UID_KEY_PREFIX + childRecipient
 
         val BODY_COMPOSITION_TYPES = listOf(
             MetricType.WEIGHT,

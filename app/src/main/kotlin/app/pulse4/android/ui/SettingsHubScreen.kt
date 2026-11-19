@@ -2321,24 +2321,125 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                                     color = Color(0xFFF59E0B)
                                 )
                             } else {
-                                FlowRow(
-                                    Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                // R4-6: pevná vazba dítě ↔ Withings profil. Přidání se ptá na profil, změna = odebrat a přidat znovu.
+                                val childBindings by androidx.compose.runtime.produceState(
+                                    initialValue = emptyMap<String, app.pulse4.android.di.WithingsService.ChildWithingsBinding>(),
+                                    contacts, tick,
                                 ) {
-                                    contacts.forEach { c ->
-                                        val isSelected = wCfg?.childRecipientIdentity == c.identity
-                                        FilterChip(
-                                            selected = isSelected,
-                                            onClick = {
-                                                scope.launch(Dispatchers.IO) {
-                                                    sl.settings.childRecipientIdentity = if (isSelected) "" else c.identity
-                                                    tick++
-                                                }
-                                            },
-                                            label = { Text(c.displayName, maxLines = 1, softWrap = false) }
-                                        )
+                                    value = withContext(Dispatchers.IO) {
+                                        contacts.mapNotNull { c ->
+                                            runCatching { sl.withings.childBinding(c.identity) }.getOrNull()?.let { c.identity to it }
+                                        }.toMap()
                                     }
+                                }
+                                var addChildFor by remember { mutableStateOf<app.pulse4.android.data.ContactRow?>(null) }
+                                var addChildCandidates by remember {
+                                    mutableStateOf<List<app.pulse4.withings.WithingsUserProfile>>(emptyList())
+                                }
+                                var addChildSelectedUid by remember { mutableStateOf<Long?>(null) }
+
+                                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    contacts.forEach { c ->
+                                        val binding = childBindings[c.identity]
+                                        val bound = binding != null &&
+                                            binding.status != app.pulse4.android.di.WithingsService.ChildBindingStatus.UNBOUND
+                                        val isSelected = wCfg?.childRecipientIdentity == c.identity
+                                        Column {
+                                            Row(
+                                                Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                FilterChip(
+                                                    selected = isSelected,
+                                                    onClick = {
+                                                        scope.launch(Dispatchers.IO) {
+                                                            if (bound) {
+                                                                if (!isSelected) sl.withings.selectChildRecipient(c.identity)
+                                                            } else {
+                                                                val candidates = runCatching { sl.withings.childProfileCandidates() }.getOrDefault(emptyList())
+                                                                withContext(Dispatchers.Main) {
+                                                                    addChildCandidates = candidates
+                                                                    addChildSelectedUid = candidates.singleOrNull()?.id
+                                                                    addChildFor = c
+                                                                }
+                                                            }
+                                                            tick++
+                                                        }
+                                                    },
+                                                    label = { Text(c.displayName, maxLines = 1, softWrap = false) },
+                                                    modifier = Modifier.weight(1f, fill = false)
+                                                )
+                                                if (bound) {
+                                                    TextButton(onClick = {
+                                                        scope.launch(Dispatchers.IO) {
+                                                            sl.withings.removeChild(c.identity)
+                                                            notice = "Dítě ${c.displayName} odebráno (vazba na Withings profil smazána)."
+                                                            tick++
+                                                        }
+                                                    }) {
+                                                        Text("Odebrat", color = MaterialTheme.colorScheme.error)
+                                                    }
+                                                } else {
+                                                    Text("Přidat dítě", style = MaterialTheme.typography.bodySmall, color = Color(0xFF94A3B8))
+                                                }
+                                            }
+                                            if (bound && binding != null) {
+                                                Text(
+                                                    "Withings profil: ${binding.profileName ?: "ID ${binding.withingsUid}"}",
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = Color(0xFF94A3B8)
+                                                )
+                                                if (binding.status == app.pulse4.android.di.WithingsService.ChildBindingStatus.PROFILE_MISSING) {
+                                                    Text(
+                                                        "Navázaný Withings profil (ID ${binding.withingsUid}) už na účtu není – váhy se tomuto dítěti nepřeposílají. Odeberte dítě a přidejte ho znovu.",
+                                                        style = MaterialTheme.typography.bodySmall,
+                                                        color = Color(0xFFF59E0B)
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                addChildFor?.let { child ->
+                                    AlertDialog(
+                                        onDismissRequest = { addChildFor = null },
+                                        title = { Text("Přidat dítě ${child.displayName}") },
+                                        text = {
+                                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                                if (addChildCandidates.isEmpty()) {
+                                                    Text("Na účtu Withings není žádný dětský profil. Nejdřív připojte Withings a dětský profil.")
+                                                } else {
+                                                    Text("Který dětský profil Withings patří tomuto dítěti? Vazbu lze později změnit jen odebráním a novým přidáním dítěte.")
+                                                    addChildCandidates.forEach { p ->
+                                                        FilterChip(
+                                                            selected = addChildSelectedUid == p.id,
+                                                            onClick = { addChildSelectedUid = p.id },
+                                                            label = { Text(p.displayName, maxLines = 1, softWrap = false) }
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        confirmButton = {
+                                            Button(
+                                                enabled = addChildSelectedUid != null,
+                                                onClick = {
+                                                    val uid = addChildSelectedUid ?: return@Button
+                                                    addChildFor = null
+                                                    scope.launch(Dispatchers.IO) {
+                                                        val ok = sl.withings.addChild(child.identity, uid.toString())
+                                                        notice = if (ok) "Dítě ${child.displayName} přidáno." else "Dítě už má jinou vazbu – nejdřív ho odeberte."
+                                                        tick++
+                                                    }
+                                                }
+                                            ) { Text("Přidat") }
+                                        },
+                                        dismissButton = {
+                                            TextButton(onClick = { addChildFor = null }) { Text("Zrušit") }
+                                        }
+                                    )
                                 }
                             }
 

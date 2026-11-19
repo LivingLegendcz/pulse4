@@ -26,6 +26,7 @@ class WithingsSessionCoordinator(
     private val extendSession: (cookies: String, sessionToken: String?) -> WithingsExtendResult,
     private val hasUsableCookies: () -> Boolean,
     private val trySilentSsoRefresh: () -> WithingsLoginResult,
+    /** Background login with the remembered password; must poll [shouldAbort] between HTTP requests. */
     private val loginPassword: (email: String, password: String) -> WithingsLoginResult,
     private val onSilentRefreshOk: (WithingsLoginResult.Ok, emailFallback: String?) -> Unit,
     private val onAuthPaused: (reason: String, message: String) -> Unit = { _, _ -> },
@@ -69,26 +70,37 @@ class WithingsSessionCoordinator(
         onLog("Network failure #$failures, backoff for ${delayMs / 1000L}s")
     }
 
+    /** True když je uložená webová relace použitelná (má cookies / token a primární profil). */
+    private fun hasValidSession(): Boolean = runCatching { loadSession()?.isConnected() == true }.getOrDefault(false)
+
     /**
-     * Zaznamená výsledek ručního přihlášení v UI.
-     * Úspěch odblokuje circuit-breaker; chybné heslo smaže uložené heslo a zablokuje auto-relogin.
+     * Zaznamená výsledek ručního přihlášení v UI (R4-4).
+     * - Úspěch odblokuje circuit-breaker.
+     * - NeedsMfa / OTHER / NETWORK / ABORTED z ručního pokusu **nikdy** nepozastaví auto-relogin
+     *   (zavřený dialog u kódu nebo špatný kód nesmí zastavit importy s platnou relací).
+     * - INVALID_CREDENTIALS / RATE_LIMITED pozastaví auto-relogin jen tehdy, když relace není platná.
+     * - Uložené heslo se smaže jen tehdy, když odmítnuté heslo [attemptedPassword] je **shodné** s uloženým
+     *   (překlep v nově psaném hesle nesmaže dobré uložené heslo).
      */
-    fun recordManualAuthResult(res: WithingsLoginResult) {
+    fun recordManualAuthResult(res: WithingsLoginResult, attemptedPassword: String? = null) {
         when (res) {
             is WithingsLoginResult.Ok -> clearAuthPauseAndBackoff()
-            is WithingsLoginResult.NeedsMfa -> pauseAutoRelogin(REASON_MFA_REQUIRED, res.message)
+            is WithingsLoginResult.NeedsMfa -> Unit
             is WithingsLoginResult.Error -> when (res.kind) {
                 WithingsAuthFailureKind.INVALID_CREDENTIALS -> {
-                    store.delete(KEY_PASSWORD)
-                    pauseAutoRelogin(REASON_INVALID_CREDENTIALS, res.message)
+                    val stored = store.getString(KEY_PASSWORD)
+                    if (!attemptedPassword.isNullOrEmpty() && stored == attemptedPassword) {
+                        store.delete(KEY_PASSWORD)
+                        onLog("Manual login: stored password rejected, deleted")
+                    }
+                    if (!hasValidSession()) pauseAutoRelogin(REASON_INVALID_CREDENTIALS, res.message)
                 }
                 WithingsAuthFailureKind.RATE_LIMITED -> {
-                    pauseAutoRelogin(REASON_RATE_LIMITED, res.message)
+                    if (!hasValidSession()) pauseAutoRelogin(REASON_RATE_LIMITED, res.message)
                 }
-                WithingsAuthFailureKind.OTHER -> {
-                    pauseAutoRelogin(REASON_AUTH_ERROR, res.message)
-                }
-                WithingsAuthFailureKind.NETWORK -> Unit
+                WithingsAuthFailureKind.OTHER,
+                WithingsAuthFailureKind.NETWORK,
+                WithingsAuthFailureKind.ABORTED -> Unit
             }
         }
     }
@@ -206,6 +218,10 @@ class WithingsSessionCoordinator(
                         return false
                     }
                     WithingsAuthFailureKind.OTHER -> ssoOtherFailure = ssoRes
+                    WithingsAuthFailureKind.ABORTED -> {
+                        onLog("tryAutoReLogin: SSO aborted")
+                        return false
+                    }
                 }
             }
         }
@@ -246,6 +262,7 @@ class WithingsSessionCoordinator(
             onLog("password fallback skipped: manual login pending")
             return false
         }
+        val previousAttempt = store.getString(KEY_LAST_PASSWORD_ATTEMPT_MS)
         store.putString(KEY_LAST_PASSWORD_ATTEMPT_MS, now.toString())
         val res = try {
             loginPassword(email, password)
@@ -253,6 +270,13 @@ class WithingsSessionCoordinator(
             WithingsLoginResult.Error(e.message ?: "Network error", WithingsAuthFailureKind.NETWORK)
         }
         onLog("password fallback result: ${res::class.simpleName}")
+        if (res is WithingsLoginResult.Error && res.kind == WithingsAuthFailureKind.ABORTED) {
+            // Přerušeno před odesláním hesla (ruční přihlášení čeká): nepočítat jako pokus ani jako selhání.
+            if (previousAttempt != null) store.putString(KEY_LAST_PASSWORD_ATTEMPT_MS, previousAttempt)
+            else store.delete(KEY_LAST_PASSWORD_ATTEMPT_MS)
+            onLog("password fallback aborted: manual login pending")
+            return false
+        }
         return when (res) {
             is WithingsLoginResult.Ok -> {
                 clearAuthPauseAndBackoff()
@@ -272,6 +296,7 @@ class WithingsSessionCoordinator(
                     WithingsAuthFailureKind.RATE_LIMITED -> pauseAutoRelogin(REASON_RATE_LIMITED, res.message)
                     WithingsAuthFailureKind.NETWORK -> recordNetworkFailure(now)
                     WithingsAuthFailureKind.OTHER -> countOtherFailure(res.message)
+                    WithingsAuthFailureKind.ABORTED -> Unit
                 }
                 false
             }

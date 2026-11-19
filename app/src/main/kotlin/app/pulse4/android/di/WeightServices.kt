@@ -111,19 +111,32 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
         )
     }
 
-    fun clearWebSession() = authGate.background {
-        authGate.bumpGeneration()
-        sl.secrets.delete(WEB_SESSION_KEY)
-        sl.secrets.delete("withings.web.password")
-        sl.secrets.delete("withings.web.cookiejar")
-        sessionCoordinator.clearAuthPauseAndBackoff()
-        directAuth.clearPersistedCookies()
-        val oauth = vault.load()
-        if (oauth != null) {
-            _state.value = WithingsUiState.Connected(oauth.userId)
-        } else {
-            _state.value = WithingsUiState.Idle
+    /**
+     * Smaže webovou relaci, uložené heslo a cookies (R4-5). Nikdy nevolat z hlavního vlákna.
+     * Zámek autentizace se bere s předností a timeoutem [WithingsAuthGate.DISCONNECT_WAIT_TIMEOUT_MS]:
+     * obnova na pozadí dostane signál k přerušení mezi HTTP požadavky. Vrací `false`, když se zámek
+     * nepodařilo včas získat (nic se nesmazalo, UI nabídne opakování).
+     */
+    fun clearWebSession(): Boolean {
+        val r = authGate.manual(WithingsAuthGate.DISCONNECT_WAIT_TIMEOUT_MS) {
+            authGate.bumpGeneration()
+            sl.secrets.delete(WEB_SESSION_KEY)
+            sl.secrets.delete(WithingsPasswordVault.KEY_PASSWORD)
+            sl.secrets.delete("withings.web.cookiejar")
+            sessionCoordinator.clearAuthPauseAndBackoff()
+            directAuth.clearPersistedCookies()
+            val oauth = vault.load()
+            if (oauth != null) {
+                _state.value = WithingsUiState.Connected(oauth.userId)
+            } else {
+                _state.value = WithingsUiState.Idle
+            }
         }
+        if (r is WithingsAuthGate.GateResult.TimedOut) {
+            PLog.w("Withings") { "clearWebSession: auth gate busy, timed out" }
+            return false
+        }
+        return true
     }
 
     private val _state = MutableStateFlow<WithingsUiState>(
@@ -175,7 +188,7 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
      * Pořadí zámků: importLock → authGate (nikdy obráceně).
      */
     private val importLock = Any()
-    private val authGate = WithingsAuthGate()
+    internal val authGate = WithingsAuthGate()
     private val authDiagnostics by lazy {
         WithingsAuthDiagnostics(
             load = { sl.secrets.getString(WithingsAuthDiagnostics.STORE_KEY) },
@@ -208,20 +221,25 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
             }
         }
 
+    private val authStore = object : WithingsAuthStateStore {
+        override fun getString(key: String): String? = sl.secrets.getString(key)
+        override fun putString(key: String, value: String) = sl.secrets.putString(key, value)
+        override fun delete(key: String) = sl.secrets.delete(key)
+    }
+    private val passwordVault = WithingsPasswordVault(authStore)
+
     private val sessionCoordinator by lazy {
         WithingsSessionCoordinator(
-            store = object : WithingsAuthStateStore {
-                override fun getString(key: String): String? = sl.secrets.getString(key)
-                override fun putString(key: String, value: String) = sl.secrets.putString(key, value)
-                override fun delete(key: String) = sl.secrets.delete(key)
-            },
+            store = authStore,
             isDirectEnabled = { sl.settings.withingsDirectEnabled },
             loadSession = ::loadWebSession,
             saveSession = ::saveWebSession,
             extendSession = { cookies, token -> webClient.extendSessionDetailed(cookies, token) },
             hasUsableCookies = { directAuth.hasUsableCookies() },
             trySilentSsoRefresh = { directAuth.trySilentSsoRefresh(shouldAbort = authGate::manualPending) },
-            loginPassword = { email, pass -> directAuth.loginPassword(email, pass, background = true) },
+            loginPassword = { email, pass ->
+                directAuth.loginPassword(email, pass, background = true, shouldAbort = authGate::manualPending)
+            },
             onSilentRefreshOk = { res, emailFallback -> applySilentRefreshResult(res, emailFallback) },
             onAuthPaused = { _, message -> _state.value = WithingsUiState.Failed(message) },
             onLog = { msg -> PLog.i("Withings") { msg } },
@@ -234,6 +252,7 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
 
     fun pendingEmail(): String? = directAuth.pendingEmail
     fun isAwaitingCode(): Boolean = directAuth.isAwaitingCode
+    fun pendingCodeKind(): WithingsCodeKind = directAuth.pendingCodeKind
 
     /**
      * Vyžádá zaslání 8místného přihlašovacího kódu na e-mail v pozadí (pro účty Google, Apple i účty bez hesla).
@@ -266,10 +285,13 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
         directAuth.resendEmailCode(emailFallback)
     }
 
-    /** Nativní přihlášení e-mailem a heslem v pozadí (stejně jako u Garminu) */
+    /**
+     * Nativní přihlášení e-mailem a heslem v pozadí (stejně jako u Garminu).
+     * [password] `null` = použít heslo uložené v SecretStore (UI ho nikdy nezobrazuje, R4-9).
+     */
     fun loginDirectPassword(
         email: String,
-        password: String,
+        password: String?,
         rememberPassword: Boolean = true,
         onWaiting: () -> Unit = {},
     ): WithingsLoginResult = manualAuth(onWaiting) {
@@ -277,8 +299,10 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
         if (em.isBlank()) {
             return@manualAuth WithingsLoginResult.Error("Zadejte e-mail účtu Withings.")
         }
-        val r = directAuth.loginPassword(em, password)
-        sessionCoordinator.recordManualAuthResult(r)
+        val pw = passwordVault.resolve(password)
+            ?: return@manualAuth WithingsLoginResult.Error("Zadejte heslo k účtu Withings.")
+        val r = directAuth.loginPassword(em, pw)
+        sessionCoordinator.recordManualAuthResult(r, attemptedPassword = pw)
         // E-mail si pamatujeme vždy (i když Withings ještě vyžaduje kód), aby přežil restart procesu.
         if (r !is WithingsLoginResult.Error) sl.secrets.putString(KEY_EMAIL, em)
         if (r is WithingsLoginResult.Ok) {
@@ -287,7 +311,7 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
                 ?: r.profiles.firstOrNull { it.isPrimary }
                 ?: r.profiles.first()
             val child = existing?.childUserId?.let { cid -> r.profiles.firstOrNull { it.id == cid } }
-            storeRememberedPassword(password, rememberPassword)
+            passwordVault.onLoginSucceeded(pw, rememberPassword)
             completeWebLogin(
                 cookies = r.session.cookies,
                 primary = primary,
@@ -300,7 +324,10 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
         r
     }
 
-    /** Dokončení dvoufázového ověření (kód z e-mailu nebo SMS) */
+    /**
+     * Dokončení dvoufázového ověření (kód z e-mailu, SMS nebo ověřovací aplikace TOTP).
+     * [password] = heslo z předchozího kroku (`null` = uložené heslo / přihlášení jen kódem).
+     */
     fun resumeDirectMfa(
         code: String,
         emailFallback: String? = null,
@@ -321,7 +348,7 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
                 ?: existing?.email
                 ?: sl.secrets.getString(KEY_EMAIL)
             if (!em.isNullOrBlank()) sl.secrets.putString(KEY_EMAIL, em)
-            if (!password.isNullOrBlank() || !rememberPassword) storeRememberedPassword(password.orEmpty(), rememberPassword)
+            passwordVault.onLoginSucceeded(passwordVault.resolve(password), rememberPassword)
             completeWebLogin(
                 cookies = r.session.cookies,
                 primary = primary,
@@ -336,17 +363,35 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
         r
     }
 
-    /** Uloží heslo šifrovaně do SecretStore (Android Keystore), nebo ho smaže, pokud si ho uživatel nepřeje pamatovat. */
-    private fun storeRememberedPassword(password: String, remember: Boolean) {
-        if (remember && password.isNotBlank()) {
-            sl.secrets.putString(KEY_PASSWORD, password)
-        } else {
-            sl.secrets.delete(KEY_PASSWORD)
-        }
-    }
+    /** Stav formuláře: je uložené heslo? Pamatovat? (R4-9 – heslo samotné UI nikdy nedostane). */
+    data class LoginPrefs(
+        val hasStoredPassword: Boolean,
+        val rememberPassword: Boolean,
+        val savedEmail: String? = null,
+        val pausedMessage: String? = null,
+        val awaitingCode: Boolean = false,
+        val codeKind: WithingsCodeKind = WithingsCodeKind.EMAIL,
+    )
 
-    /** Zapamatované heslo pro předvyplnění formuláře (pouze z šifrovaného SecretStore). */
-    fun rememberedPassword(): String? = sl.secrets.getString(KEY_PASSWORD)?.takeIf { it.isNotEmpty() }
+    /**
+     * Bezpečné čtení stavu formuláře pro UI – volat **mimo hlavní vlákno** (SecretStore / Keystore).
+     * Keystore chyba = žádné uložené heslo / e-mail.
+     */
+    fun loginPrefs(): LoginPrefs = LoginPrefs(
+        hasStoredPassword = runCatching { passwordVault.hasStoredPassword() }.getOrDefault(false),
+        rememberPassword = runCatching { passwordVault.rememberPreference() }.getOrDefault(true),
+        savedEmail = runCatching {
+            sl.secrets.getString(KEY_EMAIL)?.takeIf { it.isNotBlank() }
+                ?: loadWebSession()?.email?.takeIf { it.isNotBlank() }
+                ?: directAuth.pendingEmail
+        }.getOrNull(),
+        pausedMessage = runCatching { sessionCoordinator.pausedMessage() }.getOrNull(),
+        awaitingCode = directAuth.isAwaitingCode,
+        codeKind = directAuth.pendingCodeKind,
+    )
+
+    /** Uloží volbu „Pamatovat heslo“; vypnutí uložené heslo hned smaže. */
+    fun setRememberPassword(remember: Boolean) = passwordVault.setRememberPreference(remember)
 
     private fun applySilentRefreshResult(r: WithingsLoginResult.Ok, emailFallback: String? = null) {
         val nowMs = System.currentTimeMillis()
@@ -490,11 +535,13 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
         }
     }
 
-    fun disconnect() {
-        clearWebSession()
+    /** Odpojí Withings (R4-5: volat z IO, nikdy z UI vlákna). `false` = obnova na pozadí nepustila zámek včas. */
+    fun disconnect(): Boolean {
+        if (!clearWebSession()) return false
         vault.clear()
         runCatching { RoomAreaStateStore(sl.db, "withings.").put(SyncArea.WEIGHT, app.pulse4.provider.AreaState()) }
         _state.value = WithingsUiState.Idle
+        return true
     }
 
     fun disconnectChild() {
@@ -1010,7 +1057,6 @@ class WithingsService(private val context: Context, private val sl: ServiceLocat
 
     companion object {
         private const val KEY_EMAIL = WithingsSessionCoordinator.KEY_EMAIL
-        private const val KEY_PASSWORD = WithingsSessionCoordinator.KEY_PASSWORD
         const val MANUAL_WAIT_TIMEOUT_MESSAGE =
             "Synchronizace Withings na pozadí se stále nedokončila. Zkuste to prosím za chvíli znovu."
 

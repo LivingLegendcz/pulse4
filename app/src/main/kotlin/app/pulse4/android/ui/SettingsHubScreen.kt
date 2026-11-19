@@ -1383,6 +1383,20 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
     var notice by remember { mutableStateOf<String?>(null) }
     var syncing by remember { mutableStateOf(false) }
     var tick by remember { mutableStateOf(0) }
+    var withingsDisconnecting by remember { mutableStateOf(false) }
+    // R4-5: odpojení nikdy na UI vlákně – čeká na zámek autentizace (max. 5 s) a ukazuje průběh.
+    val disconnectWithings: () -> Unit = {
+        if (!withingsDisconnecting) {
+            withingsDisconnecting = true
+            notice = WITHINGS_DISCONNECTING_TEXT
+            scope.launch {
+                val ok = withContext(Dispatchers.IO) { runCatching { sl.withings.disconnect() }.getOrDefault(false) }
+                withingsDisconnecting = false
+                notice = if (ok) "Withings byl odpojen." else WITHINGS_DISCONNECT_BUSY_TEXT
+                tick++
+            }
+        }
+    }
     var showKeyHelp by remember { mutableStateOf(false) }
     var showWithingsHelp by remember { mutableStateOf<Boolean?>(null) }
     var showFilter by remember { mutableStateOf(false) }
@@ -1973,11 +1987,8 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                                     Text("Znovu přihlásit", fontWeight = FontWeight.Bold)
                                 }
                                 OutlinedButton(
-                                    onClick = {
-                                        sl.withings.disconnect()
-                                        notice = "Withings byl odpojen."
-                                        tick++
-                                    },
+                                    onClick = disconnectWithings,
+                                    enabled = !withingsDisconnecting,
                                     colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFFCA5A5)),
                                     border = BorderStroke(1.dp, Color(0xFFEF4444).copy(alpha = 0.6f)),
                                     modifier = Modifier.weight(1f)
@@ -2173,11 +2184,8 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                                     color = Color(0xFF64748B)
                                 )
                                 OutlinedButton(
-                                    onClick = {
-                                        sl.withings.disconnect()
-                                        notice = "Withings byl odpojen."
-                                        tick++
-                                    },
+                                    onClick = disconnectWithings,
+                                    enabled = !withingsDisconnecting,
                                     border = BorderStroke(1.dp, Color(0xFFEF4444).copy(alpha = 0.5f)),
                                     colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFEF4444)),
                                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)

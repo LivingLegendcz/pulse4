@@ -42,7 +42,7 @@ object Status {
     class OutboxLine(val title: String, val state: String, val detail: String?)
 
     fun outboxLine(kind: String, objectKey: String, recipient: String, state: DeliveryState, attempts: Int, lastError: String?) =
-        OutboxLine("$kind · $objectKey → ${recipient.take(8)}", Labels.delivery(state), if (attempts > 0 || lastError != null) "pokusů $attempts" + (lastError?.let { " · $it" } ?: "") else null)
+        OutboxLine("$kind · $objectKey → ${recipient.take(8)}", Labels.delivery(state), if (attempts > 0 || lastError != null) "pokusů $attempts" + (lastError?.let { " · ${Labels.deliveryError(it)}" } ?: "") else null)
 
     /** Počty ve frontě pro diagnostiku (bez obsahu zpráv). */
     fun queueSummary(states: List<DeliveryState>) =

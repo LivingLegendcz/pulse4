@@ -69,11 +69,8 @@ class ReticulumTransport(
     private fun processEventInternal(ev: BridgeEvent, deferredAcks: MutableList<WireMessage>?): Outcome? {
         when (ev) {
             is BridgeEvent.Delivery -> {
-                outbox.onTransportResult(ev.eventId, when (ev.state) {
-                    "HANDED" -> TransportResult.Handed
-                    "STORED" -> TransportResult.StoredInPropagation
-                    else -> TransportResult.Failed(ev.reason ?: "failed")
-                }, System.currentTimeMillis())
+                // R4-8: REJECTED_BY_NODE / TOO_LARGE = trvalé selhání (FAILED_PERMANENT), ne nekonečné opakování.
+                outbox.onTransportResult(ev.eventId, TransportResult.fromBridge(ev.state, ev.reason), System.currentTimeMillis())
                 return null
             }
 
@@ -135,6 +132,7 @@ class ReticulumTransport(
                     DeliveryState.CANCELLED.name,
                     DeliveryState.SUPERSEDED.name,
                     DeliveryState.ACKED.name,
+                    DeliveryState.FAILED_PERMANENT.name,
                 )
                 for (row in db.outbox().all()) {
                     if (row.state in terminalStates) {

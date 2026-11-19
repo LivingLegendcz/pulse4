@@ -139,6 +139,7 @@ class PackageBEProductionTest {
             ) {}
             override fun since(from: Long) = actMap.values.filter { it.startUtcMs >= from }.sortedByDescending { it.startUtcMs }
             override fun get(id: String) = actMap[id]
+            override fun allIds() = actMap.values.sortedByDescending { it.startUtcMs }.map { it.id }
             override fun track(id: String) = trackMap[id]
             override fun count() = actMap.size
             override fun deleteAll() { actMap.clear() }
@@ -181,6 +182,8 @@ class PackageBEProductionTest {
             override fun insertReceipt(row: ReceiptRow) { receiptMap[row.eventId] = row }
             override fun version(a: String, t: String, i: String) =
                 receivedList.firstOrNull { it.author == a && it.objectType == t && it.objectId == i }?.version
+            override fun received(a: String, t: String, i: String) =
+                receivedList.firstOrNull { it.author == a && it.objectType == t && it.objectId == i }
             override fun putObject(row: ReceivedRow) {
                 receivedList.removeAll { it.author == row.author && it.objectType == row.objectType && it.objectId == row.objectId }
                 receivedList += row

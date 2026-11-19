@@ -384,4 +384,149 @@ class ReticulumBridgeHardeningTest {
             assertFalse(content.contains("android.util.Log"), "${f.name} still calls android.util.Log directly")
         }
     }
+
+    @Test
+    fun resourceRclAndTeardownEmitFailedInsteadOfDroppingOrLeavingHanded() {
+        val announcePkt = buildPnAnnouncePacket(transferLimitKb = 256L, stampCost = 1, stampFlex = 0)
+        bridge.handleIncomingRnsPacketForTest(announcePkt)
+        val link = activateLinkWithPeer()
+
+        val contactPubB64 = Base64.getEncoder().encodeToString(peerPub64)
+        val contactDest = bridge.addContact(contactPubB64)
+        val largePayload = Random(321).nextBytes(40_000)
+
+        val capturedAdv = mutableListOf<ByteArray>()
+        bridge.rawPacketSenderOverride = { pkt ->
+            val (ctx, body) = extractPayload(pkt)
+            if (ctx == RnsContext.RESOURCE_ADV) {
+                capturedAdv.add(link.decryptLinkPayload(body)!!)
+            }
+            true
+        }
+
+        assertTrue(bridge.sendViaLxmfPropagationForTest(contactDest, largePayload, "evt-rcl-bridge"))
+        assertEquals(1, capturedAdv.size)
+        assertEquals(1, bridge.activeOutboundResourceCountForTest())
+
+        val rclPkt = RnsResourceReceiver.buildRejectPacket(link, capturedAdv.first())!!
+        bridge.handleIncomingRnsPacketForTest(rclPkt)
+
+        assertEquals(0, bridge.activeOutboundResourceCountForTest())
+        val rclEvents = bridge.drainEvents().filterIsInstance<BridgeEvent.Delivery>()
+        assertTrue(rclEvents.any { it.eventId == "evt-rcl-bridge" && it.state == "FAILED" && it.reason == "REJECTED_BY_NODE" })
+
+        // Now start another Resource deposit and close link -> clear() must emit FAILED
+        assertTrue(bridge.sendViaLxmfPropagationForTest(contactDest, largePayload, "evt-teardown-res"))
+        assertEquals(1, bridge.activeOutboundResourceCountForTest())
+        bridge.handleIncomingRnsPacketForTest(wrapLinkDataPacket(link, RnsContext.LINKCLOSE, link.linkIdBytes))
+        assertEquals(0, bridge.activeOutboundResourceCountForTest())
+        val tdEvents = bridge.drainEvents().filterIsInstance<BridgeEvent.Delivery>()
+        assertTrue(tdEvents.any { it.eventId == "evt-teardown-res" && it.state == "FAILED" })
+    }
+
+    @Test
+    fun depositExceedingPnLimitFailsImmediatelyAndNeverEmitsHanded() {
+        val announcePkt = buildPnAnnouncePacket(transferLimitKb = 32L, stampCost = 1, stampFlex = 0)
+        bridge.handleIncomingRnsPacketForTest(announcePkt)
+        activateLinkWithPeer()
+        val contactPubB64 = Base64.getEncoder().encodeToString(peerPub64)
+        val contactDest = bridge.addContact(contactPubB64)
+
+        bridge.rawPacketSenderOverride = { true }
+        val bigContent = "x".repeat(35_000)
+        bridge.send(contactDest, bigContent, propagated = true, eventId = "evt-over-limit")
+
+        val events = bridge.drainEvents().filterIsInstance<BridgeEvent.Delivery>()
+        assertTrue(events.any { it.eventId == "evt-over-limit" && it.state == "FAILED" && it.reason?.contains("limit", ignoreCase = true) == true })
+        assertTrue(events.none { it.eventId == "evt-over-limit" && it.state == "HANDED" })
+        assertTrue(bridge.propagationStatus.value.detail?.contains("limit", ignoreCase = true) == true)
+    }
+
+    @Test
+    fun switchingPropagationNodeTearsDownOldLinkWithoutOrphaningPendingProofs() {
+        val announce1 = buildPnAnnouncePacket(transferLimitKb = 256L, stampCost = 1, stampFlex = 0)
+        bridge.handleIncomingRnsPacketForTest(announce1)
+        val link1 = activateLinkWithPeer()
+        val contactPubB64 = Base64.getEncoder().encodeToString(peerPub64)
+        val contactDest = bridge.addContact(contactPubB64)
+
+        val sentPackets = mutableListOf<ByteArray>()
+        bridge.rawPacketSenderOverride = { pkt -> sentPackets.add(pkt); true }
+
+        assertTrue(bridge.sendViaLxmfPropagationForTest(contactDest, "small-1".toByteArray(), "evt-orphan-check"))
+        assertEquals(1, bridge.pendingLinkProofsCountForTest())
+
+        // Switch PN to a second node whose announce has arrived
+        val peer2EdPriv = Ed25519PrivateKeyParameters(ByteArray(32) { 0x51 }, 0)
+        val peer2XPriv = X25519PrivateKeyParameters(ByteArray(32) { 0x61 }, 0)
+        val peer2Pub64 = peer2XPriv.generatePublicKey().encoded + peer2EdPriv.generatePublicKey().encoded
+        val sha = MessageDigest.getInstance("SHA-256")
+        val ident2 = sha.digest(peer2Pub64).copyOf(16)
+        val nameHash = sha.digest(LxmfCodec.PROPAGATION_APP_NAME.toByteArray(Charsets.UTF_8)).copyOf(10)
+        val dest2 = sha.digest(nameHash + ident2).copyOf(16)
+        propNodeHex = RnsCrypto.bytesToHex(dest2)
+        val appData2 = MsgPack.encode(listOf(false, 1700000000L, true, 256L, 1024L, listOf(1, 0, 16), emptyMap<Any?, Any?>()))
+        val rand2 = ByteArray(10) { 0x09 }
+        val signed2 = dest2 + peer2Pub64 + nameHash + rand2 + appData2
+        val sig2 = Ed25519Signer().apply { init(true, peer2EdPriv); update(signed2, 0, signed2.size) }.generateSignature()
+        val flags = RnsCrypto.packetFlags(RnsHeaderType.HEADER_1, RnsTransportType.BROADCAST, RnsDestType.SINGLE, RnsPacketType.ANNOUNCE)
+        bridge.handleIncomingRnsPacketForTest(byteArrayOf(flags, 0x00) + dest2 + byteArrayOf(RnsContext.NONE) + peer2Pub64 + nameHash + rand2 + sig2 + appData2)
+
+        sentPackets.clear()
+        // Trigger ensurePropagationLink() via sendViaLxmfPropagationForTest (link handshake will time out quickly or succeed, either way link1 is torn down)
+        bridge.sendViaLxmfPropagationForTest(contactDest, "small-2".toByteArray(), "evt-new-pn")
+
+        assertEquals(0, bridge.pendingLinkProofsCountForTest())
+        assertEquals(RnsLinkSession.State.CLOSED, link1.state)
+        assertTrue(sentPackets.any { extractPayload(it).first == RnsContext.LINKCLOSE })
+        val events = bridge.drainEvents().filterIsInstance<BridgeEvent.Delivery>()
+        assertTrue(events.any { it.eventId == "evt-orphan-check" && it.state == "FAILED" && it.reason == "LINK_TEARDOWN" })
+    }
+
+    @Test
+    fun getNullResponseTreatsAsErrorAndPreservesPendingPurgeIds() {
+        val announcePkt = buildPnAnnouncePacket(transferLimitKb = 256L, stampCost = 8, stampFlex = 0)
+        bridge.handleIncomingRnsPacketForTest(announcePkt)
+        val link = activateLinkWithPeer()
+
+        val tidHex = "ee".repeat(32)
+        bridge.addPendingPurgeIdForTest(tidHex)
+
+        bridge.rawPacketSenderOverride = { pkt ->
+            val (ctx, body) = extractPayload(pkt)
+            if (ctx == RnsContext.REQUEST) {
+                val dec = link.decryptLinkPayload(body)!!
+                val reqList = MsgPack.decode(dec).first as List<*>
+                val reqData = reqList[2] as List<*>
+                val reqId = RnsCrypto.packetTruncatedHash(pkt)
+                val respVal: Any? = if (reqData[0] == null && reqData[1] == null) {
+                    emptyList<ByteArray>()
+                } else {
+                    null // Python LXMRouter.message_get_request returns None on exception
+                }
+                val respPkt = wrapLinkDataPacket(link, RnsContext.RESPONSE, MsgPack.encode(listOf(reqId, respVal)))
+                bridge.handleIncomingRnsPacketForTest(respPkt)
+            }
+            true
+        }
+
+        bridge.syncInbox()
+        assertTrue(tidHex in bridge.pendingPurgeIdsSnapshotForTest(), "pendingPurgeIds must NOT be purged on null /get response")
+    }
+
+    @Test
+    fun dynamicPostProofGraceMsScalesWithRttAndGatewayPlogRedactsHostPort() {
+        val link = activateLinkWithPeer()
+        link.setRttSecForTest(0.05)
+        assertEquals(2_000L, bridge.computePostProofGraceMs(link))
+        link.setRttSecForTest(0.8)
+        assertEquals(3_200L, bridge.computePostProofGraceMs(link))
+
+        val bridgeFile = File("src/main/kotlin/app/pulse4/android/reticulum/ReticulumBridge.kt")
+        if (bridgeFile.exists()) {
+            val lines = bridgeFile.readLines()
+            val plogWLines = lines.filter { it.contains("PLog.w(") }
+            assertTrue(plogWLines.none { it.contains("\$host:\$port") || it.contains("\$localEndpoint") })
+        }
+    }
 }

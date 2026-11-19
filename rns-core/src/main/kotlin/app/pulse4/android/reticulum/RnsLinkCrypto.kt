@@ -356,6 +356,12 @@ class RnsLinkSession(
         private set
     var rttSec: Double = 0.05
         private set
+    val linkRttMs: Long
+        get() = (rttSec * 1000.0).toLong().coerceAtLeast(0L)
+
+    fun setRttSecForTest(rtt: Double) {
+        rttSec = rtt
+    }
     var keepaliveIntervalMs: Long = 30_000L
         private set
     var lastActivityMs: Long = System.currentTimeMillis()

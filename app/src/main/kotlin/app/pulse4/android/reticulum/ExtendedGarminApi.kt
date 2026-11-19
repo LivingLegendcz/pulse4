@@ -1,9 +1,8 @@
 package app.pulse4.android.reticulum
 
 import android.content.Context
-import android.util.Base64
-import android.util.Log
 import app.pulse4.android.security.SecretStore
+import app.pulse4.domain.PLog
 import app.pulse4.provider.ProviderError
 import app.pulse4.sync.Wire
 import app.pulse4.training.GarminWorkoutApi
@@ -109,7 +108,7 @@ object OAuth1Signer {
         val mac = Mac.getInstance("HmacSHA1")
         mac.init(SecretKeySpec(signingKey.toByteArray(Charsets.UTF_8), "HmacSHA1"))
         val signatureBytes = mac.doFinal(baseString.toByteArray(Charsets.UTF_8))
-        val signature = Base64.encodeToString(signatureBytes, Base64.NO_WRAP)
+        val signature = java.util.Base64.getEncoder().encodeToString(signatureBytes)
         oauthParams["oauth_signature"] = signature
 
         return "OAuth " + oauthParams.entries.joinToString(", ") {
@@ -130,10 +129,26 @@ object OAuth1Signer {
  * Autentizace využívá moderní DI-OAuth2 protokol (GARMIN_CONNECT_MOBILE_ANDROID_DI_2025Q2)
  * se záložním mechanizmem OAuth 1.0 pro starší relace.
  */
-class ExtendedGarminApi(
-    private val context: Context,
-    private val secrets: SecretStore
+internal interface GarminSecretStorage {
+    fun getString(key: String): String?
+    fun putString(key: String, value: String)
+    fun delete(key: String)
+}
+
+class ExtendedGarminApi internal constructor(
+    private val secretStorage: GarminSecretStorage,
+    private val ssoBaseUrl: String = SSO_BASE_URL,
+    private val diTokenUrl: String = DI_TOKEN_URL,
+    private val connectApiBaseUrl: String = "https://connectapi.garmin.com",
 ) : GarminWorkoutApi {
+    constructor(context: Context, secrets: SecretStore) : this(
+        secretStorage = object : GarminSecretStorage {
+            override fun getString(key: String): String? = secrets.getString(key)
+            override fun putString(key: String, value: String) = secrets.putString(key, value)
+            override fun delete(key: String) = secrets.delete(key)
+        }
+    )
+
     companion object {
         private const val TAG = "ExtendedGarminApi"
         private const val SSO_BASE_URL = "https://sso.garmin.com/sso"
@@ -148,14 +163,23 @@ class ExtendedGarminApi(
         )
         private const val SSO_USER_AGENT = "Mozilla/5.0 (Linux; Android 14; M2007J20CG) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
         private const val CONNECT_MOBILE_USER_AGENT = "com.garmin.android.apps.connectmobile"
-        private const val KEY_REFRESH_BLOCKED_UNTIL = "garmin.ext.refresh_blocked_until_ms"
-        private const val KEY_REFRESH_FAILURES = "garmin.ext.refresh_failures"
-        private const val KEY_LOGIN_FAILURES = "garmin.ext.login_failures"
-        private const val KEY_LOGIN_COOLDOWN_UNTIL = "garmin.ext.login_cooldown_until_ms"
+        internal const val KEY_REFRESH_BLOCKED_UNTIL = "garmin.ext.refresh_blocked_until_ms"
+        internal const val KEY_REFRESH_FAILURES = "garmin.ext.refresh_failures"
+        internal const val KEY_LOGIN_FAILURES = "garmin.ext.login_failures"
+        internal const val KEY_LOGIN_COOLDOWN_UNTIL = "garmin.ext.login_cooldown_until_ms"
         private const val MIN_REFRESH_BACKOFF_MS = 60_000L
         private const val MAX_REFRESH_BACKOFF_MS = 3_600_000L
         private const val MAX_LOGIN_FAILURES = 2
         private const val LOGIN_COOLDOWN_MS = 15 * 60_000L
+        private val TICKET_QUERY_REGEX = Regex("""(?:\?|&|#)ticket=(ST-[A-Za-z0-9_-]+)""")
+        private val TICKET_JSON_REGEX = Regex("""serviceTicketId"?\s*[:=]\s*"(ST-[A-Za-z0-9_-]+)"""")
+        private val TICKET_ALT_REGEX = Regex("""\bticket=(ST-[A-Za-z0-9_-]+)""")
+
+        internal fun extractTicket(body: String, requestUrl: String): String? =
+            TICKET_QUERY_REGEX.find(requestUrl)?.groupValues?.get(1)
+                ?: TICKET_QUERY_REGEX.find(body)?.groupValues?.get(1)
+                ?: TICKET_JSON_REGEX.find(body)?.groupValues?.get(1)
+                ?: TICKET_ALT_REGEX.find(body)?.groupValues?.get(1)
 
         internal enum class SsoLoginClassification { TICKET, MFA, RATE_LIMITED, UNAUTHORIZED, UNKNOWN }
 
@@ -243,32 +267,35 @@ class ExtendedGarminApi(
         return inlineRegex.find(html)?.groupValues?.getOrNull(1)?.takeIf { it.isNotBlank() }
     }
 
+    private fun ssoEmbedUrl(): String = "${ssoBaseUrl.trimEnd('/')}/embed"
+    private fun ssoSigninUrl(): String = "${ssoBaseUrl.trimEnd('/')}/signin"
+
     private fun buildEmbedUrl(): HttpUrl =
-        SSO_EMBED_URL.toHttpUrl().newBuilder()
+        ssoEmbedUrl().toHttpUrl().newBuilder()
             .addQueryParameter("id", "gauth-widget")
             .addQueryParameter("embedWidget", "true")
-            .addQueryParameter("gauthHost", SSO_BASE_URL)
+            .addQueryParameter("gauthHost", ssoBaseUrl)
             .build()
 
     private fun buildSigninUrl(): HttpUrl =
-        SSO_SIGNIN_URL.toHttpUrl().newBuilder()
+        ssoSigninUrl().toHttpUrl().newBuilder()
             .addQueryParameter("id", "gauth-widget")
             .addQueryParameter("embedWidget", "true")
-            .addQueryParameter("gauthHost", SSO_EMBED_URL)
-            .addQueryParameter("service", SSO_EMBED_URL)
-            .addQueryParameter("source", SSO_EMBED_URL)
-            .addQueryParameter("redirectAfterAccountLoginUrl", SSO_EMBED_URL)
-            .addQueryParameter("redirectAfterAccountCreationUrl", SSO_EMBED_URL)
+            .addQueryParameter("gauthHost", ssoEmbedUrl())
+            .addQueryParameter("service", ssoEmbedUrl())
+            .addQueryParameter("source", ssoEmbedUrl())
+            .addQueryParameter("redirectAfterAccountLoginUrl", ssoEmbedUrl())
+            .addQueryParameter("redirectAfterAccountCreationUrl", ssoEmbedUrl())
             .build()
 
     fun loginPassword(email: String, password: String): LoginResult = call(mutating = false) {
         val now = System.currentTimeMillis()
-        val cooldownUntil = secrets.getString(KEY_LOGIN_COOLDOWN_UNTIL)?.toLongOrNull() ?: 0L
+        val cooldownUntil = secretStorage.getString(KEY_LOGIN_COOLDOWN_UNTIL)?.toLongOrNull() ?: 0L
         if (now < cooldownUntil) {
             throw ProviderError.RateLimited(((cooldownUntil - now) / 1000L).coerceAtLeast(1L))
         }
         val cleanEmail = email.trim()
-        Log.d(TAG, "Starting Garmin SSO login")
+        PLog.d(TAG) { "Starting Garmin SSO login" }
         pendingMfaCsrf = null
         pendingMfaEmail = cleanEmail
         synchronized(cookieStore) { cookieStore.clear() }
@@ -282,7 +309,7 @@ class ExtendedGarminApi(
             .header("Accept-Language", "cs-CZ,cs;q=0.9,en-US;q=0.8,en;q=0.7")
             .build()
         http.newCall(embedReq).execute().use { embedRes ->
-            Log.d(TAG, "SSO embed response code: ${embedRes.code}")
+            PLog.d(TAG) { "SSO embed response code: ${embedRes.code}" }
             if (embedRes.code == 429 || embedRes.code == 403) {
                 throw ProviderError.RateLimited(null)
             }
@@ -299,7 +326,7 @@ class ExtendedGarminApi(
             .build()
         val signinGetHtml = http.newCall(signinGetReq).execute().use { signinGetRes ->
             val html = signinGetRes.body?.string().orEmpty()
-            Log.d(TAG, "SSO signin GET response code: ${signinGetRes.code}, body length: ${html.length}")
+            PLog.d(TAG) { "SSO signin GET response code: ${signinGetRes.code}, body length: ${html.length}" }
             if (signinGetRes.code == 429 || signinGetRes.code == 403) {
                 throw ProviderError.RateLimited(null)
             }
@@ -309,7 +336,7 @@ class ExtendedGarminApi(
         val hiddenInputs = extractHiddenInputs(signinGetHtml)
         val csrf = extractCsrfToken(signinGetHtml).orEmpty()
         if (csrf.isBlank()) {
-            Log.w(TAG, "Failed to extract CSRF token from signin page")
+            PLog.w(TAG) { "Failed to extract CSRF token from signin page" }
             throw ProviderError.Network("Garmin SSO nevrátil CSRF token (zkuste znovu)")
         }
 
@@ -341,39 +368,39 @@ class ExtendedGarminApi(
         val (loginCode, loginBody, finalUrl) = http.newCall(loginReq).execute().use { loginRes ->
             Triple(loginRes.code, loginRes.body?.string().orEmpty(), loginRes.request.url.toString())
         }
-        Log.d(TAG, "SSO signin POST response code: $loginCode, finalUrl: $finalUrl")
+        PLog.d(TAG) { "SSO signin POST response code: $loginCode" }
 
         val ticket = extractTicket(loginBody, finalUrl)
         when (classifySsoLoginResponse(loginCode, loginBody, finalUrl, ticket != null)) {
             SsoLoginClassification.RATE_LIMITED -> {
-                Log.w(TAG, "Garmin SSO rate limited or WAF blocked (HTTP $loginCode)")
+                PLog.w(TAG) { "Garmin SSO rate limited or WAF blocked (HTTP $loginCode)" }
                 throw ProviderError.RateLimited(null)
             }
             SsoLoginClassification.TICKET -> {
-                secrets.delete(KEY_LOGIN_FAILURES)
-                secrets.delete(KEY_LOGIN_COOLDOWN_UNTIL)
-                Log.d(TAG, "Garmin SSO login succeeded, acquired ticket: ${ticket!!.take(8)}...")
-                finishLoginWithTicket(ticket, cleanEmail)
+                secretStorage.delete(KEY_LOGIN_FAILURES)
+                secretStorage.delete(KEY_LOGIN_COOLDOWN_UNTIL)
+                PLog.d(TAG) { "Garmin SSO login succeeded" }
+                finishLoginWithTicket(ticket!!, cleanEmail)
                 pendingMfaEmail = null
                 return@call LoginResult.Ok
             }
             SsoLoginClassification.MFA -> {
-                Log.d(TAG, "Garmin SSO requires MFA")
+                PLog.d(TAG) { "Garmin SSO requires MFA" }
                 pendingMfaCsrf = extractCsrfToken(loginBody) ?: csrf
                 triggerMfaEmailIfNeeded(loginBody)
                 return@call LoginResult.NeedsMfa
             }
             SsoLoginClassification.UNAUTHORIZED -> {
-                val failures = (secrets.getString(KEY_LOGIN_FAILURES)?.toIntOrNull() ?: 0) + 1
-                secrets.putString(KEY_LOGIN_FAILURES, failures.toString())
+                val failures = (secretStorage.getString(KEY_LOGIN_FAILURES)?.toIntOrNull() ?: 0) + 1
+                secretStorage.putString(KEY_LOGIN_FAILURES, failures.toString())
                 if (failures >= MAX_LOGIN_FAILURES) {
-                    secrets.putString(KEY_LOGIN_COOLDOWN_UNTIL, (System.currentTimeMillis() + LOGIN_COOLDOWN_MS).toString())
+                    secretStorage.putString(KEY_LOGIN_COOLDOWN_UNTIL, (System.currentTimeMillis() + LOGIN_COOLDOWN_MS).toString())
                 }
-                Log.w(TAG, "Garmin SSO credentials rejected (HTTP $loginCode)")
+                PLog.w(TAG) { "Garmin SSO credentials rejected (HTTP $loginCode)" }
                 throw ProviderError.Unauthorized()
             }
             SsoLoginClassification.UNKNOWN -> {
-                Log.w(TAG, "Service ticket not found in login response. URL: $finalUrl, body length: ${loginBody.length}")
+                PLog.w(TAG) { "Service ticket not found in login response (HTTP $loginCode, body length: ${loginBody.length})" }
                 throw ProviderError.Unauthorized()
             }
         }
@@ -388,7 +415,7 @@ class ExtendedGarminApi(
             val payload = """{"customerGuid":"$guid","mfaMethod":"$methodMatch","locale":"$locale"}"""
                 .toRequestBody("application/json".toMediaType())
             val req = Request.Builder()
-                .url("https://sso.garmin.com/sso/verifyMFA/mfaCode?clientId=gauth-widget")
+                .url("${ssoBaseUrl.trimEnd('/')}/verifyMFA/mfaCode?clientId=gauth-widget")
                 .header("Referer", buildSigninUrl().toString())
                 .header("Origin", "https://sso.garmin.com")
                 .header("Accept", "application/json, text/plain, */*")
@@ -403,16 +430,16 @@ class ExtendedGarminApi(
         val csrf = pendingMfaCsrf ?: throw ProviderError.Unauthorized()
         val cleanedCode = code.trim().replace(" ", "").replace("-", "")
         if (cleanedCode.isBlank()) throw ProviderError.Unauthorized()
-        val mfaUrl = SSO_BASE_URL.toHttpUrl().newBuilder()
+        val mfaUrl = ssoBaseUrl.toHttpUrl().newBuilder()
             .addPathSegment("verifyMFA")
             .addPathSegment("loginEnterMfaCode")
             .addQueryParameter("id", "gauth-widget")
             .addQueryParameter("embedWidget", "true")
-            .addQueryParameter("gauthHost", SSO_EMBED_URL)
-            .addQueryParameter("service", SSO_EMBED_URL)
-            .addQueryParameter("source", SSO_EMBED_URL)
-            .addQueryParameter("redirectAfterAccountLoginUrl", SSO_EMBED_URL)
-            .addQueryParameter("redirectAfterAccountCreationUrl", SSO_EMBED_URL)
+            .addQueryParameter("gauthHost", ssoEmbedUrl())
+            .addQueryParameter("service", ssoEmbedUrl())
+            .addQueryParameter("source", ssoEmbedUrl())
+            .addQueryParameter("redirectAfterAccountLoginUrl", ssoEmbedUrl())
+            .addQueryParameter("redirectAfterAccountCreationUrl", ssoEmbedUrl())
             .build()
 
         val mfaForm = FormBody.Builder()
@@ -433,7 +460,7 @@ class ExtendedGarminApi(
         val (mfaCode, mfaBody, finalUrl) = http.newCall(mfaReq).execute().use { mfaRes ->
             Triple(mfaRes.code, mfaRes.body?.string().orEmpty(), mfaRes.request.url.toString())
         }
-        Log.d(TAG, "SSO verifyMFA response code: $mfaCode, finalUrl: $finalUrl")
+        PLog.d(TAG) { "SSO verifyMFA response code: $mfaCode" }
         if (mfaCode == 429 || mfaCode == 403) {
             throw ProviderError.RateLimited(null)
         }
@@ -442,26 +469,17 @@ class ExtendedGarminApi(
             ?: run {
                 // Aktualizujeme CSRF z odpovědi, aby šlo případně kód opravit a odeslat znovu
                 extractCsrfToken(mfaBody)?.let { pendingMfaCsrf = it }
-                Log.w(TAG, "Service ticket not found after MFA verification")
+                PLog.w(TAG) { "Service ticket not found after MFA verification" }
                 throw ProviderError.Unauthorized()
             }
 
-        Log.d(TAG, "Garmin MFA succeeded, acquired ticket: ${ticket.take(8)}...")
+        PLog.d(TAG) { "Garmin MFA succeeded" }
         finishLoginWithTicket(ticket, pendingMfaEmail)
+        secretStorage.delete(KEY_LOGIN_FAILURES)
+        secretStorage.delete(KEY_LOGIN_COOLDOWN_UNTIL)
         pendingMfaCsrf = null
         pendingMfaEmail = null
         LoginResult.Ok
-    }
-
-    private fun extractTicket(body: String, requestUrl: String): String? {
-        val ticketRegex = Regex("""(?:\?|&|#)ticket=([A-Za-z0-9\-_]+)""")
-        val jsonRegex = Regex("""serviceTicketId"?\s*[:=]\s*"([^"]+)"""")
-        val altRegex = Regex("""ticket=([A-Za-z0-9\-_]+)""")
-
-        return ticketRegex.find(requestUrl)?.groupValues?.get(1)
-            ?: ticketRegex.find(body)?.groupValues?.get(1)
-            ?: jsonRegex.find(body)?.groupValues?.get(1)
-            ?: altRegex.find(body)?.groupValues?.get(1)
     }
 
     private fun finishLoginWithTicket(ticket: String, email: String?) {
@@ -470,21 +488,22 @@ class ExtendedGarminApi(
         // 1. Primární strategie: Moderní výměna DI-OAuth2 tokenu
         for (clientId in DI_CLIENT_IDS) {
             try {
-                Log.d(TAG, "Attempting DI-OAuth2 token exchange with clientId: $clientId")
+                PLog.d(TAG) { "Attempting DI-OAuth2 token exchange with clientId: $clientId" }
                 val tokens = exchangeTicketWithDiOAuth2(ticket, clientId, email)
                 saveTokens(tokens)
-                Log.i(TAG, "DI-OAuth2 exchange successful with clientId: $clientId")
+                PLog.i(TAG) { "DI-OAuth2 exchange successful with clientId: $clientId" }
                 return
             } catch (e: Exception) {
                 lastException = e
-                Log.w(TAG, "DI-OAuth2 exchange failed with clientId: $clientId: ${e.message}")
+                PLog.w(TAG, e) { "DI-OAuth2 exchange failed with clientId: $clientId" }
             }
         }
 
         // 2. Sekundární záloha: Legacy OAuth 1.0 preauthorized exchange
         try {
-            Log.d(TAG, "Falling back to legacy OAuth 1.0 preauthorized exchange")
-            val preAuthUrl = "https://connectapi.garmin.com/oauth-service/oauth/preauthorized?ticket=$ticket&service=https%3A%2F%2Fsso.garmin.com%2Fsso%2Fembed&accepts-mfa-tokens=true"
+            PLog.d(TAG) { "Falling back to legacy OAuth 1.0 preauthorized exchange" }
+            val encodedService = URLEncoder.encode(ssoEmbedUrl(), "UTF-8")
+            val preAuthUrl = "${connectApiBaseUrl.trimEnd('/')}/oauth-service/oauth/preauthorized?ticket=$ticket&service=$encodedService&accepts-mfa-tokens=true"
             val oauth1Header = OAuth1Signer.generateHeader("GET", preAuthUrl)
 
             val preAuthReq = Request.Builder()
@@ -501,15 +520,15 @@ class ExtendedGarminApi(
                     if (!oauth1Token.isNullOrBlank() && !oauth1Secret.isNullOrBlank()) {
                         val tokens = exchangeOAuth1ForOAuth2(oauth1Token, oauth1Secret, email)
                         saveTokens(tokens)
-                        Log.i(TAG, "Legacy OAuth 1.0 exchange successful")
+                        PLog.i(TAG) { "Legacy OAuth 1.0 exchange successful" }
                         return
                     }
                 } else {
-                    Log.w(TAG, "Legacy preauthorized exchange failed with HTTP ${preAuthRes.code}")
+                    PLog.w(TAG) { "Legacy preauthorized exchange failed with HTTP ${preAuthRes.code}" }
                 }
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Legacy OAuth 1.0 exchange failed: ${e.message}")
+            PLog.w(TAG, e) { "Legacy OAuth 1.0 exchange failed" }
             if (lastException == null) lastException = e
         }
 
@@ -517,16 +536,16 @@ class ExtendedGarminApi(
     }
 
     private fun exchangeTicketWithDiOAuth2(ticket: String, clientId: String, email: String?): GarminExtTokens {
-        val basicAuth = "Basic " + Base64.encodeToString("$clientId:".toByteArray(), Base64.NO_WRAP)
+        val basicAuth = "Basic " + java.util.Base64.getEncoder().encodeToString("$clientId:".toByteArray())
         val formBody = FormBody.Builder()
             .add("client_id", clientId)
             .add("service_ticket", ticket)
             .add("grant_type", DI_GRANT_TYPE)
-            .add("service_url", SSO_EMBED_URL)
+            .add("service_url", ssoEmbedUrl())
             .build()
 
         val req = Request.Builder()
-            .url(DI_TOKEN_URL)
+            .url(diTokenUrl)
             .post(formBody)
             .header("Authorization", basicAuth)
             .header("User-Agent", CONNECT_MOBILE_USER_AGENT)
@@ -536,7 +555,7 @@ class ExtendedGarminApi(
         val jsonText = http.newCall(req).execute().use { res ->
             if (res.code == 429) throw ProviderError.RateLimited(null)
             if (!res.isSuccessful) {
-                Log.w(TAG, "DI-OAuth2 exchange HTTP ${res.code}")
+                PLog.w(TAG) { "DI-OAuth2 exchange HTTP ${res.code}" }
                 throw ProviderError.Unauthorized()
             }
             res.body?.string().orEmpty()
@@ -561,7 +580,7 @@ class ExtendedGarminApi(
     }
 
     private fun refreshDiOAuth2Token(refreshToken: String, clientId: String, email: String?): RefreshResult {
-        val basicAuth = "Basic " + Base64.encodeToString("$clientId:".toByteArray(), Base64.NO_WRAP)
+        val basicAuth = "Basic " + java.util.Base64.getEncoder().encodeToString("$clientId:".toByteArray())
         val formBody = FormBody.Builder()
             .add("grant_type", "refresh_token")
             .add("client_id", clientId)
@@ -569,7 +588,7 @@ class ExtendedGarminApi(
             .build()
 
         val req = Request.Builder()
-            .url(DI_TOKEN_URL)
+            .url(diTokenUrl)
             .post(formBody)
             .header("Authorization", basicAuth)
             .header("User-Agent", CONNECT_MOBILE_USER_AGENT)
@@ -587,7 +606,7 @@ class ExtendedGarminApi(
                 }
                 if (!res.isSuccessful) {
                     val errBody = res.body?.string().orEmpty()
-                    Log.w(TAG, "DI token refresh HTTP ${res.code}")
+                    PLog.w(TAG) { "DI token refresh HTTP ${res.code}" }
                     return if (res.code == 400 || res.code == 401 || errBody.contains("invalid_grant", ignoreCase = true)) {
                         RefreshResult.Revoked
                     } else {
@@ -622,7 +641,7 @@ class ExtendedGarminApi(
     }
 
     private fun exchangeOAuth1ForOAuth2(oauth1Token: String, oauth1Secret: String, email: String?): GarminExtTokens {
-        val exchangeUrl = "https://connectapi.garmin.com/oauth-service/oauth/exchange/user/2.0"
+        val exchangeUrl = "${connectApiBaseUrl.trimEnd('/')}/oauth-service/oauth/exchange/user/2.0"
         val oauth1Header = OAuth1Signer.generateHeader(
             method = "POST",
             url = exchangeUrl,
@@ -674,7 +693,7 @@ class ExtendedGarminApi(
             trimmed
         } else {
             runCatching {
-                String(Base64.decode(trimmed, Base64.DEFAULT), Charsets.UTF_8).trim()
+                String(java.util.Base64.getMimeDecoder().decode(trimmed), Charsets.UTF_8).trim()
             }.getOrNull() ?: ""
         }
 
@@ -720,7 +739,7 @@ class ExtendedGarminApi(
      */
     @Synchronized
     fun ensureSession(force: Boolean = false): Boolean {
-        val raw = secrets.getString(SecretStore.GARMIN_EXT_TOKENS) ?: return false
+        val raw = secretStorage.getString(SecretStore.GARMIN_EXT_TOKENS) ?: return false
         val tokens = parseTokens(raw) ?: return false
         val now = System.currentTimeMillis()
 
@@ -729,7 +748,7 @@ class ExtendedGarminApi(
             return true
         }
 
-        val blockedUntil = secrets.getString(KEY_REFRESH_BLOCKED_UNTIL)?.toLongOrNull() ?: 0L
+        val blockedUntil = secretStorage.getString(KEY_REFRESH_BLOCKED_UNTIL)?.toLongOrNull() ?: 0L
         if (now < blockedUntil) {
             return false
         }
@@ -741,13 +760,13 @@ class ExtendedGarminApi(
             when (val res = refreshDiOAuth2Token(tokens.refreshToken, tokens.clientId, tokens.email)) {
                 is RefreshResult.Ok -> {
                     saveTokens(res.tokens)
-                    secrets.delete(KEY_REFRESH_BLOCKED_UNTIL)
-                    secrets.delete(KEY_REFRESH_FAILURES)
-                    Log.d(TAG, "Session refreshed via DI-OAuth2 token")
+                    secretStorage.delete(KEY_REFRESH_BLOCKED_UNTIL)
+                    secretStorage.delete(KEY_REFRESH_FAILURES)
+                    PLog.d(TAG) { "Session refreshed via DI-OAuth2 token" }
                     return true
                 }
                 is RefreshResult.Revoked -> {
-                    Log.w(TAG, "DI-OAuth2 refresh token revoked; clearing stored tokens")
+                    PLog.w(TAG) { "DI-OAuth2 refresh token revoked; clearing stored tokens" }
                     clearTokensAndBackoff()
                     return false
                 }
@@ -763,9 +782,9 @@ class ExtendedGarminApi(
             return runCatching {
                 val fresh = exchangeOAuth1ForOAuth2(tokens.oauth1Token, tokens.oauth1Secret, tokens.email)
                 saveTokens(fresh)
-                secrets.delete(KEY_REFRESH_BLOCKED_UNTIL)
-                secrets.delete(KEY_REFRESH_FAILURES)
-                Log.d(TAG, "Session refreshed via OAuth 1.0 token")
+                secretStorage.delete(KEY_REFRESH_BLOCKED_UNTIL)
+                secretStorage.delete(KEY_REFRESH_FAILURES)
+                PLog.d(TAG) { "Session refreshed via OAuth 1.0 token" }
                 true
             }.getOrElse { e ->
                 if (e is ProviderError.Unauthorized) clearTokensAndBackoff()
@@ -781,41 +800,41 @@ class ExtendedGarminApi(
     }
 
     private fun recordRefreshTransientFailure(now: Long, retryAfterMs: Long) {
-        val failures = (secrets.getString(KEY_REFRESH_FAILURES)?.toIntOrNull() ?: 0) + 1
+        val failures = (secretStorage.getString(KEY_REFRESH_FAILURES)?.toIntOrNull() ?: 0) + 1
         val shift = (failures - 1).coerceIn(0, 6)
         val expMs = (MIN_REFRESH_BACKOFF_MS shl shift).coerceAtMost(MAX_REFRESH_BACKOFF_MS)
         val delayMs = maxOf(expMs, retryAfterMs).coerceAtMost(MAX_REFRESH_BACKOFF_MS)
-        secrets.putString(KEY_REFRESH_FAILURES, failures.toString())
-        secrets.putString(KEY_REFRESH_BLOCKED_UNTIL, (now + delayMs).toString())
+        secretStorage.putString(KEY_REFRESH_FAILURES, failures.toString())
+        secretStorage.putString(KEY_REFRESH_BLOCKED_UNTIL, (now + delayMs).toString())
     }
 
     private fun clearTokensAndBackoff() {
-        secrets.delete(SecretStore.GARMIN_EXT_TOKENS)
-        secrets.delete(KEY_REFRESH_BLOCKED_UNTIL)
-        secrets.delete(KEY_REFRESH_FAILURES)
+        secretStorage.delete(SecretStore.GARMIN_EXT_TOKENS)
+        secretStorage.delete(KEY_REFRESH_BLOCKED_UNTIL)
+        secretStorage.delete(KEY_REFRESH_FAILURES)
     }
 
     private fun getValidAccessToken(): String {
-        val blockedUntil = secrets.getString(KEY_REFRESH_BLOCKED_UNTIL)?.toLongOrNull() ?: 0L
+        val blockedUntil = secretStorage.getString(KEY_REFRESH_BLOCKED_UNTIL)?.toLongOrNull() ?: 0L
         val now = System.currentTimeMillis()
         if (now < blockedUntil) {
             throw ProviderError.RateLimited(((blockedUntil - now) / 1000L).coerceAtLeast(1L))
         }
         ensureSession()
-        val raw = secrets.getString(SecretStore.GARMIN_EXT_TOKENS) ?: throw ProviderError.Unauthorized()
+        val raw = secretStorage.getString(SecretStore.GARMIN_EXT_TOKENS) ?: throw ProviderError.Unauthorized()
         val tokens = parseTokens(raw) ?: throw ProviderError.Unauthorized()
         return tokens.accessToken
     }
 
     private fun saveTokens(t: GarminExtTokens) {
-        secrets.putString(SecretStore.GARMIN_EXT_TOKENS, json.encodeToString(t))
+        secretStorage.putString(SecretStore.GARMIN_EXT_TOKENS, json.encodeToString(t))
     }
 
     /** Zavolá Garmin Connect API endpoint přes přihlášenou relaci. */
     fun connectApiJson(path: String): String = call(mutating = false) {
         val token = getValidAccessToken()
         val cleanPath = if (path.startsWith("/")) path else "/$path"
-        val fullUrl = if (path.startsWith("http")) path else "https://connectapi.garmin.com$cleanPath"
+        val fullUrl = if (path.startsWith("http")) path else "${connectApiBaseUrl.trimEnd('/')}$cleanPath"
 
         val req = Request.Builder()
             .url(fullUrl)
@@ -878,7 +897,7 @@ class ExtendedGarminApi(
     }
 
     fun logout() {
-        secrets.delete(SecretStore.GARMIN_EXT_TOKENS)
+        secretStorage.delete(SecretStore.GARMIN_EXT_TOKENS)
         synchronized(cookieStore) { cookieStore.clear() }
     }
 
@@ -1002,7 +1021,7 @@ class ExtendedGarminApi(
         throw if (mutating) ProviderError.Timeout() else ProviderError.Network(e.javaClass.simpleName)
     } catch (e: Exception) {
         val m = e.message.orEmpty()
-        Log.w(TAG, "Exception: ${e.javaClass.simpleName}", e)
+        PLog.w(TAG, e) { "Exception: ${e.javaClass.simpleName}" }
         throw when {
             "TooManyRequests" in m || "429" in m -> ProviderError.RateLimited(null)
             "Authentication" in m || "401" in m || "Invalid credentials" in m || "Unexpected title" in m -> ProviderError.Unauthorized()

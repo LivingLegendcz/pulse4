@@ -249,9 +249,694 @@ class ServiceLocator(internal val context: Context) {
 }
 
 /** Import z oficiálního Garmin Personal API (a záložně z přihlášené relace Garmin Connect) a ruční import FIT. */
+internal interface ActivityImportStore {
+    fun get(id: String): ActivityRow?
+    fun track(id: String): TrackRow?
+    fun upsert(row: ActivityRow)
+    fun upsertTrack(row: TrackRow)
+    fun inTransaction(block: () -> Unit)
+}
+
 class ImportService(private val context: Context, private val sl: ServiceLocator) {
     private val json = Wire.json
     private val syncLock = Any()
+
+    companion object {
+        private val MULTISPORT_LEG_REGEX = Regex("""^(garmin|fit)-.+-s\d+$""")
+        private val json = Wire.json
+
+        fun isMultisportLegId(id: String): Boolean = MULTISPORT_LEG_REGEX.matches(id)
+
+        fun parentIdFromLegId(id: String): String? =
+            if (isMultisportLegId(id)) id.substringBeforeLast("-s") else null
+
+        internal fun multisportLegIds(baseId: String, baseExtId: String, sessionCount: Int): List<Pair<String, String>> =
+            if (sessionCount <= 1) listOf(baseId to baseExtId)
+            else (1..sessionCount).map { legNum -> "$baseId-s$legNum" to "$baseExtId-s$legNum" }
+
+        internal fun extractFitFromZipOrRaw(bytes: ByteArray): ByteArray? {
+            val maxFitBytes = 25 * 1024 * 1024
+            val maxZipEntries = 32
+            if (bytes.size < 4 || bytes.size > maxFitBytes) return null
+            if (bytes[0] == 0x50.toByte() && bytes[1] == 0x4B.toByte()) {
+                java.util.zip.ZipInputStream(java.io.ByteArrayInputStream(bytes)).use { zis ->
+                    var entries = 0
+                    var entry = zis.nextEntry
+                    while (entry != null && entries < maxZipEntries) {
+                        entries++
+                        if (!entry.isDirectory && entry.name.endsWith(".fit", ignoreCase = true)) {
+                            val out = java.io.ByteArrayOutputStream()
+                            val buf = ByteArray(8192)
+                            var total = 0
+                            while (true) {
+                                val n = zis.read(buf)
+                                if (n <= 0) break
+                                total += n
+                                if (total > maxFitBytes) return null
+                                out.write(buf, 0, n)
+                            }
+                            return out.toByteArray()
+                        }
+                        entry = zis.nextEntry
+                    }
+                }
+                return null
+            }
+            if (bytes.size > 14) {
+                val tag = String(bytes.sliceArray(8..11), Charsets.US_ASCII)
+                if (tag == ".FIT") return bytes
+            }
+            return null
+        }
+
+        internal fun parseGarminDetailsGpsPoints(detailsJson: String): List<app.pulse4.domain.TrackPoint> {
+            return runCatching<List<app.pulse4.domain.TrackPoint>> {
+                val root = json.parseToJsonElement(detailsJson) as? kotlinx.serialization.json.JsonObject ?: return@runCatching emptyList()
+                val polyline = root["geoPolylineDTO"]?.let { (it as? kotlinx.serialization.json.JsonObject)?.get("polyline") as? kotlinx.serialization.json.JsonArray }
+                if (polyline != null && polyline.isNotEmpty()) {
+                    val pts = polyline.mapNotNull { elem ->
+                        val obj = elem as? kotlinx.serialization.json.JsonObject ?: return@mapNotNull null
+                        val lat = obj["lat"]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content?.toDoubleOrNull() } ?: return@mapNotNull null
+                        val lon = obj["lon"]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content?.toDoubleOrNull() } ?: return@mapNotNull null
+                        val alt = obj["altitude"]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content?.toDoubleOrNull() }
+                        val time = obj["time"]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content?.toLongOrNull() } ?: 0L
+                        app.pulse4.domain.TrackPoint(
+                            tMs = time,
+                            lat = lat,
+                            lon = lon,
+                            elevationM = alt,
+                            heartRate = null,
+                            speedMps = null,
+                            cadence = null,
+                            powerW = null,
+                            distanceM = null
+                        )
+                    }
+                    if (pts.size >= 2) return@runCatching pts
+                }
+
+                val descArr = root["metricDescriptors"] as? kotlinx.serialization.json.JsonArray
+                val metricsArr = root["activityDetailMetrics"] as? kotlinx.serialization.json.JsonArray
+                if (descArr != null && metricsArr != null && metricsArr.isNotEmpty()) {
+                    var latIdx = -1
+                    var lonIdx = -1
+                    var altIdx = -1
+                    var timeIdx = -1
+                    var hrIdx = -1
+                    var spdIdx = -1
+                    descArr.forEach { dElem ->
+                        val dObj = dElem as? kotlinx.serialization.json.JsonObject ?: return@forEach
+                        val idx = dObj["metricsIndex"]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content?.toIntOrNull() } ?: return@forEach
+                        val key = dObj["key"]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }?.lowercase() ?: ""
+                        when {
+                            "latitude" in key -> latIdx = idx
+                            "longitude" in key -> lonIdx = idx
+                            "elevation" in key || "altitude" in key -> altIdx = idx
+                            "timestamp" in key || "time" in key -> timeIdx = idx
+                            "heartrate" in key || "hr" in key -> hrIdx = idx
+                            "speed" in key -> spdIdx = idx
+                        }
+                    }
+                    if (latIdx >= 0 && lonIdx >= 0) {
+                        val pts = metricsArr.mapNotNull { mElem ->
+                            val mObj = mElem as? kotlinx.serialization.json.JsonObject ?: return@mapNotNull null
+                            val vals = mObj["metrics"] as? kotlinx.serialization.json.JsonArray ?: return@mapNotNull null
+                            val lat = vals.getOrNull(latIdx)?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content?.toDoubleOrNull() } ?: return@mapNotNull null
+                            val lon = vals.getOrNull(lonIdx)?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content?.toDoubleOrNull() } ?: return@mapNotNull null
+                            val alt = if (altIdx >= 0) vals.getOrNull(altIdx)?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content?.toDoubleOrNull() } else null
+                            val t = if (timeIdx >= 0) vals.getOrNull(timeIdx)?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content?.toLongOrNull() } ?: 0L else 0L
+                            val hr = if (hrIdx >= 0) vals.getOrNull(hrIdx)?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content?.toIntOrNull() } else null
+                            val spd = if (spdIdx >= 0) vals.getOrNull(spdIdx)?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content?.toDoubleOrNull() } else null
+                            app.pulse4.domain.TrackPoint(
+                                tMs = t,
+                                lat = lat,
+                                lon = lon,
+                                elevationM = alt,
+                                heartRate = hr,
+                                speedMps = spd,
+                                cadence = null,
+                                powerW = null,
+                                distanceM = null
+                            )
+                        }
+                        if (pts.size >= 2) return@runCatching pts
+                    }
+                }
+                emptyList<app.pulse4.domain.TrackPoint>()
+            }.getOrDefault(emptyList())
+        }
+
+        internal fun buildActivityFromGarminAndFit(
+            id: String,
+            provider: Provider,
+            extId: String?,
+            obj: kotlinx.serialization.json.JsonObject?,
+            parsed: app.pulse4.fit.ParsedFit?,
+            nowMs: Long,
+            accountId: String,
+            zoneId: String,
+        ): Activity {
+            fun str(k: String): String? = obj?.get(k)?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { p -> p.content != "null" }?.content }
+            fun dbl(k: String): Double? = obj?.get(k)?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.doubleOrNull }?.takeIf { it.isFinite() }
+            fun int(k: String): Int? = dbl(k)?.toInt()
+
+            val activityTypeObj = obj?.get("activityType") as? kotlinx.serialization.json.JsonObject
+            val typeKey = activityTypeObj?.get("typeKey")?.let { tk -> (tk as? kotlinx.serialization.json.JsonPrimitive)?.content }
+            val parentTypeId = activityTypeObj?.get("parentTypeId")?.let { pt -> (pt as? kotlinx.serialization.json.JsonPrimitive)?.doubleOrNull?.toInt() }
+            val sportFromObj = when (typeKey?.lowercase()) {
+                "running", "trail_running", "treadmill_running", "track_running",
+                "street_running", "ultra_run", "virtual_run", "indoor_running", "obstacle_run" -> app.pulse4.domain.Sport.RUNNING
+                "cycling", "road_biking", "gravel_cycling", "mountain_biking", "indoor_cycling",
+                "virtual_ride", "cyclocross", "e_bike_mountain", "e_bike_fitness", "bmx",
+                "recumbent_cycling", "track_cycling" -> app.pulse4.domain.Sport.CYCLING
+                "swimming", "lap_swimming", "open_water_swimming", "pool_swimming",
+                "stand_up_paddleboarding_v2", "kayaking_v2", "rowing_v2", "indoor_rowing" -> app.pulse4.domain.Sport.SWIMMING
+                "walking", "casual_walking", "speed_walking", "indoor_walking" -> app.pulse4.domain.Sport.WALKING
+                "hiking", "mountaineering", "rock_climbing", "bouldering",
+                "snowshoe_ws", "backcountry_skiing_snowboarding_ws" -> app.pulse4.domain.Sport.HIKING
+                "strength_training", "fitness_equipment", "hiit", "indoor_cardio",
+                "cardio_training", "elliptical", "stair_climbing", "yoga", "pilates",
+                "breathwork", "mobility" -> app.pulse4.domain.Sport.STRENGTH
+                else -> when (parentTypeId) {
+                    1 -> app.pulse4.domain.Sport.RUNNING
+                    2 -> app.pulse4.domain.Sport.CYCLING
+                    3 -> app.pulse4.domain.Sport.HIKING
+                    26 -> app.pulse4.domain.Sport.SWIMMING
+                    29 -> app.pulse4.domain.Sport.STRENGTH
+                    else -> null
+                }
+            }
+            val sport = sportFromObj ?: parsed?.sport ?: app.pulse4.domain.Sport.OTHER
+            val startMs = parsed?.startMs ?: runCatching {
+                val s = str("startTimeGMT")
+                if (s != null) java.time.LocalDateTime.parse(s.replace(' ', 'T')).toInstant(java.time.ZoneOffset.UTC).toEpochMilli()
+                else dbl("beginTimestamp")?.toLong()
+            }.getOrNull() ?: nowMs
+
+            val dur = dbl("duration") ?: dbl("elapsedDuration") ?: parsed?.totalTimeS ?: 0.0
+            val moving = dbl("movingDuration") ?: parsed?.movingTimeS ?: dur
+            val dist = dbl("distance") ?: parsed?.distanceM
+            val ascent = dbl("elevationGain") ?: parsed?.ascentM
+            val descent = dbl("elevationLoss") ?: parsed?.descentM
+            val avgHr = int("averageHR") ?: parsed?.avgHeartRate
+            val maxHr = int("maxHR") ?: parsed?.maxHeartRate
+
+            val pts = parsed?.points.orEmpty()
+            val eles = pts.mapNotNull { it.elevationM }
+            val minEle = dbl("minElevation") ?: eles.minOrNull()
+            val maxEle = dbl("maxElevation") ?: eles.maxOrNull()
+            val avgEle = dbl("avgElevation") ?: eles.takeIf { it.isNotEmpty() }?.average()
+
+            val hrZonesFromJson = (1..5).mapNotNull { z -> dbl("hrTimeInZone_$z") }
+            val hrZones = if (hrZonesFromJson.size == 5 && hrZonesFromJson.any { it > 0.0 }) {
+                hrZonesFromJson
+            } else if (pts.size >= 2 && pts.any { it.heartRate != null }) {
+                val maxRef = (maxHr ?: 185).coerceAtLeast(150).toDouble()
+                val bounds = listOf(maxRef * 0.60, maxRef * 0.70, maxRef * 0.80, maxRef * 0.90)
+                app.pulse4.analytics.Zones.timeInZones(
+                    pts.map { it.tMs to it.heartRate?.toDouble() },
+                    app.pulse4.analytics.Zones.ZoneSet(bounds)
+                ).toList()
+            } else emptyList()
+
+            val pwrZonesFromJson = (1..5).mapNotNull { z -> dbl("powerTimeInZone_$z") }
+            val pwrZones = if (pwrZonesFromJson.size == 5 && pwrZonesFromJson.any { it > 0.0 }) {
+                pwrZonesFromJson
+            } else emptyList()
+
+            val lapsList = if (parsed != null && parsed.laps.isNotEmpty()) {
+                parsed.laps.mapIndexed { idx, l ->
+                    val lDur = ((l.endMs - l.startMs) / 1000.0).coerceAtLeast(1.0)
+                    app.pulse4.domain.ActivityLap(
+                        index = idx + 1,
+                        startUtcMs = l.startMs,
+                        endUtcMs = l.endMs,
+                        durationS = lDur,
+                        distanceM = l.distanceM,
+                        avgHeartRate = l.avgHeartRate,
+                        maxHeartRate = l.maxHeartRate,
+                        avgSpeedMps = l.avgSpeedMps ?: l.distanceM?.let { it / lDur },
+                        maxSpeedMps = l.maxSpeedMps,
+                        ascentM = l.ascentM,
+                        descentM = l.descentM,
+                        avgCadence = l.avgCadence,
+                        avgPowerW = l.avgPowerW,
+                        caloriesKcal = l.caloriesKcal,
+                    )
+                }
+            } else emptyList()
+
+            val splitsList = (obj?.get("splitSummaries") as? kotlinx.serialization.json.JsonArray)?.mapNotNull { el ->
+                val so = el as? kotlinx.serialization.json.JsonObject ?: return@mapNotNull null
+                fun sDbl(k: String) = so[k]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.doubleOrNull }
+                fun sStr(k: String) = so[k]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }
+                val st = sStr("splitType") ?: return@mapNotNull null
+                val sDur = sDbl("duration") ?: return@mapNotNull null
+                app.pulse4.domain.ActivitySplitSummary(
+                    splitType = st,
+                    noOfSplits = sDbl("noOfSplits")?.toInt() ?: 1,
+                    durationS = sDur,
+                    distanceM = sDbl("distance"),
+                    avgSpeedMps = sDbl("averageSpeed"),
+                    maxSpeedMps = sDbl("maxSpeed"),
+                    ascentM = sDbl("totalAscent"),
+                    descentM = sDbl("elevationLoss"),
+                    avgCadence = sDbl("avgStepFrequency"),
+                    avgStrideLengthCm = sDbl("avgStepLength")?.let { if (it < 5.0) it * 100.0 else it },
+                    avgVerticalOscillationCm = sDbl("verticalOscillation"),
+                    avgGroundContactTimeMs = sDbl("avgGroundContactTime"),
+                    avgVerticalRatioPct = sDbl("verticalRatio"),
+                )
+            }.orEmpty()
+
+            val setsFromJson = (obj?.get("exerciseSets") as? kotlinx.serialization.json.JsonArray)?.mapIndexedNotNull { idx, el ->
+                val so = el as? kotlinx.serialization.json.JsonObject ?: return@mapIndexedNotNull null
+                fun sDbl(k: String) = so[k]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.doubleOrNull }
+                fun sInt(k: String) = sDbl(k)?.toInt()
+                fun sStr(k: String) = so[k]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }
+
+                val setTypeRaw = sStr("setType") ?: sStr("type") ?: if ((sInt("repetitionCount") ?: 0) > 0) "ACTIVE" else "REST"
+                val setType = if (setTypeRaw.equals("REST", ignoreCase = true)) "REST" else "ACTIVE"
+                val reps = sInt("repetitionCount") ?: sInt("reps")
+                val rawWeight = sDbl("weight")
+                val weightKg = rawWeight?.let { if (it > 500.0) it / 1000.0 else it }
+                val durationS = sDbl("duration") ?: sDbl("durationInSeconds")
+                val cat = sStr("exerciseCategory") ?: sStr("category")
+                val name = sStr("exerciseName") ?: sStr("name")
+                val startMsSet = sDbl("startTime")?.toLong() ?: sDbl("startTimeGMT")?.toLong()
+                val stepIdx = sInt("wktStepIndex")
+
+                app.pulse4.domain.StrengthSet(
+                    index = idx + 1,
+                    setType = setType,
+                    reps = reps,
+                    weightKg = weightKg,
+                    durationS = durationS,
+                    exerciseCategory = cat,
+                    exerciseName = name,
+                    startUtcMs = startMsSet,
+                    wktStepIndex = stepIdx
+                )
+            }.orEmpty()
+
+            val finalStrengthSets = if (parsed?.strengthSets?.isNotEmpty() == true) {
+                if (setsFromJson.isNotEmpty() && setsFromJson.size == parsed.strengthSets.size) {
+                    parsed.strengthSets.mapIndexed { i, ps ->
+                        val js = setsFromJson[i]
+                        ps.copy(
+                            exerciseName = js.exerciseName ?: ps.exerciseName,
+                            exerciseCategory = js.exerciseCategory ?: ps.exerciseCategory
+                        )
+                    }
+                } else parsed.strengthSets
+            } else setsFromJson
+
+            val activeSets = finalStrengthSets.filter { it.isActive }
+            val computedTotalVolumeKg = activeSets.sumOf { it.volumeKg }.takeIf { it > 0.0 }
+            val computedTotalReps = activeSets.sumOf { it.reps ?: 0 }.takeIf { it > 0 }
+            val computedActiveSetsCount = activeSets.size.takeIf { it > 0 }
+            val computedWorkDurationS = activeSets.sumOf { it.durationS ?: 0.0 }.takeIf { it > 0.0 }
+            val computedRestDurationS = finalStrengthSets.filter { it.isRest }.sumOf { it.durationS ?: 0.0 }.takeIf { it > 0.0 }
+
+            val totalVolumeKg = dbl("totalVolume")?.let { if (it > 5000.0) it / 1000.0 else it } ?: computedTotalVolumeKg
+            val totalReps = int("totalReps") ?: int("repetitionCount") ?: parsed?.totalReps ?: computedTotalReps
+            val activeSetsCount = int("activeSets") ?: int("activeSetsCount") ?: computedActiveSetsCount
+            val workDurationS = dbl("totalWorkDuration") ?: dbl("totalExerciseDuration") ?: computedWorkDurationS
+            val restDurationS = dbl("totalRestDuration") ?: dbl("totalRestTime") ?: computedRestDurationS
+
+            val finalSport = if (sport == app.pulse4.domain.Sport.OTHER && finalStrengthSets.isNotEmpty()) {
+                app.pulse4.domain.Sport.STRENGTH
+            } else sport
+
+            val totalStrokes = int("totalStrokes") ?: int("strokes") ?: parsed?.totalStrokes
+            val avgSwolf = int("avgSwolf") ?: int("averageSwolf") ?: parsed?.avgSwolf
+            val poolLengthM = dbl("poolLength") ?: parsed?.poolLengthM
+            val swimStroke = str("swimStroke")
+
+            return Activity(
+                id = id,
+                provider = provider,
+                accountId = accountId,
+                externalId = extId,
+                sport = finalSport,
+                startUtcMs = startMs,
+                zoneId = zoneId,
+                totalTimeS = dur,
+                movingTimeS = moving,
+                distanceM = dist,
+                ascentM = ascent,
+                avgHeartRate = avgHr,
+                maxHeartRate = maxHr,
+                title = str("activityName"),
+                locationName = str("locationName"),
+                descentM = descent,
+                minElevationM = minEle,
+                maxElevationM = maxEle,
+                avgElevationM = avgEle,
+                avgSpeedMps = dbl("averageSpeed") ?: parsed?.avgSpeedMps,
+                maxSpeedMps = dbl("maxSpeed") ?: parsed?.maxSpeedMps,
+                avgGradeAdjustedSpeedMps = dbl("avgGradeAdjustedSpeed"),
+                caloriesKcal = dbl("calories") ?: parsed?.caloriesKcal,
+                bmrCaloriesKcal = dbl("bmrCalories"),
+                waterEstimatedMl = dbl("waterEstimated"),
+                steps = int("steps") ?: parsed?.steps,
+                avgCadence = dbl("averageRunningCadenceInStepsPerMinute") ?: dbl("averageBikingCadenceInRevPerMinute") ?: parsed?.avgCadence,
+                maxCadence = dbl("maxRunningCadenceInStepsPerMinute") ?: dbl("maxBikingCadenceInRevPerMinute") ?: dbl("maxDoubleCadence") ?: parsed?.maxCadence,
+                avgPowerW = dbl("avgPower") ?: parsed?.avgPowerW,
+                maxPowerW = dbl("maxPower") ?: parsed?.maxPowerW,
+                normPowerW = dbl("normPower") ?: parsed?.normPowerW,
+                avgStrideLengthCm = dbl("avgStrideLength") ?: parsed?.avgStrideLengthCm,
+                avgVerticalOscillationCm = dbl("avgVerticalOscillation") ?: parsed?.avgVerticalOscillationCm,
+                avgGroundContactTimeMs = dbl("avgGroundContactTime") ?: parsed?.avgGroundContactTimeMs,
+                avgVerticalRatioPct = dbl("avgVerticalRatio") ?: parsed?.avgVerticalRatioPct,
+                aerobicTrainingEffect = dbl("aerobicTrainingEffect") ?: parsed?.aerobicTrainingEffect,
+                anaerobicTrainingEffect = dbl("anaerobicTrainingEffect") ?: parsed?.anaerobicTrainingEffect,
+                trainingEffectLabel = str("trainingEffectLabel"),
+                aerobicTrainingEffectMessage = str("aerobicTrainingEffectMessage"),
+                anaerobicTrainingEffectMessage = str("anaerobicTrainingEffectMessage"),
+                trainingLoad = dbl("activityTrainingLoad"),
+                moderateIntensityMinutes = int("moderateIntensityMinutes"),
+                vigorousIntensityMinutes = int("vigorousIntensityMinutes"),
+                bodyBatteryImpact = int("differenceBodyBattery"),
+                fastestSplit1kS = dbl("fastestSplit_1000"),
+                fastestSplit1miS = dbl("fastestSplit_1609"),
+                fastestSplit5kS = dbl("fastestSplit_5000"),
+                hrZoneTimesS = hrZones,
+                powerZoneTimesS = pwrZones,
+                laps = lapsList,
+                splits = splitsList,
+                strengthSets = finalStrengthSets,
+                totalVolumeKg = totalVolumeKg,
+                totalReps = totalReps,
+                activeSetsCount = activeSetsCount,
+                workDurationS = workDurationS,
+                restDurationS = restDurationS,
+                totalStrokes = totalStrokes,
+                avgSwolf = avgSwolf,
+                poolLengthM = poolLengthM,
+                swimStroke = swimStroke,
+            )
+        }
+
+        internal fun importParsedFitSessions(
+            parsed: FitResult.Ok,
+            hash: String,
+            nowMs: Long,
+            garminObj: kotlinx.serialization.json.JsonObject? = null,
+            targetId: String? = null,
+            store: ActivityImportStore,
+            accountId: String,
+            zoneId: String,
+        ): FitImportResult {
+            val actId = garminObj?.get("activityId")?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }
+            val baseId = targetId ?: if (actId != null) "garmin-$actId" else "fit-$hash"
+            val baseExtId = actId ?: baseId.removePrefix("garmin-").takeIf { baseId.startsWith("garmin-") } ?: hash
+            val prov = if (garminObj != null || baseId.startsWith("garmin-")) Provider.GARMIN_PERSONAL else Provider.MANUAL
+            val trackSerializer = kotlinx.serialization.builtins.ListSerializer(TrackPoint.serializer())
+
+            store.inTransaction {
+                if (parsed.sessions.size <= 1) {
+                    val session = parsed.sessions.first()
+                    val existing = store.get(baseId)
+                    if (existing != null && targetId != null) {
+                        if (session.points.isNotEmpty()) {
+                            store.upsertTrack(TrackRow(baseId, json.encodeToString(trackSerializer, session.points)))
+                        }
+                        return@inTransaction
+                    }
+                    val a = buildActivityFromGarminAndFit(
+                        id = baseId,
+                        provider = prov,
+                        extId = baseExtId,
+                        obj = garminObj,
+                        parsed = session,
+                        nowMs = nowMs,
+                        accountId = accountId,
+                        zoneId = zoneId,
+                    )
+                    store.upsert(a.toRow(json.encodeToString(Activity.serializer(), a)))
+                    if (session.points.isNotEmpty()) {
+                        store.upsertTrack(TrackRow(baseId, json.encodeToString(trackSerializer, session.points)))
+                    }
+                } else {
+                    // Multisport: zachováme rodiče `baseId` se souhrnem Garminu (nebo součtem ručního FIT)
+                    // a jednotlivé úseky uložíme jako podřízené záznamy `-s1..-sN` (RE-4).
+                    val existingParent = store.get(baseId)
+                    if (existingParent == null) {
+                        val parentAct = if (garminObj != null) {
+                            buildActivityFromGarminAndFit(
+                                id = baseId,
+                                provider = prov,
+                                extId = baseExtId,
+                                obj = garminObj,
+                                parsed = null,
+                                nowMs = nowMs,
+                                accountId = accountId,
+                                zoneId = zoneId,
+                            )
+                        } else {
+                            val firstSession = parsed.sessions.first()
+                            val totalTimeS = parsed.sessions.sumOf { it.totalTimeS }
+                            val movingTimeS = parsed.sessions.mapNotNull { it.movingTimeS }.takeIf { it.isNotEmpty() }?.sum()
+                            val distanceM = parsed.sessions.mapNotNull { it.distanceM }.takeIf { it.isNotEmpty() }?.sum()
+                            val ascentM = parsed.sessions.mapNotNull { it.ascentM }.takeIf { it.isNotEmpty() }?.sum()
+                            val descentM = parsed.sessions.mapNotNull { it.descentM }.takeIf { it.isNotEmpty() }?.sum()
+                            val caloriesKcal = parsed.sessions.mapNotNull { it.caloriesKcal }.takeIf { it.isNotEmpty() }?.sum()
+                            Activity(
+                                id = baseId,
+                                provider = prov,
+                                accountId = accountId,
+                                externalId = baseExtId,
+                                sport = Sport.OTHER,
+                                startUtcMs = firstSession.startMs,
+                                zoneId = zoneId,
+                                totalTimeS = totalTimeS,
+                                movingTimeS = movingTimeS ?: totalTimeS,
+                                distanceM = distanceM,
+                                ascentM = ascentM,
+                                descentM = descentM,
+                                caloriesKcal = caloriesKcal,
+                                title = "Multisport (${parsed.sessions.size} úseky)",
+                            )
+                        }
+                        store.upsert(parentAct.toRow(json.encodeToString(Activity.serializer(), parentAct)))
+                    }
+
+                    val allPoints = parsed.sessions.flatMap { it.points }.sortedBy { it.tMs }
+                    if (allPoints.isNotEmpty()) {
+                        store.upsertTrack(TrackRow(baseId, json.encodeToString(trackSerializer, allPoints)))
+                    }
+
+                    val parentTitle = existingParent?.title?.takeIf { it.isNotBlank() }
+                        ?: garminObj?.get("activityName")?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { p -> p.content != "null" }?.content }
+                    val legIds = multisportLegIds(baseId, baseExtId, parsed.sessions.size)
+                    for ((idx, session) in parsed.sessions.withIndex()) {
+                        val (legId, legExtId) = legIds[idx]
+                        val legTitle = if (!parentTitle.isNullOrBlank()) {
+                            "$parentTitle · ${idx + 1}. ${session.sport.czechName()}"
+                        } else {
+                            "${idx + 1}. ${session.sport.czechName()}"
+                        }
+                        val legAct = buildActivityFromGarminAndFit(
+                            id = legId,
+                            provider = prov,
+                            extId = legExtId,
+                            obj = null,
+                            parsed = session,
+                            nowMs = nowMs,
+                            accountId = accountId,
+                            zoneId = zoneId,
+                        ).copy(
+                            title = legTitle,
+                            tags = setOf("multisport-leg", "parent:$baseId"),
+                        )
+                        store.upsert(legAct.toRow(json.encodeToString(Activity.serializer(), legAct)))
+                        if (session.points.isNotEmpty()) {
+                            store.upsertTrack(TrackRow(legId, json.encodeToString(trackSerializer, session.points)))
+                        }
+                    }
+                }
+            }
+            return FitImportResult.Imported(baseId)
+        }
+
+        internal fun ensureActivityTrackWith(
+            actKey: String,
+            store: ActivityImportStore,
+            hasSession: Boolean,
+            downloadFit: (String) -> ByteArray?,
+            fetchDetailsJson: (String) -> String,
+            nowMs: Long,
+            accountId: String,
+            zoneId: String,
+            sealFit: (String, ByteArray) -> Unit = { _, _ -> },
+        ): Boolean {
+            if (isMultisportLegId(actKey)) return false
+            if (store.track(actKey) != null) return true
+            val actId = actKey.removePrefix("garmin-")
+            if (!hasSession) return false
+            return runCatching {
+                val rawFit = downloadFit(actId)
+                if (rawFit != null && rawFit.isNotEmpty()) {
+                    val fit = extractFitFromZipOrRaw(rawFit)
+                    if (fit != null) {
+                        val hash = MessageDigest.getInstance("SHA-256").digest(fit).joinToString("") { "%02x".format(it) }
+                        sealFit(hash, fit)
+                        val parsed = FitImporter.parse(fit)
+                        if (parsed is FitResult.Ok &&
+                            importParsedFitSessions(
+                                parsed = parsed,
+                                hash = hash,
+                                nowMs = nowMs,
+                                garminObj = null,
+                                targetId = actKey,
+                                store = store,
+                                accountId = accountId,
+                                zoneId = zoneId,
+                            ) is FitImportResult.Imported
+                        ) {
+                            return@runCatching true
+                        }
+                    }
+                }
+                val detailsJson = fetchDetailsJson(actId)
+                if (detailsJson.isNotBlank()) {
+                    val gpsPoints = parseGarminDetailsGpsPoints(detailsJson)
+                    if (gpsPoints.isNotEmpty()) {
+                        store.upsertTrack(
+                            TrackRow(
+                                actKey,
+                                json.encodeToString(
+                                    kotlinx.serialization.builtins.ListSerializer(app.pulse4.domain.TrackPoint.serializer()),
+                                    gpsPoints
+                                )
+                            )
+                        )
+                        return@runCatching true
+                    }
+                }
+                false
+            }.getOrDefault(false)
+        }
+
+        internal fun syncGarminActivityElements(
+            allActivityElements: List<kotlinx.serialization.json.JsonElement>,
+            isInitialSync: Boolean,
+            nowMs: Long,
+            store: ActivityImportStore,
+            accountId: String,
+            zoneId: String,
+            downloadFit: (String) -> ByteArray?,
+            fetchDetailsJson: (String) -> String,
+            sealFit: (String, ByteArray) -> Unit = { _, _ -> },
+            throttleMs: Long = 0L,
+        ): Pair<Int, Long?> {
+            var imported = 0
+            var latestTimestampMs: Long? = null
+            val activitiesToSave = mutableListOf<ActivityRow>()
+
+            for (elem in allActivityElements) {
+                val obj = (elem as? kotlinx.serialization.json.JsonObject) ?: continue
+                val actId = obj["activityId"]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content } ?: continue
+                val actKey = "garmin-$actId"
+                val existingGarmin = store.get(actKey)
+
+                if (existingGarmin == null) {
+                    val act = buildActivityFromGarminAndFit(
+                        id = actKey,
+                        provider = Provider.GARMIN_PERSONAL,
+                        extId = actId,
+                        obj = obj,
+                        parsed = null,
+                        nowMs = nowMs,
+                        accountId = accountId,
+                        zoneId = zoneId,
+                    )
+                    activitiesToSave.add(act.toRow(json.encodeToString(Activity.serializer(), act)))
+                    if (latestTimestampMs == null || act.startUtcMs > latestTimestampMs) {
+                        latestTimestampMs = act.startUtcMs
+                    }
+                } else {
+                    imported++
+                }
+            }
+
+            val alreadyExistedIds = allActivityElements.mapNotNull { elem ->
+                val actId = (elem as? kotlinx.serialization.json.JsonObject)?.get("activityId")
+                    ?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }
+                actId?.let { "garmin-$it" }?.takeIf { store.get(it) != null }
+            }.toHashSet()
+
+            if (activitiesToSave.isNotEmpty()) {
+                store.inTransaction {
+                    for (row in activitiesToSave) {
+                        store.upsert(row)
+                    }
+                }
+                imported += activitiesToSave.size
+            }
+
+            val maxImmediateFitDownloads = if (isInitialSync) 15 else 30
+            var fitDownloadsCount = 0
+
+            for (elem in allActivityElements) {
+                if (fitDownloadsCount >= maxImmediateFitDownloads) break
+                val obj = (elem as? kotlinx.serialization.json.JsonObject) ?: continue
+                val actId = obj["activityId"]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content } ?: continue
+                val actKey = "garmin-$actId"
+                if (store.track(actKey) != null || (!isInitialSync && actKey in alreadyExistedIds)) continue
+
+                var fitImported = false
+                val dlBytes = downloadFit(actId)
+                if (dlBytes != null && dlBytes.isNotEmpty()) {
+                    val fit = extractFitFromZipOrRaw(dlBytes)
+                    if (fit != null) {
+                        val hash = MessageDigest.getInstance("SHA-256").digest(fit).joinToString("") { "%02x".format(it) }
+                        sealFit(hash, fit)
+                        val parsed = FitImporter.parse(fit)
+                        if (parsed is FitResult.Ok &&
+                            importParsedFitSessions(
+                                parsed = parsed,
+                                hash = hash,
+                                nowMs = nowMs,
+                                garminObj = obj,
+                                targetId = null,
+                                store = store,
+                                accountId = accountId,
+                                zoneId = zoneId,
+                            ) is FitImportResult.Imported
+                        ) {
+                            fitImported = true
+                        }
+                    }
+                }
+
+                if (!fitImported && store.track(actKey) == null) {
+                    val detailsJson = fetchDetailsJson(actId)
+                    if (detailsJson.isNotBlank()) {
+                        val gpsPoints = parseGarminDetailsGpsPoints(detailsJson)
+                        if (gpsPoints.isNotEmpty()) {
+                            store.upsertTrack(
+                                TrackRow(
+                                    actKey,
+                                    json.encodeToString(
+                                        kotlinx.serialization.builtins.ListSerializer(app.pulse4.domain.TrackPoint.serializer()),
+                                        gpsPoints
+                                    )
+                                )
+                            )
+                        }
+                    }
+                }
+
+                fitDownloadsCount++
+                if (throttleMs > 0L) {
+                    try { Thread.sleep(throttleMs) } catch (_: InterruptedException) {}
+                }
+            }
+            return imported to latestTimestampMs
+        }
+    }
 
     private fun config(): GarminEndpointsConfig =
         GarminEndpointsConfig.parse(context.assets.open("garmin_endpoints.json").bufferedReader().use { it.readText() })
@@ -372,6 +1057,12 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
             }
         }
         val garminStates = RoomAreaStateStore(sl.db)
+        if (settings.getRaw("migration.bb_dedup_v1") != "true") {
+            runCatching {
+                deduplicateBodyBatteryRows(sl.db)
+                settings.put("migration.bb_dedup_v1", "true")
+            }
+        }
         val areaCheckMetrics = mapOf(
             SyncArea.SLEEP to app.pulse4.domain.MetricType.SLEEP_DURATION,
             SyncArea.HRV to app.pulse4.domain.MetricType.HRV,
@@ -434,6 +1125,39 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
         res?.plus(SyncArea.ACTIVITIES to actRes)
     }
 
+    internal fun deduplicateBodyBatteryRows(db: AppDatabase) {
+        val rows = db.observations().forTypeInRange(MetricType.BODY_BATTERY.name, "1970-01-01", "2999-12-31")
+        if (rows.isEmpty()) return
+        val toDelete = ArrayList<String>()
+        val toUpsert = ArrayList<ObservationRow>()
+        val grouped = rows.filter { !it.localDate.isNullOrBlank() }
+            .groupBy { Triple(it.provider, it.accountId, it.localDate!!) }
+        for ((key, group) in grouped) {
+            val (providerName, accountId, localDate) = key
+            if (providerName != Provider.GARMIN_PERSONAL.name) continue
+            val canonicalId = app.pulse4.domain.ImportKey.of(
+                Provider.GARMIN_PERSONAL,
+                accountId,
+                null,
+                listOf(MetricType.BODY_BATTERY.name, localDate),
+            )
+            val newest = group.maxWithOrNull(
+                compareBy<ObservationRow> { it.endUtcMs ?: it.startUtcMs }.thenBy { it.startUtcMs }
+            ) ?: continue
+            val dupIds = group.map { it.id }.filter { it != canonicalId }
+            if (dupIds.isNotEmpty()) {
+                toUpsert += newest.copy(id = canonicalId)
+                toDelete += dupIds
+            }
+        }
+        if (toUpsert.isNotEmpty() || toDelete.isNotEmpty()) {
+            db.runInTransaction {
+                toDelete.chunked(500).forEach { db.observations().markDeleted(it) }
+                if (toUpsert.isNotEmpty()) db.observations().upsert(toUpsert)
+            }
+        }
+    }
+
     /** Kompletní vymazání všech testovacích dat a reset aktivit k čistému opětovnému stažení. */
     fun clearTestDataAndResetActivities() {
         sl.db.runInTransaction {
@@ -452,291 +1176,6 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
         runCatching {
             File(context.noBackupFilesDir, "fit").listFiles()?.forEach { it.delete() }
         }
-    }
-
-    internal fun extractFitFromZipOrRaw(bytes: ByteArray): ByteArray? {
-        val maxFitBytes = 25 * 1024 * 1024
-        val maxZipEntries = 32
-        if (bytes.size < 4 || bytes.size > maxFitBytes) return null
-        if (bytes[0] == 0x50.toByte() && bytes[1] == 0x4B.toByte()) {
-            java.util.zip.ZipInputStream(java.io.ByteArrayInputStream(bytes)).use { zis ->
-                var entries = 0
-                var entry = zis.nextEntry
-                while (entry != null && entries < maxZipEntries) {
-                    entries++
-                    if (!entry.isDirectory && entry.name.endsWith(".fit", ignoreCase = true)) {
-                        val out = java.io.ByteArrayOutputStream()
-                        val buf = ByteArray(8192)
-                        var total = 0
-                        while (true) {
-                            val n = zis.read(buf)
-                            if (n <= 0) break
-                            total += n
-                            if (total > maxFitBytes) return null
-                            out.write(buf, 0, n)
-                        }
-                        return out.toByteArray()
-                    }
-                    entry = zis.nextEntry
-                }
-            }
-            return null
-        }
-        if (bytes.size > 14) {
-            val tag = String(bytes.sliceArray(8..11), Charsets.US_ASCII)
-            if (tag == ".FIT") return bytes
-        }
-        return null
-    }
-
-    internal fun buildActivityFromGarminAndFit(
-        id: String,
-        provider: Provider,
-        extId: String?,
-        obj: kotlinx.serialization.json.JsonObject?,
-        parsed: app.pulse4.fit.ParsedFit?,
-        nowMs: Long,
-    ): Activity {
-        fun str(k: String): String? = obj?.get(k)?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { p -> p.content != "null" }?.content }
-        fun dbl(k: String): Double? = obj?.get(k)?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.doubleOrNull }?.takeIf { it.isFinite() }
-        fun int(k: String): Int? = dbl(k)?.toInt()
-
-        val activityTypeObj = obj?.get("activityType") as? kotlinx.serialization.json.JsonObject
-        val typeKey = activityTypeObj?.get("typeKey")?.let { tk -> (tk as? kotlinx.serialization.json.JsonPrimitive)?.content }
-        val parentTypeId = activityTypeObj?.get("parentTypeId")?.let { pt -> (pt as? kotlinx.serialization.json.JsonPrimitive)?.doubleOrNull?.toInt() }
-        val sportFromObj = when (typeKey?.lowercase()) {
-            "running", "trail_running", "treadmill_running", "track_running",
-            "street_running", "ultra_run", "virtual_run", "indoor_running", "obstacle_run" -> app.pulse4.domain.Sport.RUNNING
-            "cycling", "road_biking", "gravel_cycling", "mountain_biking", "indoor_cycling",
-            "virtual_ride", "cyclocross", "e_bike_mountain", "e_bike_fitness", "bmx",
-            "recumbent_cycling", "track_cycling" -> app.pulse4.domain.Sport.CYCLING
-            "swimming", "lap_swimming", "open_water_swimming", "pool_swimming",
-            "stand_up_paddleboarding_v2", "kayaking_v2", "rowing_v2", "indoor_rowing" -> app.pulse4.domain.Sport.SWIMMING
-            "walking", "casual_walking", "speed_walking", "indoor_walking" -> app.pulse4.domain.Sport.WALKING
-            "hiking", "mountaineering", "rock_climbing", "bouldering",
-            "snowshoe_ws", "backcountry_skiing_snowboarding_ws" -> app.pulse4.domain.Sport.HIKING
-            "strength_training", "fitness_equipment", "hiit", "indoor_cardio",
-            "cardio_training", "elliptical", "stair_climbing", "yoga", "pilates",
-            "breathwork", "mobility" -> app.pulse4.domain.Sport.STRENGTH
-            else -> when (parentTypeId) {
-                1 -> app.pulse4.domain.Sport.RUNNING
-                2 -> app.pulse4.domain.Sport.CYCLING
-                3 -> app.pulse4.domain.Sport.HIKING
-                26 -> app.pulse4.domain.Sport.SWIMMING
-                29 -> app.pulse4.domain.Sport.STRENGTH
-                else -> null
-            }
-        }
-        val sport = sportFromObj ?: parsed?.sport ?: app.pulse4.domain.Sport.OTHER
-        val startMs = parsed?.startMs ?: runCatching {
-            val s = str("startTimeGMT")
-            if (s != null) java.time.LocalDateTime.parse(s.replace(' ', 'T')).toInstant(java.time.ZoneOffset.UTC).toEpochMilli()
-            else dbl("beginTimestamp")?.toLong()
-        }.getOrNull() ?: nowMs
-
-        val dur = dbl("duration") ?: dbl("elapsedDuration") ?: parsed?.totalTimeS ?: 0.0
-        val moving = dbl("movingDuration") ?: parsed?.movingTimeS ?: dur
-        val dist = dbl("distance") ?: parsed?.distanceM
-        val ascent = dbl("elevationGain") ?: parsed?.ascentM
-        val descent = dbl("elevationLoss") ?: parsed?.descentM
-        val avgHr = int("averageHR") ?: parsed?.avgHeartRate
-        val maxHr = int("maxHR") ?: parsed?.maxHeartRate
-
-        val pts = parsed?.points.orEmpty()
-        val eles = pts.mapNotNull { it.elevationM }
-        val minEle = dbl("minElevation") ?: eles.minOrNull()
-        val maxEle = dbl("maxElevation") ?: eles.maxOrNull()
-        val avgEle = dbl("avgElevation") ?: eles.takeIf { it.isNotEmpty() }?.average()
-
-        val hrZonesFromJson = (1..5).mapNotNull { z -> dbl("hrTimeInZone_$z") }
-        val hrZones = if (hrZonesFromJson.size == 5 && hrZonesFromJson.any { it > 0.0 }) {
-            hrZonesFromJson
-        } else if (pts.size >= 2 && pts.any { it.heartRate != null }) {
-            val maxRef = (maxHr ?: 185).coerceAtLeast(150).toDouble()
-            val bounds = listOf(maxRef * 0.60, maxRef * 0.70, maxRef * 0.80, maxRef * 0.90)
-            app.pulse4.analytics.Zones.timeInZones(
-                pts.map { it.tMs to it.heartRate?.toDouble() },
-                app.pulse4.analytics.Zones.ZoneSet(bounds)
-            ).toList()
-        } else emptyList()
-
-        val pwrZonesFromJson = (1..5).mapNotNull { z -> dbl("powerTimeInZone_$z") }
-        val pwrZones = if (pwrZonesFromJson.size == 5 && pwrZonesFromJson.any { it > 0.0 }) {
-            pwrZonesFromJson
-        } else emptyList()
-
-        val lapsList = if (parsed != null && parsed.laps.isNotEmpty()) {
-            parsed.laps.mapIndexed { idx, l ->
-                val lDur = ((l.endMs - l.startMs) / 1000.0).coerceAtLeast(1.0)
-                app.pulse4.domain.ActivityLap(
-                    index = idx + 1,
-                    startUtcMs = l.startMs,
-                    endUtcMs = l.endMs,
-                    durationS = lDur,
-                    distanceM = l.distanceM,
-                    avgHeartRate = l.avgHeartRate,
-                    maxHeartRate = l.maxHeartRate,
-                    avgSpeedMps = l.avgSpeedMps ?: l.distanceM?.let { it / lDur },
-                    maxSpeedMps = l.maxSpeedMps,
-                    ascentM = l.ascentM,
-                    descentM = l.descentM,
-                    avgCadence = l.avgCadence,
-                    avgPowerW = l.avgPowerW,
-                    caloriesKcal = l.caloriesKcal,
-                )
-            }
-        } else emptyList()
-
-        val splitsList = (obj?.get("splitSummaries") as? kotlinx.serialization.json.JsonArray)?.mapNotNull { el ->
-            val so = el as? kotlinx.serialization.json.JsonObject ?: return@mapNotNull null
-            fun sDbl(k: String) = so[k]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.doubleOrNull }
-            fun sStr(k: String) = so[k]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }
-            val st = sStr("splitType") ?: return@mapNotNull null
-            val sDur = sDbl("duration") ?: return@mapNotNull null
-            app.pulse4.domain.ActivitySplitSummary(
-                splitType = st,
-                noOfSplits = sDbl("noOfSplits")?.toInt() ?: 1,
-                durationS = sDur,
-                distanceM = sDbl("distance"),
-                avgSpeedMps = sDbl("averageSpeed"),
-                maxSpeedMps = sDbl("maxSpeed"),
-                ascentM = sDbl("totalAscent"),
-                descentM = sDbl("elevationLoss"),
-                avgCadence = sDbl("avgStepFrequency"),
-                avgStrideLengthCm = sDbl("avgStepLength")?.let { if (it < 5.0) it * 100.0 else it },
-                avgVerticalOscillationCm = sDbl("verticalOscillation"),
-                avgGroundContactTimeMs = sDbl("avgGroundContactTime"),
-                avgVerticalRatioPct = sDbl("verticalRatio"),
-            )
-        }.orEmpty()
-
-        val setsFromJson = (obj?.get("exerciseSets") as? kotlinx.serialization.json.JsonArray)?.mapIndexedNotNull { idx, el ->
-            val so = el as? kotlinx.serialization.json.JsonObject ?: return@mapIndexedNotNull null
-            fun sDbl(k: String) = so[k]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.doubleOrNull }
-            fun sInt(k: String) = sDbl(k)?.toInt()
-            fun sStr(k: String) = so[k]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }
-
-            val setTypeRaw = sStr("setType") ?: sStr("type") ?: if ((sInt("repetitionCount") ?: 0) > 0) "ACTIVE" else "REST"
-            val setType = if (setTypeRaw.equals("REST", ignoreCase = true)) "REST" else "ACTIVE"
-            val reps = sInt("repetitionCount") ?: sInt("reps")
-            val rawWeight = sDbl("weight")
-            val weightKg = rawWeight?.let { if (it > 500.0) it / 1000.0 else it }
-            val durationS = sDbl("duration") ?: sDbl("durationInSeconds")
-            val cat = sStr("exerciseCategory") ?: sStr("category")
-            val name = sStr("exerciseName") ?: sStr("name")
-            val startMsSet = sDbl("startTime")?.toLong() ?: sDbl("startTimeGMT")?.toLong()
-            val stepIdx = sInt("wktStepIndex")
-
-            app.pulse4.domain.StrengthSet(
-                index = idx + 1,
-                setType = setType,
-                reps = reps,
-                weightKg = weightKg,
-                durationS = durationS,
-                exerciseCategory = cat,
-                exerciseName = name,
-                startUtcMs = startMsSet,
-                wktStepIndex = stepIdx
-            )
-        }.orEmpty()
-
-        val finalStrengthSets = if (parsed?.strengthSets?.isNotEmpty() == true) {
-            if (setsFromJson.isNotEmpty() && setsFromJson.size == parsed.strengthSets.size) {
-                parsed.strengthSets.mapIndexed { i, ps ->
-                    val js = setsFromJson[i]
-                    ps.copy(
-                        exerciseName = js.exerciseName ?: ps.exerciseName,
-                        exerciseCategory = js.exerciseCategory ?: ps.exerciseCategory
-                    )
-                }
-            } else parsed.strengthSets
-        } else setsFromJson
-
-        val activeSets = finalStrengthSets.filter { it.isActive }
-        val computedTotalVolumeKg = activeSets.sumOf { it.volumeKg }.takeIf { it > 0.0 }
-        val computedTotalReps = activeSets.sumOf { it.reps ?: 0 }.takeIf { it > 0 }
-        val computedActiveSetsCount = activeSets.size.takeIf { it > 0 }
-        val computedWorkDurationS = activeSets.sumOf { it.durationS ?: 0.0 }.takeIf { it > 0.0 }
-        val computedRestDurationS = finalStrengthSets.filter { it.isRest }.sumOf { it.durationS ?: 0.0 }.takeIf { it > 0.0 }
-
-        val totalVolumeKg = dbl("totalVolume")?.let { if (it > 5000.0) it / 1000.0 else it } ?: computedTotalVolumeKg
-        val totalReps = int("totalReps") ?: int("repetitionCount") ?: parsed?.totalReps ?: computedTotalReps
-        val activeSetsCount = int("activeSets") ?: int("activeSetsCount") ?: computedActiveSetsCount
-        val workDurationS = dbl("totalWorkDuration") ?: dbl("totalExerciseDuration") ?: computedWorkDurationS
-        val restDurationS = dbl("totalRestDuration") ?: dbl("totalRestTime") ?: computedRestDurationS
-
-        val finalSport = if (sport == app.pulse4.domain.Sport.OTHER && finalStrengthSets.isNotEmpty()) {
-            app.pulse4.domain.Sport.STRENGTH
-        } else sport
-
-        val totalStrokes = int("totalStrokes") ?: int("strokes") ?: parsed?.totalStrokes
-        val avgSwolf = int("avgSwolf") ?: int("averageSwolf") ?: parsed?.avgSwolf
-        val poolLengthM = dbl("poolLength") ?: parsed?.poolLengthM
-        val swimStroke = str("swimStroke")
-
-        return Activity(
-            id = id,
-            provider = provider,
-            accountId = sl.settings.accountId,
-            externalId = extId,
-            sport = finalSport,
-            startUtcMs = startMs,
-            zoneId = sl.settings.zoneId,
-            totalTimeS = dur,
-            movingTimeS = moving,
-            distanceM = dist,
-            ascentM = ascent,
-            avgHeartRate = avgHr,
-            maxHeartRate = maxHr,
-            title = str("activityName"),
-            locationName = str("locationName"),
-            descentM = descent,
-            minElevationM = minEle,
-            maxElevationM = maxEle,
-            avgElevationM = avgEle,
-            avgSpeedMps = dbl("averageSpeed") ?: parsed?.avgSpeedMps,
-            maxSpeedMps = dbl("maxSpeed") ?: parsed?.maxSpeedMps,
-            avgGradeAdjustedSpeedMps = dbl("avgGradeAdjustedSpeed"),
-            caloriesKcal = dbl("calories") ?: parsed?.caloriesKcal,
-            bmrCaloriesKcal = dbl("bmrCalories"),
-            waterEstimatedMl = dbl("waterEstimated"),
-            steps = int("steps") ?: parsed?.steps,
-            avgCadence = dbl("averageRunningCadenceInStepsPerMinute") ?: dbl("averageBikingCadenceInRevPerMinute") ?: parsed?.avgCadence,
-            maxCadence = dbl("maxRunningCadenceInStepsPerMinute") ?: dbl("maxBikingCadenceInRevPerMinute") ?: dbl("maxDoubleCadence") ?: parsed?.maxCadence,
-            avgPowerW = dbl("avgPower") ?: parsed?.avgPowerW,
-            maxPowerW = dbl("maxPower") ?: parsed?.maxPowerW,
-            normPowerW = dbl("normPower") ?: parsed?.normPowerW,
-            avgStrideLengthCm = dbl("avgStrideLength") ?: parsed?.avgStrideLengthCm,
-            avgVerticalOscillationCm = dbl("avgVerticalOscillation") ?: parsed?.avgVerticalOscillationCm,
-            avgGroundContactTimeMs = dbl("avgGroundContactTime") ?: parsed?.avgGroundContactTimeMs,
-            avgVerticalRatioPct = dbl("avgVerticalRatio") ?: parsed?.avgVerticalRatioPct,
-            aerobicTrainingEffect = dbl("aerobicTrainingEffect") ?: parsed?.aerobicTrainingEffect,
-            anaerobicTrainingEffect = dbl("anaerobicTrainingEffect") ?: parsed?.anaerobicTrainingEffect,
-            trainingEffectLabel = str("trainingEffectLabel"),
-            aerobicTrainingEffectMessage = str("aerobicTrainingEffectMessage"),
-            anaerobicTrainingEffectMessage = str("anaerobicTrainingEffectMessage"),
-            trainingLoad = dbl("activityTrainingLoad"),
-            moderateIntensityMinutes = int("moderateIntensityMinutes"),
-            vigorousIntensityMinutes = int("vigorousIntensityMinutes"),
-            bodyBatteryImpact = int("differenceBodyBattery"),
-            fastestSplit1kS = dbl("fastestSplit_1000"),
-            fastestSplit1miS = dbl("fastestSplit_1609"),
-            fastestSplit5kS = dbl("fastestSplit_5000"),
-            hrZoneTimesS = hrZones,
-            powerZoneTimesS = pwrZones,
-            laps = lapsList,
-            splits = splitsList,
-            strengthSets = finalStrengthSets,
-            totalVolumeKg = totalVolumeKg,
-            totalReps = totalReps,
-            activeSetsCount = activeSetsCount,
-            workDurationS = workDurationS,
-            restDurationS = restDurationS,
-            totalStrokes = totalStrokes,
-            avgSwolf = avgSwolf,
-            poolLengthM = poolLengthM,
-            swimStroke = swimStroke,
-        )
     }
 
     /** Automaticky stáhne aktivity z oficiálního Garmin Personal API (nebo přihlášené relace Garmin Connect), stáhne FIT a uloží do DB. */
@@ -864,114 +1303,37 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
                 return@runCatching 0
             }
 
-            // FÁZE 1: Rychlé uložení souhrnných metadat všech aktivit (až 1000 aktivit) do Room DB.
-            // Běží bleskově v jedné transakci bez stahování velkých FIT souborů.
-            var imported = 0
-            var latestTimestampMs: Long? = null
-            val activitiesToSave = mutableListOf<app.pulse4.android.data.ActivityRow>()
-
-            for (elem in allActivityElements) {
-                val obj = (elem as? kotlinx.serialization.json.JsonObject) ?: continue
-                val actId = obj["activityId"]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content } ?: continue
-                val actKey = "garmin-$actId"
-                val existingGarmin = sl.db.activities().get(actKey)
-
-                if (existingGarmin == null) {
-                    val act = buildActivityFromGarminAndFit(
-                        id = actKey,
-                        provider = Provider.GARMIN_PERSONAL,
-                        extId = actId,
-                        obj = obj,
-                        parsed = null,
-                        nowMs = nowMs
-                    )
-                    activitiesToSave.add(act.toRow(json.encodeToString(Activity.serializer(), act)))
-                    if (latestTimestampMs == null || act.startUtcMs > latestTimestampMs!!) {
-                        latestTimestampMs = act.startUtcMs
+            val (imported, latestTimestampMs) = syncGarminActivityElements(
+                allActivityElements = allActivityElements,
+                isInitialSync = isInitialSync,
+                nowMs = nowMs,
+                store = roomActivityImportStore(),
+                accountId = sl.settings.accountId,
+                zoneId = sl.settings.zoneId,
+                downloadFit = { actId ->
+                    var dl: ByteArray? = null
+                    if (authHeader != null) {
+                        val downloadReq = okhttp3.Request.Builder()
+                            .url("${cfg.baseUrl.trimEnd('/')}/download-service/files/activity/$actId")
+                            .header(cfg.authHeader, authHeader)
+                            .get()
+                            .build()
+                        dl = runCatching { client.newCall(downloadReq).execute().use { it.body?.bytes() } }.getOrNull()
                     }
-                } else {
-                    imported++
-                }
-            }
-
-            val alreadyExistedIds = allActivityElements.mapNotNull { elem ->
-                val actId = (elem as? kotlinx.serialization.json.JsonObject)?.get("activityId")
-                    ?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }
-                actId?.let { "garmin-$it" }?.takeIf { sl.db.activities().get(it) != null }
-            }.toHashSet()
-
-            if (activitiesToSave.isNotEmpty()) {
-                sl.db.runInTransaction {
-                    for (row in activitiesToSave) {
-                        sl.db.activities().upsert(row)
+                    if ((dl == null || dl.isEmpty()) && hasExt) {
+                        dl = runCatching { sl.garminExt.downloadActivityFit(actId) }.getOrNull()
                     }
-                }
-                imported += activitiesToSave.size
-            }
-
-            // FÁZE 2: Progresivní stažení FIT souborů / GPS křivek pouze pro nejnovější N aktivit.
-            // Starší aktivity zůstávají v DB s kompletními souhrnnými daty a jejich GPS křivka se dotáhne
-            // na vyžádání (lazy) při rozkliknutí nebo na pozadí, čímž se zamezí zamrzání a limitům Garminu (HTTP 429).
-            val maxImmediateFitDownloads = if (isInitialSync) 15 else 30
-            var fitDownloadsCount = 0
-
-            for (elem in allActivityElements) {
-                if (fitDownloadsCount >= maxImmediateFitDownloads) break
-                val obj = (elem as? kotlinx.serialization.json.JsonObject) ?: continue
-                val actId = obj["activityId"]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content } ?: continue
-                val actKey = "garmin-$actId"
-                if (sl.db.activities().track(actKey) != null || (!isInitialSync && actKey in alreadyExistedIds)) continue
-
-                var fitImported = false
-                // 3a. Stažení FIT z gateway (pokud je dostupný authHeader)
-                if (authHeader != null) {
-                    val downloadReq = okhttp3.Request.Builder()
-                        .url("${cfg.baseUrl.trimEnd('/')}/download-service/files/activity/$actId")
-                        .header(cfg.authHeader, authHeader)
-                        .get()
-                        .build()
-                    val dlBytes = runCatching { client.newCall(downloadReq).execute().use { it.body?.bytes() } }.getOrNull()
-                    if (dlBytes != null && dlBytes.isNotEmpty()) {
-                        val fit = extractFitFromZipOrRaw(dlBytes)
-                        if (fit != null && importFit(fit, nowMs, garminObj = obj) is FitImportResult.Imported) {
-                            fitImported = true
-                        }
-                    }
-                }
-
-                // 3b. Stažení původního FIT přes přihlášenou relaci Garmin Connect
-                if (!fitImported && hasExt) {
-                    val rawExtFit = runCatching { sl.garminExt.downloadActivityFit(actId) }.getOrNull()
-                    if (rawExtFit != null && rawExtFit.isNotEmpty()) {
-                        val fit = extractFitFromZipOrRaw(rawExtFit)
-                        if (fit != null && importFit(fit, nowMs, garminObj = obj) is FitImportResult.Imported) {
-                            fitImported = true
-                        }
-                    }
-                }
-
-                // 3c. Fallback: Pokus o získání GPS křivky z detailů Garminu
-                if (!fitImported && hasExt && sl.db.activities().track(actKey) == null) {
-                    val detailsJson = runCatching { sl.garminExt.getActivityDetailsJson(actId) }.getOrDefault("")
-                    if (detailsJson.isNotBlank()) {
-                        val gpsPoints = parseGarminDetailsGpsPoints(detailsJson)
-                        if (gpsPoints.isNotEmpty()) {
-                            sl.db.activities().upsertTrack(
-                                TrackRow(
-                                    actKey,
-                                    json.encodeToString(
-                                        kotlinx.serialization.builtins.ListSerializer(app.pulse4.domain.TrackPoint.serializer()),
-                                        gpsPoints
-                                    )
-                                )
-                            )
-                        }
-                    }
-                }
-
-                fitDownloadsCount++
-                try { Thread.sleep(80) } catch (_: InterruptedException) {}
-            }
+                    dl
+                },
+                fetchDetailsJson = { actId ->
+                    if (hasExt) runCatching { sl.garminExt.getActivityDetailsJson(actId) }.getOrDefault("") else ""
+                },
+                sealFit = { hash, fit ->
+                    val dir = File(context.noBackupFilesDir, "fit").apply { mkdirs() }
+                    File(dir, "$hash.fit.enc").writeBytes(sl.vault.seal(fit))
+                },
+                throttleMs = 80L,
+            )
 
             val cursor = latestTimestampMs ?: prevState?.cursorMs ?: nowMs
             sl.db.areaStates().put(AreaStateRow(SyncArea.ACTIVITIES.name, cursor, nowMs, nowMs, null, null))
@@ -993,118 +1355,31 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
         }
     }
 
-    /** Na vyžádání (lazy) dotáhne FIT nebo GPS křivku pro zadanou aktivitu, pokud ji ještě nemá v lokální DB. */
-    fun ensureActivityTrack(actKey: String): Boolean {
-        if (sl.db.activities().track(actKey) != null) return true
-        val actId = actKey.removePrefix("garmin-")
-        val hasExt = sl.secrets.getString(SecretStore.GARMIN_EXT_TOKENS) != null
-        if (!hasExt) return false
-        return runCatching {
-            val rawFit = sl.garminExt.downloadActivityFit(actId)
-            if (rawFit != null && rawFit.isNotEmpty()) {
-                val fit = extractFitFromZipOrRaw(rawFit)
-                if (fit != null && importFit(fit, System.currentTimeMillis(), garminObj = null, targetId = actKey) is FitImportResult.Imported) {
-                    return@runCatching true
-                }
-            }
-            val detailsJson = sl.garminExt.getActivityDetailsJson(actId)
-            if (detailsJson.isNotBlank()) {
-                val gpsPoints = parseGarminDetailsGpsPoints(detailsJson)
-                if (gpsPoints.isNotEmpty()) {
-                    sl.db.activities().upsertTrack(
-                        TrackRow(
-                            actKey,
-                            json.encodeToString(
-                                kotlinx.serialization.builtins.ListSerializer(app.pulse4.domain.TrackPoint.serializer()),
-                                gpsPoints
-                            )
-                        )
-                    )
-                    return@runCatching true
-                }
-            }
-            false
-        }.getOrDefault(false)
+    private fun roomActivityImportStore(): ActivityImportStore = object : ActivityImportStore {
+        override fun get(id: String): ActivityRow? = sl.db.activities().get(id)
+        override fun track(id: String): TrackRow? = sl.db.activities().track(id)
+        override fun upsert(row: ActivityRow) = sl.db.activities().upsert(row)
+        override fun upsertTrack(row: TrackRow) = sl.db.activities().upsertTrack(row)
+        override fun inTransaction(block: () -> Unit) = sl.db.runInTransaction(block)
     }
 
-    /** Zpracuje GPS body a telemetrii z Garmin Connect activity details JSON. */
-    fun parseGarminDetailsGpsPoints(detailsJson: String): List<app.pulse4.domain.TrackPoint> {
-        return runCatching<List<app.pulse4.domain.TrackPoint>> {
-            val root = json.parseToJsonElement(detailsJson) as? kotlinx.serialization.json.JsonObject ?: return@runCatching emptyList()
-            // 1. Zkusit geoPolylineDTO
-            val polyline = root["geoPolylineDTO"]?.let { (it as? kotlinx.serialization.json.JsonObject)?.get("polyline") as? kotlinx.serialization.json.JsonArray }
-            if (polyline != null && polyline.isNotEmpty()) {
-                val pts = polyline.mapNotNull { elem ->
-                    val obj = elem as? kotlinx.serialization.json.JsonObject ?: return@mapNotNull null
-                    val lat = obj["lat"]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content?.toDoubleOrNull() } ?: return@mapNotNull null
-                    val lon = obj["lon"]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content?.toDoubleOrNull() } ?: return@mapNotNull null
-                    val alt = obj["altitude"]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content?.toDoubleOrNull() }
-                    val time = obj["time"]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content?.toLongOrNull() } ?: 0L
-                    app.pulse4.domain.TrackPoint(
-                        tMs = time,
-                        lat = lat,
-                        lon = lon,
-                        elevationM = alt,
-                        heartRate = null,
-                        speedMps = null,
-                        cadence = null,
-                        powerW = null,
-                        distanceM = null
-                    )
-                }
-                if (pts.size >= 2) return@runCatching pts
-            }
-
-            // 2. Zkusit activityDetailMetrics
-            val descArr = root["metricDescriptors"] as? kotlinx.serialization.json.JsonArray
-            val metricsArr = root["activityDetailMetrics"] as? kotlinx.serialization.json.JsonArray
-            if (descArr != null && metricsArr != null && metricsArr.isNotEmpty()) {
-                var latIdx = -1
-                var lonIdx = -1
-                var altIdx = -1
-                var timeIdx = -1
-                var hrIdx = -1
-                var spdIdx = -1
-                descArr.forEach { dElem ->
-                    val dObj = dElem as? kotlinx.serialization.json.JsonObject ?: return@forEach
-                    val idx = dObj["metricsIndex"]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content?.toIntOrNull() } ?: return@forEach
-                    val key = dObj["key"]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }?.lowercase() ?: ""
-                    when {
-                        "latitude" in key -> latIdx = idx
-                        "longitude" in key -> lonIdx = idx
-                        "elevation" in key || "altitude" in key -> altIdx = idx
-                        "timestamp" in key || "time" in key -> timeIdx = idx
-                        "heartrate" in key || "hr" in key -> hrIdx = idx
-                        "speed" in key -> spdIdx = idx
-                    }
-                }
-                if (latIdx >= 0 && lonIdx >= 0) {
-                    val pts = metricsArr.mapNotNull { mElem ->
-                        val mObj = mElem as? kotlinx.serialization.json.JsonObject ?: return@mapNotNull null
-                        val vals = mObj["metrics"] as? kotlinx.serialization.json.JsonArray ?: return@mapNotNull null
-                        val lat = vals.getOrNull(latIdx)?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content?.toDoubleOrNull() } ?: return@mapNotNull null
-                        val lon = vals.getOrNull(lonIdx)?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content?.toDoubleOrNull() } ?: return@mapNotNull null
-                        val alt = if (altIdx >= 0) vals.getOrNull(altIdx)?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content?.toDoubleOrNull() } else null
-                        val t = if (timeIdx >= 0) vals.getOrNull(timeIdx)?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content?.toLongOrNull() } ?: 0L else 0L
-                        val hr = if (hrIdx >= 0) vals.getOrNull(hrIdx)?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content?.toIntOrNull() } else null
-                        val spd = if (spdIdx >= 0) vals.getOrNull(spdIdx)?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content?.toDoubleOrNull() } else null
-                        app.pulse4.domain.TrackPoint(
-                            tMs = t,
-                            lat = lat,
-                            lon = lon,
-                            elevationM = alt,
-                            heartRate = hr,
-                            speedMps = spd,
-                            cadence = null,
-                            powerW = null,
-                            distanceM = null
-                        )
-                    }
-                    if (pts.size >= 2) return@runCatching pts
-                }
-            }
-            emptyList<app.pulse4.domain.TrackPoint>()
-        }.getOrDefault(emptyList())
+    /** Na vyžádání (lazy) dotáhne FIT nebo GPS křivku pro zadanou aktivitu, pokud ji ještě nemá v lokální DB. */
+    fun ensureActivityTrack(actKey: String): Boolean {
+        val hasExt = sl.secrets.getString(SecretStore.GARMIN_EXT_TOKENS) != null
+        return ensureActivityTrackWith(
+            actKey = actKey,
+            store = roomActivityImportStore(),
+            hasSession = hasExt,
+            downloadFit = { actId -> sl.garminExt.downloadActivityFit(actId) },
+            fetchDetailsJson = { actId -> sl.garminExt.getActivityDetailsJson(actId) },
+            nowMs = System.currentTimeMillis(),
+            accountId = sl.settings.accountId,
+            zoneId = sl.settings.zoneId,
+            sealFit = { hash, rawFit ->
+                val dir = File(context.noBackupFilesDir, "fit").apply { mkdirs() }
+                File(dir, "$hash.fit.enc").writeBytes(sl.vault.seal(rawFit))
+            },
+        )
     }
 
     private fun saveRaw(label: String, body: String, nowMs: Long) {
@@ -1125,41 +1400,16 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
         File(dir, "$hash.fit.enc").writeBytes(sl.vault.seal(bytes))
         return when (val r = FitImporter.parse(bytes)) {
             is FitResult.Invalid -> FitImportResult.Rejected(r.reason)
-            is FitResult.Ok -> {
-                val actId = garminObj?.get("activityId")?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }
-                val baseId = targetId ?: if (actId != null) "garmin-$actId" else "fit-$hash"
-                val baseExtId = actId ?: baseId.removePrefix("garmin-").takeIf { baseId.startsWith("garmin-") } ?: hash
-                val prov = if (garminObj != null) Provider.GARMIN_PERSONAL else Provider.MANUAL
-                val isMultisport = r.sessions.size > 1
-                val sessionIds = multisportSessionIds(baseId, baseExtId, r.sessions.size)
-                val trackSerializer = kotlinx.serialization.builtins.ListSerializer(TrackPoint.serializer())
-                sl.db.runInTransaction {
-                    for ((idx, session) in r.sessions.withIndex()) {
-                        val (sessionId, sessionExtId) = sessionIds[idx]
-                        val existing = sl.db.activities().get(sessionId)
-                        if (existing != null && targetId != null && idx == 0) {
-                            if (session.points.isNotEmpty()) {
-                                sl.db.activities().upsertTrack(TrackRow(sessionId, json.encodeToString(trackSerializer, session.points)))
-                            }
-                            continue
-                        }
-                        val objForSession = if (!isMultisport && idx == 0) garminObj else null
-                        val a = buildActivityFromGarminAndFit(
-                            id = sessionId,
-                            provider = prov,
-                            extId = sessionExtId,
-                            obj = objForSession,
-                            parsed = session,
-                            nowMs = nowMs
-                        )
-                        sl.db.activities().upsert(a.toRow(json.encodeToString(Activity.serializer(), a)))
-                        if (session.points.isNotEmpty()) {
-                            sl.db.activities().upsertTrack(TrackRow(sessionId, json.encodeToString(trackSerializer, session.points)))
-                        }
-                    }
-                }
-                FitImportResult.Imported(baseId)
-            }
+            is FitResult.Ok -> importParsedFitSessions(
+                parsed = r,
+                hash = hash,
+                nowMs = nowMs,
+                garminObj = garminObj,
+                targetId = targetId,
+                store = roomActivityImportStore(),
+                accountId = sl.settings.accountId,
+                zoneId = sl.settings.zoneId,
+            )
         }
     }
 

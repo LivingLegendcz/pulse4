@@ -174,7 +174,7 @@ data class OuraContributor(
 data class OuraPillarState(
     val pillar: OuraPillar,
     val score: Int?,
-    val rating: OuraRating,
+    val rating: OuraRating?,
     val deltaLabel: String,
     val narrative: String,
     val contributors: List<OuraContributor>
@@ -339,11 +339,29 @@ object OuraScoreCalculator {
 
         // 4. TĚLO & CÉVY
         val wKg = latestWeightObs?.value
+        val weightUsual = seriesByType[MetricType.WEIGHT]?.usual
         val bodyFatVal = seriesByType[MetricType.BODY_FAT]?.values?.lastOrNull()
         val pwvVal = seriesByType[MetricType.PULSE_WAVE_VELOCITY]?.values?.lastOrNull()
         val hasBodyData = wKg != null || bodyFatVal != null || pwvVal != null
         val bodyScore: Int? = null
-        val bodyRating = if (hasBodyData) OuraRating.GOOD else OuraRating.NO_DATA
+        val afibDetected = latestEcgObs?.let { obs ->
+            (obs.type == MetricType.ECG_AFIB && obs.value.toInt() == 1) ||
+                obs.origin?.contains(":afib=1") == true
+        } == true
+        val bodyRating: OuraRating? = when {
+            !hasBodyData && latestEcgObs == null -> OuraRating.NO_DATA
+            afibDetected -> OuraRating.ATTENTION
+            pwvVal != null -> when {
+                pwvVal > 10.5 -> OuraRating.ATTENTION
+                pwvVal > 9.0 -> OuraRating.FAIR
+                pwvVal <= 7.5 -> OuraRating.OPTIMAL
+                else -> OuraRating.GOOD
+            }
+            wKg != null && weightUsual != null -> {
+                if (wKg in (weightUsual.low - 1.0)..(weightUsual.high + 1.0)) OuraRating.GOOD else OuraRating.FAIR
+            }
+            else -> null
+        }
         val bodyParts = buildList {
             if (wKg != null) add(fmt.weight(wKg))
             if (bodyFatVal != null) add("tuk ${fmt.number(bodyFatVal, 1)} %")
@@ -927,7 +945,7 @@ fun OuraHaloGauge(
     primaryColor: Color,
     secondaryColor: Color,
     glowColor: Color,
-    rating: OuraRating,
+    rating: OuraRating?,
     deltaLabel: String,
     pillarTitle: String = "",
     wavePhase: Float = 0f,
@@ -1078,21 +1096,23 @@ fun OuraHaloGauge(
                 fontSize = 52.sp,
                 letterSpacing = (-1.5).sp
             )
-            Box(
-                Modifier
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(Color(0x99060C14))
-                    .border(BorderStroke(1.dp, rating.color.copy(alpha = 0.70f)), RoundedCornerShape(8.dp))
-                    .padding(horizontal = 9.dp, vertical = 2.5.dp)
-            ) {
-                Text(
-                    text = rating.label.uppercase(),
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = rating.color,
-                    fontSize = 9.5.sp,
-                    letterSpacing = 0.8.sp
-                )
+            if (rating != null) {
+                Box(
+                    Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0x99060C14))
+                        .border(BorderStroke(1.dp, rating.color.copy(alpha = 0.70f)), RoundedCornerShape(8.dp))
+                        .padding(horizontal = 9.dp, vertical = 2.5.dp)
+                ) {
+                    Text(
+                        text = rating.label.uppercase(),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = rating.color,
+                        fontSize = 9.5.sp,
+                        letterSpacing = 0.8.sp
+                    )
+                }
             }
             Spacer(Modifier.height(4.dp))
             Text(

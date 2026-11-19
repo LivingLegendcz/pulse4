@@ -56,7 +56,14 @@ class GarminPersonalFetcher(
             }
         }
         // Kurzor se posouvá až po uložení dávky (SyncEngine); zde jen nabízí nový bod.
-        return Batch(all.distinctBy { it.id }, now)
+        val deduped = LinkedHashMap<String, MetricObservation>(all.size)
+        for (obs in all) {
+            val prev = deduped[obs.id]
+            if (prev == null || (obs.endUtcMs ?: obs.startUtcMs) >= (prev.endUtcMs ?: prev.startUtcMs)) {
+                deduped[obs.id] = obs
+            }
+        }
+        return Batch(deduped.values.toList(), now)
     }
 
     override fun refreshSession() {

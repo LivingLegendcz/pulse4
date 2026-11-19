@@ -67,7 +67,12 @@ object ResponseMapper {
             val ext = JsonPath.string(item, spec.externalIdPath)
             val local = JsonPath.string(item, spec.localDatePath) ?: TimeRules.localDate(end ?: start, zone).toString()
             val scopedExt = ext?.let { "${spec.metric.name}:$it" }
-            val key = ImportKey.of(Provider.GARMIN_PERSONAL, accountId, scopedExt, listOf(spec.metric.name, start.toString(), end?.toString() ?: ""))
+            val stableFields = if (spec.metric == app.pulse4.domain.MetricType.BODY_BATTERY) {
+                listOf(spec.metric.name, local)
+            } else {
+                listOf(spec.metric.name, start.toString(), end?.toString() ?: "")
+            }
+            val key = ImportKey.of(Provider.GARMIN_PERSONAL, accountId, scopedExt, stableFields)
             out += MetricObservation(
                 id = key, provider = Provider.GARMIN_PERSONAL, accountId = accountId, externalId = ext,
                 type = spec.metric, startUtcMs = start, endUtcMs = end, value = value * spec.scale,

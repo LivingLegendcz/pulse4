@@ -12,7 +12,7 @@ import java.util.concurrent.locks.ReentrantLock
  *
  * - Background renew / silent SSO use [background] (blocking) and should poll [manualPending]
  *   between HTTP calls, aborting early when a manual login is waiting.
- * - Manual logins use [manual] which waits at most `timeoutMs` and invokes `onWaiting` once if
+ * - Manual logins and disconnect use [manual] which raises the abort flag and waits at most `timeoutMs` and invokes `onWaiting` once if
  *   the lock is currently held, so the UI can say "Čekám na dokončení synchronizace…".
  * - Every successful session replacement bumps [generation]. Long-running background work
  *   (data import) captures the generation at start and uses [saveIfCurrent] so it never
@@ -93,5 +93,8 @@ class WithingsAuthGate {
     companion object {
         /** One OkHttp call timeout (30 s) plus slack: enough for background work to notice the abort flag. */
         const val MANUAL_WAIT_TIMEOUT_MS = 45_000L
+
+        /** Odpojení (R4-5): krátké čekání s abort signálem, pak UI nabídne opakování. */
+        const val DISCONNECT_WAIT_TIMEOUT_MS = 5_000L
     }
 }

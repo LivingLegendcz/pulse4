@@ -197,7 +197,15 @@ fun BodyScreen(sl: ServiceLocator) {
                     ctx.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, Uri.parse(url)))
                 }
             }) { Text("Připojit Withings") }
-            TextButton({ sl.withings.disconnect() }) { Text("Odpojit") }
+            TextButton({
+                // R4-5: odpojení mimo UI vlákno (čeká na zámek autentizace max. 5 s).
+                msg = WITHINGS_DISCONNECTING_TEXT
+                scope.launch {
+                    val ok = withContext(Dispatchers.IO) { runCatching { sl.withings.disconnect() }.getOrDefault(false) }
+                    msg = if (ok) "Withings byl odpojen." else WITHINGS_DISCONNECT_BUSY_TEXT
+                    tick++
+                }
+            }) { Text("Odpojit") }
         }
         Text(when (val s = wState) {
             WithingsUiState.Idle -> "Nepřipojeno"; WithingsUiState.WaitingForBrowser -> "Čeká se na dokončení v prohlížeči…"

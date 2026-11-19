@@ -22,11 +22,45 @@ enum class WithingsAuthFailureKind {
     RATE_LIMITED,
     NETWORK,
     OTHER,
+    /** Background work stopped between requests because a manual login / disconnect is waiting. */
+    ABORTED,
+}
+
+/**
+ * Druh ověřovacího kódu, který Withings vyžaduje (podle URL kroku workflow):
+ * - [EMAIL]: 8místný přihlašovací kód z e-mailu (`email_check`),
+ * - [TOTP]: 6místný kód z ověřovací aplikace (`totp`),
+ * - [SMS]: kód z SMS (`phone_check`) – délka není doložená, proto 6–8 číslic.
+ */
+enum class WithingsCodeKind(val minDigits: Int, val maxDigits: Int) {
+    EMAIL(8, 8),
+    TOTP(6, 6),
+    SMS(6, 8);
+
+    fun accepts(code: String): Boolean {
+        val digits = code.trim().replace(" ", "").replace("-", "")
+        return digits.isNotEmpty() && digits.all { it.isDigit() } && digits.length in minDigits..maxDigits
+    }
+
+    companion object {
+        fun fromUrl(url: String?): WithingsCodeKind {
+            val u = url.orEmpty().lowercase()
+            return when {
+                "totp" in u -> TOTP
+                "phone_check" in u -> SMS
+                else -> EMAIL
+            }
+        }
+    }
 }
 
 sealed interface WithingsLoginResult {
     data class Ok(val session: WithingsWebSession, val profiles: List<WithingsUserProfile>) : WithingsLoginResult
-    data class NeedsMfa(val email: String, val message: String) : WithingsLoginResult
+    data class NeedsMfa(
+        val email: String,
+        val message: String,
+        val codeKind: WithingsCodeKind = WithingsCodeKind.EMAIL,
+    ) : WithingsLoginResult
     data class Error(
         val message: String,
         val kind: WithingsAuthFailureKind = WithingsAuthFailureKind.OTHER,
@@ -228,9 +262,12 @@ class WithingsDirectAuth(
     loadPersistedCookies: () -> String? = { null },
     savePersistedCookies: (String) -> Unit = {},
     private val diagnostics: WithingsAuthDiagnostics? = null,
+    /** Úprava OkHttp klienta (např. interceptor v testech); produkce nic nemění. */
+    clientCustomizer: (OkHttpClient.Builder) -> Unit = {},
 ) {
     private val cookieJar = PersistentCookieJar(loadPersistedCookies, savePersistedCookies)
     private val client: OkHttpClient = OkHttpClient.Builder()
+        .also(clientCustomizer)
         .cookieJar(cookieJar)
         .callTimeout(30, TimeUnit.SECONDS)
         .connectTimeout(15, TimeUnit.SECONDS)
@@ -243,6 +280,9 @@ class WithingsDirectAuth(
         private set
     @Volatile var isAwaitingCode: Boolean = false
         private set
+
+    /** Druh kódu, na který se právě čeká (podle posledního kroku workflow). */
+    val pendingCodeKind: WithingsCodeKind get() = WithingsCodeKind.fromUrl(lastMfaUrl)
 
     private var lastMfaUrl: String = "https://account.withings.com/new_workflow/email_check?r=https%3A%2F%2Fapp.withings.com%2F"
     private var lastHiddenFields: Map<String, String> = emptyMap()
@@ -332,7 +372,7 @@ class WithingsDirectAuth(
             for (u in urls) {
                 if (shouldAbort()) {
                     diagnostics?.mark(flow, "aborted:manual_login")
-                    return WithingsLoginResult.Error(ABORTED_MESSAGE, WithingsAuthFailureKind.OTHER)
+                    return WithingsLoginResult.Error(ABORTED_MESSAGE, WithingsAuthFailureKind.ABORTED)
                 }
                 val req = Request.Builder()
                     .url(u)
@@ -500,13 +540,33 @@ class WithingsDirectAuth(
         }
     }
 
-    /** [background] = přihlášení zapamatovaným heslem z obnovy na pozadí (jen pro diagnostiku). */
-    fun loginPassword(email: String, password: String, background: Boolean = false): WithingsLoginResult {
+    /**
+     * [background] = přihlášení zapamatovaným heslem z obnovy na pozadí (diagnostika).
+     * [shouldAbort] se kontroluje před každým HTTP požadavkem (R4-9); při přerušení se vrátí
+     * [WithingsAuthFailureKind.ABORTED] a heslo se už neodešle.
+     */
+    fun loginPassword(
+        email: String,
+        password: String,
+        background: Boolean = false,
+        shouldAbort: () -> Boolean = { false },
+    ): WithingsLoginResult {
         val flow = if (background) WithingsAuthDiagnostics.Flow.BACKGROUND_PASSWORD else WithingsAuthDiagnostics.Flow.MANUAL_PASSWORD
-        return traced(flow) { loginPasswordInner(email, password, flow) }
+        return traced(flow) { loginPasswordInner(email, password, flow, shouldAbort) }
     }
 
-    private fun loginPasswordInner(email: String, password: String, flow: WithingsAuthDiagnostics.Flow): WithingsLoginResult {
+    private fun abortedResult(flow: WithingsAuthDiagnostics.Flow, step: String): WithingsLoginResult {
+        diagnostics?.mark(flow, "aborted:$step")
+        return WithingsLoginResult.Error(ABORTED_MESSAGE, WithingsAuthFailureKind.ABORTED)
+    }
+
+    private fun loginPasswordInner(
+        email: String,
+        password: String,
+        flow: WithingsAuthDiagnostics.Flow,
+        shouldAbort: () -> Boolean,
+    ): WithingsLoginResult {
+        if (shouldAbort()) return abortedResult(flow, "before_start")
         if (password.isBlank()) {
             return WithingsLoginResult.Error("Zadejte heslo k účtu Withings.")
         }
@@ -527,10 +587,12 @@ class WithingsDirectAuth(
                 trace(flow, "GET login", res1)
                 if (isLoggedInUrl(res1.request.url)) {
                     PLog.i("WithingsDirectAuth") { "loginPassword: req1 SSO already succeeded" }
+                    if (shouldAbort()) return abortedResult(flow, "before_finish")
                     val fin = finishLogin(flow)
                     if (fin is WithingsLoginResult.Ok) return fin
                 }
             }
+            if (shouldAbort()) return abortedResult(flow, "before_password_page")
 
             // 2. Nastavíme cookie `email` přímo v cookieJar bez odeslání POST /login
             // Tím Withings nepošle zbytečný 8místný OTP kód do schránky, pokud je heslo platné!
@@ -546,6 +608,7 @@ class WithingsDirectAuth(
                 .build()
             val passGetHtml = client.newCall(passGetReq).execute().use { trace(flow, "GET password_check", it); it.body?.string().orEmpty() }
             val hiddenPass = parseHiddenInputs(passGetHtml)
+            if (shouldAbort()) return abortedResult(flow, "before_password_post")
 
             val bodyPassBuilder = FormBody.Builder()
             hiddenPass.forEach { (k, v) -> if (k != "password" && k != "email" && k.isNotBlank()) bodyPassBuilder.add(k, v) }
@@ -559,17 +622,16 @@ class WithingsDirectAuth(
                 .post(bodyPassBuilder.build())
                 .build()
 
-            val res3 = client.newCall(req3).execute()
-            trace(flow, "POST password_check", res3)
-            val statusCode = res3.code
-            val bodyText = res3.body?.string().orEmpty()
-            val finalHttpUrl = res3.request.url
+            val (statusCode, bodyText, finalHttpUrl) = client.newCall(req3).execute().use { res3 ->
+                trace(flow, "POST password_check", res3)
+                Triple(res3.code, res3.body?.string().orEmpty(), res3.request.url)
+            }
             val finalUrl = finalHttpUrl.toString()
-            res3.close()
 
             PLog.i("WithingsDirectAuth") { "loginPassword POST response: status=$statusCode, finalPath=${finalHttpUrl.encodedPath}, hasSession=${cookieJar.hasSession()}" }
 
             if (isLoggedInUrl(finalHttpUrl)) {
+                // Heslo už bylo přijato: dokončit i při abort požadavku, jinak by se pokus zbytečně opakoval.
                 return finishLogin(flow)
             }
 
@@ -588,7 +650,8 @@ class WithingsDirectAuth(
                 lastHiddenFields = parseHiddenInputs(bodyText)
                 isAwaitingCode = true
                 PLog.i("WithingsDirectAuth") { "loginPassword requires 2FA" }
-                return classified
+                val kind = WithingsCodeKind.fromUrl(lastMfaUrl)
+                return classified.copy(message = codePromptMessage(kind), codeKind = kind)
             }
             classified
         } catch (e: IOException) {
@@ -604,6 +667,13 @@ class WithingsDirectAuth(
 
     companion object {
         const val ABORTED_MESSAGE = "Tiché obnovení přerušeno kvůli ručnímu přihlášení."
+
+        /** Text výzvy k zadání kódu podle jeho druhu (TOTP = ověřovací aplikace, ne SMS / e-mail). */
+        fun codePromptMessage(kind: WithingsCodeKind): String = when (kind) {
+            WithingsCodeKind.EMAIL -> "Withings poslal 8místný ověřovací kód na váš e-mail. Zadejte ho do pole níže."
+            WithingsCodeKind.TOTP -> "Zadejte 6místný kód z ověřovací aplikace (TOTP)."
+            WithingsCodeKind.SMS -> "Withings poslal ověřovací kód v SMS. Zadejte ho do pole níže."
+        }
 
         private val RATE_LIMIT_PATTERNS = listOf(
             "too many",
@@ -747,7 +817,8 @@ class WithingsDirectAuth(
                 lastMfaUrl = finalUrl
                 lastHiddenFields = parseHiddenInputs(bodyText)
                 isAwaitingCode = true
-                return WithingsLoginResult.NeedsMfa(em, "Zadejte ještě dvoufázový kód (SMS / Authenticator).")
+                val kind = WithingsCodeKind.fromUrl(finalUrl)
+                return WithingsLoginResult.NeedsMfa(em, codePromptMessage(kind), kind)
             }
 
             finishLogin(flow)

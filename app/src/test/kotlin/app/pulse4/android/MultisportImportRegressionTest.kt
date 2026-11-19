@@ -1,20 +1,60 @@
 package app.pulse4.android
 
+import app.pulse4.android.data.ActivityDao
 import app.pulse4.android.data.ActivityRow
 import app.pulse4.android.data.ActivitySummaryRow
+import app.pulse4.android.data.AreaStateDao
+import app.pulse4.android.data.AreaStateRow
+import app.pulse4.android.data.FamilyLinkDao
+import app.pulse4.android.data.FamilyLinkRow
+import app.pulse4.android.data.GrantDao
+import app.pulse4.android.data.GrantRow
+import app.pulse4.android.data.GroupRow
+import app.pulse4.android.data.IdAndJson
+import app.pulse4.android.data.InboxDao
+import app.pulse4.android.data.ObservationDao
+import app.pulse4.android.data.ObservationRow
+import app.pulse4.android.data.OutboxDao
+import app.pulse4.android.data.OutboxRow
+import app.pulse4.android.data.PendingRequestDao
+import app.pulse4.android.data.PendingRequestRow
+import app.pulse4.android.data.ReceiptRow
+import app.pulse4.android.data.ReceivedRow
+import app.pulse4.android.data.SentRow
 import app.pulse4.android.data.TrackRow
+import app.pulse4.android.data.toRow
 import app.pulse4.android.di.ActivityImportStore
 import app.pulse4.android.di.FitImportResult
 import app.pulse4.android.di.ImportService
+import app.pulse4.android.di.PulseDataAccess
+import app.pulse4.android.di.ShareService
+import app.pulse4.android.di.ShareSettingsAccess
+import app.pulse4.android.di.parseGrantRefs
 import app.pulse4.android.ui.filterTopLevelActivities
+import app.pulse4.android.ui.pickLatestTopLevelActivity
 import app.pulse4.domain.Activity
+import app.pulse4.domain.Provider
 import app.pulse4.domain.Sport
 import app.pulse4.domain.TrackPoint
 import app.pulse4.fit.FitImporter
 import app.pulse4.fit.FitResult
 import app.pulse4.fit.ParsedFit
+import app.pulse4.sharing.AgeProfile
+import app.pulse4.sharing.Field
+import app.pulse4.sharing.PrivacyZone
+import app.pulse4.sharing.ShareGrant
+import app.pulse4.sharing.TimeScope
+import app.pulse4.sync.DeliveryState
+import app.pulse4.sync.OutboxItem
+import app.pulse4.sync.OutboxManager
+import app.pulse4.sync.OutboxStore
+import app.pulse4.sync.SentLedger
+import app.pulse4.sync.SentRecord
 import app.pulse4.sync.Wire
 import java.io.ByteArrayOutputStream
+import java.time.LocalDate
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
@@ -23,12 +63,14 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class MultisportImportRegressionTest {
     private class InMemoryActivityStore : ActivityImportStore {
         val activities = LinkedHashMap<String, ActivityRow>()
         val tracks = LinkedHashMap<String, TrackRow>()
+        override fun allIds(): List<String> = activities.keys.toList()
         override fun get(id: String): ActivityRow? = activities[id]
         override fun track(id: String): TrackRow? = tracks[id]
         override fun upsert(row: ActivityRow) { activities[row.id] = row }
@@ -286,5 +328,332 @@ class MultisportImportRegressionTest {
         assertEquals(7650.0, topLevel.sumOf { it.movingTimeS ?: 0.0 })
         assertEquals(420.0, topLevel.sumOf { it.ascentM ?: 0.0 })
         assertEquals(1850.0, topLevel.sumOf { it.caloriesKcal ?: 0.0 })
+    }
+
+    @Test
+    fun `R3-6 ShareService enqueueActivities shares triathlon as single parent object and excludes legs`() {
+        val nowMs = 1_786_780_000_000L
+        val actMap = LinkedHashMap<String, ActivityRow>()
+        val trackMap = LinkedHashMap<String, TrackRow>()
+        val grantMap = LinkedHashMap<String, GrantRow>()
+        val outboxMap = LinkedHashMap<String, OutboxRow>()
+        val sentMap = LinkedHashMap<Pair<String, String>, SentRow>()
+
+        val parent = Activity(
+            id = "garmin-tri1",
+            provider = Provider.GARMIN_PERSONAL,
+            accountId = "acc-1",
+            externalId = "tri1",
+            sport = Sport.OTHER,
+            startUtcMs = nowMs - 10_000L,
+            zoneId = "UTC",
+            totalTimeS = 7800.0,
+            movingTimeS = 7650.0,
+            distanceM = 51500.0,
+            title = "Praha Triatlon",
+        )
+        val leg1 = parent.copy(id = "garmin-tri1-s1", externalId = "tri1-s1", sport = Sport.SWIMMING, distanceM = 1500.0, tags = setOf("multisport-leg", "parent:garmin-tri1"))
+        val leg2 = parent.copy(id = "garmin-tri1-s2", externalId = "tri1-s2", sport = Sport.CYCLING, distanceM = 40000.0, tags = setOf("multisport-leg", "parent:garmin-tri1"))
+        val leg3 = parent.copy(id = "custom-leg-3", externalId = "tri1-s3", sport = Sport.RUNNING, distanceM = 10000.0, tags = setOf("parent:garmin-tri1"))
+        listOf(parent, leg1, leg2, leg3).forEach { act ->
+            actMap[act.id] = act.toRow(Wire.json.encodeToString(Activity.serializer(), act))
+        }
+
+        val grant = ShareGrant(
+            id = "g-act",
+            ownerId = "alice",
+            recipients = setOf("bob"),
+            fields = setOf(Field.ACT_SUMMARY, Field.ACT_CHARTS),
+            scope = TimeScope.continuousFrom(LocalDate.of(2026, 1, 1)),
+            groupId = null,
+            createdAtMs = 1_000L,
+        )
+        grantMap[grant.id] = GrantRow(grant.id, false, Wire.json.encodeToString(ShareGrant.serializer(), grant))
+
+        val data = object : PulseDataAccess {
+            private val obsDao = object : ObservationDao {
+                override fun upsert(rows: List<ObservationRow>) {}
+                override fun forDate(date: String) = emptyList<ObservationRow>()
+                override fun forRange(from: String, to: String) = emptyList<ObservationRow>()
+                override fun forTypeInRange(type: String, from: String, to: String) = emptyList<ObservationRow>()
+                override fun latest(type: String): ObservationRow? = null
+                override fun latestRows(type: String, limit: Int) = emptyList<ObservationRow>()
+                override fun pagedForType(type: String, limit: Int, offset: Int) = emptyList<ObservationRow>()
+                override fun countForType(type: String) = 0
+                override fun series(type: String, from: String, to: String): Flow<List<ObservationRow>> = emptyFlow()
+                override fun markDeleted(ids: List<String>) {}
+                override fun idsIn(provider: String, from: Long, to: Long) = emptyList<String>()
+                override fun idsInForAccount(provider: String, accountId: String, from: Long, to: Long) = emptyList<String>()
+                override fun idsForAccount(provider: String, accountId: String) = emptyList<String>()
+                override fun deleteLegacyCombinedEcg() = 0
+                override fun ofTypesIncludingDeleted(types: List<String>, from: String, to: String) = emptyList<ObservationRow>()
+                override fun confirm(id: String) {}
+                override fun datesWithData(from: String, to: String) = emptyList<String>()
+                override fun deleteSyntheticHistory() {}
+                override fun deleteLegacyGarminSleepForDates(dates: List<String>) {}
+            }
+            private val actDao = object : ActivityDao {
+                override fun upsert(row: ActivityRow) { actMap[row.id] = row }
+                override fun upsertTrack(row: TrackRow) { trackMap[row.activityId] = row }
+                override fun all(): Flow<List<ActivityRow>> = emptyFlow()
+                override fun allNow() = actMap.values.toList()
+                override fun allIds() = actMap.keys.toList()
+                override fun latest() = actMap.values.maxByOrNull { it.startUtcMs }
+                override fun allSummaries(): Flow<List<ActivitySummaryRow>> = emptyFlow()
+                override fun allSummariesNow() = emptyList<ActivitySummaryRow>()
+                override fun recentSummaries(limit: Int): Flow<List<ActivitySummaryRow>> = emptyFlow()
+                override fun recentSummariesNow(limit: Int) = emptyList<ActivitySummaryRow>()
+                override fun unbackfilled(limit: Int) = emptyList<IdAndJson>()
+                override fun markBackfillFailed(id: String) {}
+                override fun updateSummary(id: String, title: String, distanceM: Double?, movingTimeS: Double?, ascentM: Double?, avgHeartRate: Int?, maxHeartRate: Int?, caloriesKcal: Double?, aerobicTe: Double?, anaerobicTe: Double?, trainingLoad: Double?, avgPowerW: Double?, avgCadence: Double?, zoneId: String?) {}
+                override fun since(from: Long) = actMap.values.filter { it.startUtcMs >= from }
+                override fun get(id: String) = actMap[id]
+                override fun track(id: String) = trackMap[id]
+                override fun count() = actMap.size
+                override fun deleteAll() = actMap.clear()
+                override fun deleteAllTracks() = trackMap.clear()
+            }
+            private val areaDao = object : AreaStateDao {
+                override fun put(row: AreaStateRow) {}
+                override fun get(area: String): AreaStateRow? = null
+                override fun all(): Flow<List<AreaStateRow>> = emptyFlow()
+            }
+            private val grantDao = object : GrantDao {
+                override fun upsert(row: GrantRow) { grantMap[row.id] = row }
+                override fun all(): Flow<List<GrantRow>> = emptyFlow()
+                override fun allNow() = grantMap.values.toList()
+                override fun activeNow() = grantMap.values.filter { !it.revoked }
+                override fun get(id: String) = grantMap[id]
+                override fun upsertGroup(row: GroupRow) {}
+                override fun groups(): Flow<List<GroupRow>> = emptyFlow()
+                override fun groupsNow() = emptyList<GroupRow>()
+                override fun group(id: String): GroupRow? = null
+                override fun deleteGroup(id: String) {}
+                override fun deleteAllGroups() {}
+                override fun deleteAllGrants() { grantMap.clear() }
+            }
+            private val outboxDao = object : OutboxDao {
+                override fun insert(row: OutboxRow) { outboxMap[row.eventId] = row }
+                override fun update(row: OutboxRow) { outboxMap[row.eventId] = row }
+                override fun find(id: String) = outboxMap[id]
+                override fun all() = outboxMap.values.toList()
+                override fun recent(): Flow<List<OutboxRow>> = emptyFlow()
+                override fun purge(before: Long) {}
+                override fun deleteAll() { outboxMap.clear() }
+            }
+            private val inboxDao = object : InboxDao {
+                override fun receiptHash(id: String): String? = null
+                override fun insertReceipt(row: ReceiptRow) {}
+                override fun version(a: String, t: String, i: String): Long? = null
+                override fun received(a: String, t: String, i: String): ReceivedRow? = null
+                override fun putObject(row: ReceivedRow) {}
+                override fun removeObject(a: String, t: String, i: String) {}
+                override fun objects(t: String): Flow<List<ReceivedRow>> = emptyFlow()
+                override fun objectsNow(t: String) = emptyList<ReceivedRow>()
+                override fun objectsOf(a: String, t: String): Flow<List<ReceivedRow>> = emptyFlow()
+                override fun sent(r: String, k: String) = sentMap[r to k]
+                override fun allSentNow() = sentMap.values.toList()
+                override fun allReceivedNow() = emptyList<ReceivedRow>()
+                override fun updateReceiptAuthor(oldAuthor: String, newAuthor: String) {}
+                override fun putSent(row: SentRow) { sentMap[row.recipient to row.objectKey] = row }
+                override fun deleteSent(r: String, k: String) { sentMap.remove(r to k) }
+                override fun removeAllFrom(a: String) {}
+                override fun lastReceived(a: String): Long? = null
+                override fun deleteAll() {}
+                override fun deleteAllReceipts() {}
+                override fun deleteAllSent() { sentMap.clear() }
+            }
+            private val familyDao = object : FamilyLinkDao {
+                override fun all(): Flow<List<FamilyLinkRow>> = emptyFlow()
+                override fun allNow() = emptyList<FamilyLinkRow>()
+                override fun get(id: String): FamilyLinkRow? = null
+                override fun upsert(row: FamilyLinkRow) {}
+                override fun delete(id: String) {}
+            }
+            private val pendingDao = object : PendingRequestDao {
+                override fun all(): Flow<List<PendingRequestRow>> = emptyFlow()
+                override fun allNow() = emptyList<PendingRequestRow>()
+                override fun pendingNow() = emptyList<PendingRequestRow>()
+                override fun get(id: String): PendingRequestRow? = null
+                override fun upsert(row: PendingRequestRow) {}
+                override fun delete(id: String) {}
+            }
+            override fun observations() = obsDao
+            override fun activities() = actDao
+            override fun areaStates() = areaDao
+            override fun grants() = grantDao
+            override fun outbox() = outboxDao
+            override fun inbox() = inboxDao
+            override fun familyLinks() = familyDao
+            override fun pendingRequests() = pendingDao
+        }
+        val settings = object : ShareSettingsAccess {
+            override var zoneId = "UTC"
+            override var privacyZones: List<PrivacyZone> = emptyList()
+            override var ownAgeProfile = AgeProfile.ADULT.name
+            override var acceptWeightFromParent = false
+            override var childRecipientIdentity = ""
+            override fun getRaw(key: String): String? = null
+            override fun put(key: String, value: String) {}
+        }
+        val outbox = OutboxManager(
+            store = object : OutboxStore {
+                override fun insert(item: OutboxItem) = data.outbox().insert(
+                    OutboxRow(item.eventId, item.recipient, item.kind, item.objectType, item.objectId, item.objectVersion, item.effectiveGrantRefs.firstOrNull(), item.wire, item.createdAtMs, item.state.name, item.attempts, item.nextAttemptAtMs, item.lastError)
+                )
+                override fun update(item: OutboxItem) = insert(item)
+                override fun find(eventId: String): OutboxItem? = null
+                override fun all() = data.outbox().all().map {
+                    OutboxItem(it.eventId, it.recipient, it.kind, it.objectType, it.objectId, it.objectVersion, it.grantId, it.wire, it.createdAtMs, DeliveryState.valueOf(it.state), it.attempts, it.nextAttemptAtMs, it.lastError, parseGrantRefs(it.grantId))
+                }
+            }
+        )
+        val service = ShareService(
+            data = data,
+            settings = settings,
+            outbox = outbox,
+            sentLedger = object : SentLedger {
+                override fun last(recipient: String, objectKey: String) =
+                    data.inbox().sent(recipient, objectKey)?.let { SentRecord(it.version, it.contentHash) }
+            },
+            recordSent = { r, k, v, h -> data.inbox().putSent(SentRow(r, k, v, h)) },
+            selfIdProvider = { "alice" },
+        )
+
+        val enqueued = service.planAndEnqueue(nowMs)
+        assertEquals(1, enqueued)
+        val activityItems = outboxMap.values.filter { it.objectType == "activity" }
+        assertEquals(1, activityItems.size)
+        assertEquals("garmin-tri1", activityItems.single().objectId)
+    }
+
+    @Test
+    fun `R3-6 pickLatestTopLevelActivity never falls back to multisport child legs`() {
+        val leg1 = ActivitySummaryRow("garmin-100-s1", 2_000L, "CYCLING", "1. Kolo", 40_000.0, 3600.0, null, null, null, null, null, null, null, null, null, "UTC", null)
+        val leg2 = ActivitySummaryRow("garmin-100-s2", 1_900L, "RUNNING", "2. Běh", 10_000.0, 2400.0, null, null, null, null, null, null, null, null, null, "UTC", null)
+        assertNull(pickLatestTopLevelActivity(listOf(leg1, leg2)))
+
+        val parent = ActivitySummaryRow("garmin-100", 1_800L, "OTHER", "Triatlon", 50_000.0, 6000.0, null, null, null, null, null, null, null, null, null, "UTC", null)
+        assertEquals("garmin-100", pickLatestTopLevelActivity(listOf(leg1, leg2, parent))?.id)
+    }
+
+    @Test
+    fun `R3-7 repairLegacyMultisportActivities repairs 9c61ec9 shifted legs and restores Garmin parent summary`() {
+        val fitBytes = buildTwoSessionMultisportFitBytes()
+        val parsed = assertIs<FitResult.Ok>(FitImporter.parse(fitBytes))
+        val garminObj = garminMultisportSummaryJson("777666")
+        val nowMs = 1_786_780_000_000L
+        val trackSer = kotlinx.serialization.builtins.ListSerializer(TrackPoint.serializer())
+
+        // Simulate 9c61ec9 DB state: garmin-777666 got session[0] without Garmin summary; -s1 got session[1] without tags.
+        val store = InMemoryActivityStore()
+        val oldParentSession0 = ImportService.buildActivityFromGarminAndFit(
+            id = "garmin-777666",
+            provider = Provider.GARMIN_PERSONAL,
+            extId = "777666",
+            obj = null,
+            parsed = parsed.sessions[0],
+            nowMs = nowMs,
+            accountId = "acc-1",
+            zoneId = "Europe/Prague",
+        )
+        val oldLeg1Session1 = ImportService.buildActivityFromGarminAndFit(
+            id = "garmin-777666-s1",
+            provider = Provider.GARMIN_PERSONAL,
+            extId = "777666-s1",
+            obj = null,
+            parsed = parsed.sessions[1],
+            nowMs = nowMs,
+            accountId = "acc-1",
+            zoneId = "Europe/Prague",
+        )
+        store.upsert(oldParentSession0.toRow(Wire.json.encodeToString(Activity.serializer(), oldParentSession0)))
+        store.upsertTrack(TrackRow("garmin-777666", Wire.json.encodeToString(trackSer, parsed.sessions[0].points)))
+        store.upsert(oldLeg1Session1.toRow(Wire.json.encodeToString(Activity.serializer(), oldLeg1Session1)))
+        store.upsertTrack(TrackRow("garmin-777666-s1", Wire.json.encodeToString(trackSer, parsed.sessions[1].points)))
+
+        // Step 1: Offline repair (before next sync) synthesizes parent and shifts legs cleanly -s1, -s2
+        val offlineRepaired = ImportService.repairLegacyMultisportActivities(
+            store = store,
+            nowMs = nowMs,
+            accountId = "acc-1",
+            zoneId = "Europe/Prague",
+        )
+        assertEquals(1, offlineRepaired)
+        assertEquals(setOf("garmin-777666", "garmin-777666-s1", "garmin-777666-s2"), store.activities.keys)
+        val pendingParent = Wire.json.decodeFromString(Activity.serializer(), store.activities.getValue("garmin-777666").json)
+        assertTrue("multisport-summary-pending" in pendingParent.tags)
+        assertEquals(50_000.0, pendingParent.distanceM)
+        val leg1 = Wire.json.decodeFromString(Activity.serializer(), store.activities.getValue("garmin-777666-s1").json)
+        val leg2 = Wire.json.decodeFromString(Activity.serializer(), store.activities.getValue("garmin-777666-s2").json)
+        assertEquals(Sport.CYCLING, leg1.sport)
+        assertEquals(Sport.RUNNING, leg2.sport)
+        assertTrue("multisport-leg" in leg1.tags && "parent:garmin-777666" in leg1.tags)
+        assertTrue("multisport-leg" in leg2.tags && "parent:garmin-777666" in leg2.tags)
+
+        // Step 2: Next Garmin sync provides garminObj -> parent summary is restored and pending tag cleared
+        ImportService.syncGarminActivityElements(
+            allActivityElements = listOf(garminObj),
+            isInitialSync = false,
+            nowMs = nowMs + 10_000L,
+            store = store,
+            accountId = "acc-1",
+            zoneId = "Europe/Prague",
+            downloadFit = { null },
+            fetchDetailsJson = { "" },
+        )
+        val restoredParent = Wire.json.decodeFromString(Activity.serializer(), store.activities.getValue("garmin-777666").json)
+        assertEquals("Praha Triatlon", restoredParent.title)
+        assertEquals(51500.0, restoredParent.distanceM)
+        assertEquals(4.2, restoredParent.aerobicTrainingEffect)
+        assertEquals(215.0, restoredParent.trainingLoad)
+        assertFalse("multisport-summary-pending" in restoredParent.tags)
+        val renamedLeg1 = Wire.json.decodeFromString(Activity.serializer(), store.activities.getValue("garmin-777666-s1").json)
+        assertTrue(renamedLeg1.title?.startsWith("Praha Triatlon") == true)
+    }
+
+    @Test
+    fun `R3-14 buildActivityFromGarminAndFit leaves hrZoneTimesS empty when maxHr is unknown`() {
+        val parsedNoMaxHr = ParsedFit(
+            sport = Sport.RUNNING,
+            startMs = 1_000L,
+            totalTimeS = 600.0,
+            movingTimeS = 600.0,
+            distanceM = 2000.0,
+            ascentM = null,
+            avgHeartRate = 150,
+            maxHeartRate = null,
+            points = listOf(
+                TrackPoint(tMs = 1_000L, heartRate = 145),
+                TrackPoint(tMs = 11_000L, heartRate = 160),
+                TrackPoint(tMs = 21_000L, heartRate = 155),
+            ),
+            laps = emptyList(),
+            caloriesKcal = 150.0,
+        )
+        val actWithoutMax = ImportService.buildActivityFromGarminAndFit(
+            id = "fit-nomax",
+            provider = Provider.MANUAL,
+            extId = "nomax",
+            obj = null,
+            parsed = parsedNoMaxHr,
+            nowMs = 2_000L,
+            accountId = "acc-1",
+            zoneId = "UTC",
+        )
+        assertTrue(actWithoutMax.hrZoneTimesS.isEmpty(), "Expected empty hrZoneTimesS without maxHr, got ${actWithoutMax.hrZoneTimesS}")
+
+        val actWithMax = ImportService.buildActivityFromGarminAndFit(
+            id = "fit-withmax",
+            provider = Provider.MANUAL,
+            extId = "withmax",
+            obj = null,
+            parsed = parsedNoMaxHr.copy(maxHeartRate = 180),
+            nowMs = 2_000L,
+            accountId = "acc-1",
+            zoneId = "UTC",
+        )
+        assertEquals(5, actWithMax.hrZoneTimesS.size)
+        assertTrue(actWithMax.hrZoneTimesS.any { it > 0.0 })
     }
 }

@@ -1,10 +1,10 @@
 package app.pulse4.android
 
 import app.pulse4.android.data.SentRow
+import app.pulse4.android.di.ImportService
 import app.pulse4.android.di.ServiceMigrations
 import app.pulse4.android.di.isValidChildBodyComposition
 import app.pulse4.android.di.mergeActivityGrantsForRecipient
-import app.pulse4.android.di.multisportSessionIds
 import app.pulse4.android.di.updateSentRowOnRevoke
 import app.pulse4.android.work.PulseSyncService
 import app.pulse4.domain.Activity
@@ -218,15 +218,17 @@ class ServicesRegressionTest {
     }
 
     @Test
-    fun `RE-4 multisportSessionIds generates primary and suffixed leg IDs`() {
-        val ids = multisportSessionIds("fit-hash123", "hash123", 3)
+    fun `RE-4 R3-7 ImportService multisportLegIds generates 1-based leg IDs and keeps single session untouched`() {
+        val single = ImportService.multisportLegIds("fit-hash123", "hash123", 1)
+        assertEquals(listOf("fit-hash123" to "hash123"), single)
+        val legs = ImportService.multisportLegIds("fit-hash123", "hash123", 3)
         assertEquals(
             listOf(
-                "fit-hash123" to "hash123",
                 "fit-hash123-s1" to "hash123-s1",
                 "fit-hash123-s2" to "hash123-s2",
+                "fit-hash123-s3" to "hash123-s3",
             ),
-            ids,
+            legs,
         )
     }
 

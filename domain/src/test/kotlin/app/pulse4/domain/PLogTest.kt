@@ -88,6 +88,31 @@ class PLogTest {
     }
 
     @Test
+    fun `release mode redacts host port endpoints in w and e without mangling timestamps`() {
+        val captured = mutableListOf<Pair<PLog.Level, String>>()
+        PLog.isDebug = false
+        PLog.sink = PLog.Sink { level, _, message, _ -> captured += level to message }
+
+        PLog.w("ReticulumBridge") { "Gateway connect failed for 192.168.1.5:4242 at 18:45:00" }
+        PLog.e("ReticulumBridge", java.io.IOException("connect node.example.com:4242 / [2001:db8::1]:4242")) {
+            "TCP timeout localhost:4242"
+        }
+
+        assertEquals(2, captured.size)
+        val warnMsg = captured[0].second
+        assertFalse(warnMsg.contains("192.168.1.5"), warnMsg)
+        assertFalse(warnMsg.contains(":4242"), warnMsg)
+        assertTrue(warnMsg.contains("<host>:<port>"), warnMsg)
+        assertTrue(warnMsg.contains("18:45:00"), "Timestamp should remain intact: $warnMsg")
+
+        val errMsg = captured[1].second
+        assertFalse(errMsg.contains("node.example.com"), errMsg)
+        assertFalse(errMsg.contains("2001:db8::1"), errMsg)
+        assertFalse(errMsg.contains("localhost:4242"), errMsg)
+        assertTrue(errMsg.contains("<host>:<port>"), errMsg)
+    }
+
+    @Test
     fun `debug mode emits d and i without redaction and forwards throwable`() {
         val captured = mutableListOf<Pair<PLog.Level, Throwable?>>()
         PLog.isDebug = true

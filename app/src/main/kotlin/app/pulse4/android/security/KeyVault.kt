@@ -5,13 +5,17 @@ import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.security.keystore.StrongBoxUnavailableException
+import android.security.keystore.UserNotAuthenticatedException
 import app.pulse4.domain.PLog
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import java.security.GeneralSecurityException
 import java.security.KeyStore
+import java.security.KeyStoreException
+import java.security.ProviderException
 import java.security.SecureRandom
+import javax.crypto.AEADBadTagException
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -27,6 +31,13 @@ class CorruptedSecretException(
     cause: Throwable? = null,
 ) : RuntimeException(message, cause)
 
+/** Vyvoláno při přechodné nedostupnosti Android Keystore (uzamčení, dočasné selhání provideru). */
+class TransientKeystoreException(
+    val secretName: String,
+    message: String,
+    cause: Throwable? = null,
+) : RuntimeException(message, cause)
+
 enum class CriticalSecretKind {
     DB_KEY,
     RETICULUM_IDENTITY,
@@ -36,20 +47,48 @@ data class CorruptedSecretIssue(
     val kind: CriticalSecretKind,
     val secretName: String,
     val error: String,
+    val recoverable: Boolean = false,
 )
 
-/** Procesní stav obnovy při poškození kritického tajemství (NEW-11). */
+internal fun isRecoverableKeystoreFailure(error: Throwable): Boolean {
+    var cur: Throwable? = error
+    var depth = 0
+    while (cur != null && depth < 12) {
+        if (cur is UserNotAuthenticatedException ||
+            cur is ProviderException ||
+            cur is KeyStoreException ||
+            cur is IOException
+        ) {
+            return true
+        }
+        if (cur is AEADBadTagException) return false
+        cur = cur.cause
+        depth++
+    }
+    return false
+}
+
+/** Procesní stav obnovy při selhání kritického tajemství nebo dočasném výpadku Keystore (NEW-11, R3-8). */
 object SecretRecoveryState {
     private val _issue = MutableStateFlow<CorruptedSecretIssue?>(null)
     val issue: StateFlow<CorruptedSecretIssue?> = _issue.asStateFlow()
 
-    fun report(kind: CriticalSecretKind, secretName: String, error: Throwable) {
+    fun report(
+        kind: CriticalSecretKind,
+        secretName: String,
+        error: Throwable,
+        recoverable: Boolean = isRecoverableKeystoreFailure(error),
+    ) {
         val prev = _issue.value
-        if (prev == null || (kind == CriticalSecretKind.DB_KEY && prev.kind != CriticalSecretKind.DB_KEY)) {
+        val shouldReplace = prev == null ||
+            (!recoverable && prev.recoverable) ||
+            (recoverable == prev.recoverable && kind == CriticalSecretKind.DB_KEY && prev.kind != CriticalSecretKind.DB_KEY)
+        if (shouldReplace) {
             _issue.value = CorruptedSecretIssue(
                 kind = kind,
                 secretName = secretName,
-                error = error::class.simpleName ?: "CorruptedSecret",
+                error = error::class.simpleName ?: if (recoverable) "TransientKeystoreFailure" else "CorruptedSecret",
+                recoverable = recoverable,
             )
         }
     }
@@ -95,8 +134,13 @@ class KeyVault internal constructor(
 
     val recoveryIssue: StateFlow<CorruptedSecretIssue?> get() = recoveryState.issue
 
-    internal fun reportCriticalFailure(kind: CriticalSecretKind, secretName: String, error: Throwable) {
-        recoveryState.report(kind, secretName, error)
+    internal fun reportCriticalFailure(
+        kind: CriticalSecretKind,
+        secretName: String,
+        error: Throwable,
+        recoverable: Boolean = isRecoverableKeystoreFailure(error),
+    ) {
+        recoveryState.report(kind, secretName, error, recoverable = recoverable)
     }
 
     private fun hasSealedFiles(): Boolean {
@@ -162,7 +206,12 @@ class KeyVault internal constructor(
                 open(f.readBytes())
             } catch (e: Throwable) {
                 if (e is Error) throw e
-                recoveryState.report(CriticalSecretKind.DB_KEY, DB_KEY_NAME, e)
+                val recoverable = isRecoverableKeystoreFailure(e)
+                recoveryState.report(CriticalSecretKind.DB_KEY, DB_KEY_NAME, e, recoverable = recoverable)
+                if (recoverable) {
+                    PLog.w("KeyVault", e) { "Přechodná chyba Keystore pro $DB_KEY_NAME (lze zkusit znovu)" }
+                    throw TransientKeystoreException(DB_KEY_NAME, "Úložiště klíčů je dočasně nedostupné ($DB_KEY_NAME).", e)
+                }
                 PLog.e("KeyVault", e) { "Kritické tajemství $DB_KEY_NAME selhalo při dešifrování" }
                 throw CorruptedSecretException(DB_KEY_NAME, "Klíč databáze ($DB_KEY_NAME) nelze dešifrovat.", e)
             }
@@ -181,34 +230,58 @@ class KeyVault internal constructor(
 
     /**
      * Ověří čitelnost existujících kritických tajemství (`db.key`, `reticulum.identity`) bez vytváření nových.
-     * Při poškození zaznamená stav obnovy do [recoveryIssue] a vrátí jej místo pádu procesu.
+     * Při poškození nebo dočasném výpadku Keystore zaznamená stav obnovy do [recoveryIssue] a vrátí jej.
      */
     fun probeCriticalSecrets(secrets: SecretStore): CorruptedSecretIssue? {
+        var sawFailure = false
         val dbKeyFile = File(noBackupDir, DB_KEY_NAME)
         if (dbKeyFile.exists()) {
-            runCatching { databasePassphrase() }
+            runCatching { databasePassphrase() }.onFailure { sawFailure = true }
         }
         if (secrets.has(SecretStore.RETICULUM_IDENTITY)) {
-            runCatching { secrets.get(SecretStore.RETICULUM_IDENTITY) }
+            runCatching { secrets.get(SecretStore.RETICULUM_IDENTITY) }.onFailure { sawFailure = true }
         }
         if (secrets.has(SecretStore.RETICULUM_IDENTITY_ED25519)) {
-            runCatching { secrets.get(SecretStore.RETICULUM_IDENTITY_ED25519) }
+            runCatching { secrets.get(SecretStore.RETICULUM_IDENTITY_ED25519) }.onFailure { sawFailure = true }
+        }
+        if (!sawFailure && recoveryState.issue.value?.recoverable == true) {
+            recoveryState.clear()
         }
         return recoveryState.issue.value
     }
 
+    /** Vyčistí předchozí stav chyby a znovu ověří čitelnost kritických tajemství („Zkusit znovu“). */
+    fun retryCriticalSecrets(secrets: SecretStore): CorruptedSecretIssue? {
+        recoveryState.clear()
+        return probeCriticalSecrets(secrets)
+    }
+
     /**
-     * Bezpečně vymaže poškozená kritická tajemství před obnovou ze zálohy nebo vytvořením nové identity.
+     * Bezpečně vymaže výhradně poškozené kritické tajemství před obnovou ze zálohy nebo vytvořením nového.
+     * Přechodná chyba Keystore ani poškození ne-identitního tajemství nikdy nemažou identitu ani ostatní secrety (R3-8).
      */
     fun resetCorruptedForRecovery(
         secrets: SecretStore,
         issue: CorruptedSecretIssue? = recoveryState.issue.value,
         resetDatabaseToo: Boolean = issue?.kind == CriticalSecretKind.DB_KEY,
+        resetIdentityToo: Boolean = issue?.kind == CriticalSecretKind.RETICULUM_IDENTITY,
     ) {
-        secrets.delete(SecretStore.RETICULUM_IDENTITY)
-        secrets.delete(SecretStore.RETICULUM_IDENTITY_ED25519)
-        File(noBackupDir, "secrets/${SecretStore.RETICULUM_IDENTITY}.tmp").delete()
-        File(noBackupDir, "secrets/${SecretStore.RETICULUM_IDENTITY_ED25519}.tmp").delete()
+        if (issue?.recoverable == true) {
+            PLog.w("KeyVault") { "Odmítnuto mazání při přechodné chybě Keystore (${issue.secretName})" }
+            return
+        }
+        val shouldResetIdentity = resetIdentityToo || issue?.kind == CriticalSecretKind.RETICULUM_IDENTITY
+        if (shouldResetIdentity) {
+            val targetName = issue?.secretName
+            if (targetName == null || targetName == SecretStore.RETICULUM_IDENTITY) {
+                secrets.delete(SecretStore.RETICULUM_IDENTITY)
+                File(noBackupDir, "secrets/${SecretStore.RETICULUM_IDENTITY}.tmp").delete()
+            }
+            if (targetName == null || targetName == SecretStore.RETICULUM_IDENTITY_ED25519) {
+                secrets.delete(SecretStore.RETICULUM_IDENTITY_ED25519)
+                File(noBackupDir, "secrets/${SecretStore.RETICULUM_IDENTITY_ED25519}.tmp").delete()
+            }
+        }
 
         val shouldResetDb = resetDatabaseToo || issue?.kind == CriticalSecretKind.DB_KEY
         if (shouldResetDb) {
@@ -219,12 +292,6 @@ class KeyVault internal constructor(
                 File("${dbFile.absolutePath}-wal").delete()
                 File("${dbFile.absolutePath}-shm").delete()
                 File("${dbFile.absolutePath}-journal").delete()
-            }
-            if (!sealer.hasMasterKey()) {
-                val secretsDir = File(noBackupDir, "secrets")
-                secretsDir.listFiles()?.forEach { f ->
-                    if (f.isFile) f.delete()
-                }
             }
         }
         recoveryState.clear()
@@ -306,7 +373,12 @@ class SecretStore internal constructor(
                 vault.open(f.readBytes())
             } catch (e: Throwable) {
                 if (e is Error) throw e
-                vault.reportCriticalFailure(CriticalSecretKind.RETICULUM_IDENTITY, name, e)
+                val recoverable = isRecoverableKeystoreFailure(e)
+                vault.reportCriticalFailure(CriticalSecretKind.RETICULUM_IDENTITY, name, e, recoverable = recoverable)
+                if (recoverable) {
+                    PLog.w("SecretStore", e) { "Přechodná chyba Keystore pro '$name' (lze zkusit znovu)" }
+                    throw TransientKeystoreException(name, "Úložiště klíčů je pro '$name' dočasně nedostupné.", e)
+                }
                 PLog.e("SecretStore", e) { "Kritické tajemství '$name' selhalo při dešifrování" }
                 throw CorruptedSecretException(name, "Kritické tajemství '$name' nelze dešifrovat.", e)
             }
@@ -314,7 +386,10 @@ class SecretStore internal constructor(
         return try {
             vault.open(f.readBytes())
         } catch (e: GeneralSecurityException) {
-            PLog.w("SecretStore", e) { "Poškozené ne-kritické tajemství '$name', vracím null" }
+            PLog.w("SecretStore", e) { "Nečitelné ne-kritické tajemství '$name', vracím null" }
+            null
+        } catch (e: ProviderException) {
+            PLog.w("SecretStore", e) { "Přechodná chyba Keystore pro ne-kritické tajemství '$name', vracím null" }
             null
         } catch (e: IllegalArgumentException) {
             PLog.w("SecretStore", e) { "Neplatný formát tajemství '$name', vracím null" }

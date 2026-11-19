@@ -218,11 +218,47 @@ class GarminTest {
 class ShippedConfigTest {
     private val file = java.io.File("../app/src/main/assets/garmin_endpoints.json")
 
-    @Test fun `shipped config matches the schema and all endpoints are verified`() {
+    @Test fun `N-15 shipped config verified endpoints all have existing sampleRef files`() {
         val cfg = GarminEndpointsConfig.parse(file.readText())
         assertTrue(cfg.endpoints.isNotEmpty())
         assertTrue(cfg.token.verified)
-        assertTrue(cfg.endpoints.all { it.verified }, "Všechny endpointy jsou ověřeny proti oficiálnímu API")
+        val verified = cfg.endpoints.filter { it.verified }
+        assertTrue(verified.isNotEmpty())
+        for (ep in verified) {
+            val ref = ep.sampleRef
+            assertTrue(!ref.isNullOrBlank(), "Ověřený endpoint ${ep.metric} musí mít sampleRef")
+            assertTrue(java.io.File("../$ref").exists(), "Vzorek $ref pro ${ep.metric} neexistuje")
+        }
+        val unverifiedRefs = cfg.endpoints.filterNot { it.verified }.map { it.sampleRef }.toSet()
+        assertEquals(
+            setOf("docs/samples/heartrate.json", "docs/samples/steps.json", "docs/samples/stress.json"),
+            unverifiedRefs,
+        )
+    }
+
+    @Test fun `N-9 body battery uses stable ImportKey by metric and calendarDate across shifting endTimestampGmt`() {
+        val cfg = GarminEndpointsConfig.parse(file.readText())
+        val bbSpec = cfg.endpoints.first { it.metric == MetricType.BODY_BATTERY }
+        fun body(endGmt: String, value: Int) = """
+            {
+              "data": [
+                {
+                  "calendarDate": "2026-11-18",
+                  "wellnessChronology": {
+                    "startTimestampGmt": "2026-11-17T23:00:00.0",
+                    "endTimestampGmt": "$endGmt"
+                  },
+                  "bodyBattery": {
+                    "latestValue": $value
+                  }
+                }
+              ]
+            }
+        """.trimIndent()
+        val first = ResponseMapper.map(bbSpec, body("2026-11-18T10:15:00.0", 72), "acc", "Europe/Prague").items.single()
+        val second = ResponseMapper.map(bbSpec, body("2026-11-18T18:45:00.0", 38), "acc", "Europe/Prague").items.single()
+        assertEquals(first.id, second.id, "Body Battery klíč nesmí záviset na posouvajícím se endTimestampGmt")
+        assertEquals(38.0, second.value)
     }
 
     @Test fun `body battery maps numeric latestValue from real dailysummaries sample`() {

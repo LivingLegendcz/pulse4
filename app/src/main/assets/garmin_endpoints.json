@@ -203,7 +203,7 @@
       "timeFormat": "ISO_INSTANT",
       "scale": 1.0,
       "localDatePath": "calendarDate",
-      "verified": true,
+      "verified": false,
       "sampleRef": "docs/samples/heartrate.json"
     },
     {
@@ -218,7 +218,7 @@
       "timeFormat": "ISO_INSTANT",
       "scale": 1.0,
       "localDatePath": "calendarDate",
-      "verified": true,
+      "verified": false,
       "sampleRef": "docs/samples/steps.json"
     },
     {
@@ -233,7 +233,7 @@
       "timeFormat": "ISO_INSTANT",
       "scale": 1.0,
       "localDatePath": "calendarDate",
-      "verified": true,
+      "verified": false,
       "sampleRef": "docs/samples/stress.json"
     },
     {

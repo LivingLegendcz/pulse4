@@ -123,6 +123,15 @@ class CardsTest {
         assertEquals("40", m.getValue("bb")); assertEquals("50 ms", m.getValue("hrv"))
         assertFalse("stress" in m, "bez měření není hodnota")
     }
+
+    @Test fun `RE-2 ECG_AFIB uses LAST categorical aggregation instead of averaging`() {
+        val samples = listOf(
+            obs(MetricType.ECG_AFIB, 0.0, 1000L),
+            obs(MetricType.ECG_AFIB, 1.0, 2000L),
+        )
+        assertEquals(Agg.LAST, Aggregation.of(MetricType.ECG_AFIB))
+        assertEquals(1.0, Aggregation.value(MetricType.ECG_AFIB, samples))
+    }
 }
 
 class SeriesTest {

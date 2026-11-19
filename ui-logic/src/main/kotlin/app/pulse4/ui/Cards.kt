@@ -34,6 +34,7 @@ object Aggregation {
         MetricType.SLEEP_AWAKE,
         MetricType.SLEEP_AWAKE_COUNT,
         MetricType.SLEEP_NAP,
+        MetricType.ECG_AFIB,
         MetricType.ECG -> Agg.LAST
         else -> Agg.AVG
     }

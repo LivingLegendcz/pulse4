@@ -147,6 +147,7 @@ import androidx.compose.ui.unit.sp
 import app.pulse4.android.data.toDomain
 import app.pulse4.android.di.FitImportResult
 import app.pulse4.android.di.ServiceLocator
+import app.pulse4.android.di.ImportService
 import app.pulse4.android.di.WithingsService
 import app.pulse4.domain.Activity
 import app.pulse4.domain.MetricObservation
@@ -182,6 +183,23 @@ internal val ECG_METRIC_TYPES = listOf(
 internal fun pickLatestEcgObservation(rows: List<MetricObservation>): MetricObservation? =
     rows.filter { !it.deleted && it.type in ECG_METRIC_TYPES }
         .maxWithOrNull(compareBy<MetricObservation> { it.startUtcMs }.thenBy { -ECG_METRIC_TYPES.indexOf(it.type) })
+
+internal fun mergeEcgHistoryObservations(rows: List<MetricObservation>): List<MetricObservation> =
+    rows.filter { !it.deleted && it.type in ECG_METRIC_TYPES }
+        .groupBy { obs ->
+            parseEcgOrigin(obs.origin, obs.value).signalId?.let { "sig:$it" } ?: "ts:${obs.startUtcMs}"
+        }
+        .values
+        .mapNotNull { group -> pickLatestEcgObservation(group) }
+        .sortedWith(compareByDescending<MetricObservation> { it.startUtcMs }.thenBy { ECG_METRIC_TYPES.indexOf(it.type) })
+
+internal fun filterTopLevelActivities(
+    rows: List<app.pulse4.android.data.ActivitySummaryRow>,
+): List<app.pulse4.android.data.ActivitySummaryRow> =
+    rows.filterNot { ImportService.isMultisportLegId(it.id) }
+
+internal fun resolveHrZonesForUi(domHrZones: List<Double>): List<Double> =
+    if (domHrZones.size == 5 && domHrZones.any { it > 0.0 }) domHrZones else emptyList()
 
 data class EcgParsed(
     val signalId: Long?,
@@ -606,7 +624,7 @@ fun TodayScreen(
 
     val states by sl.db.areaStates().all().collectAsState(initial = emptyList())
     val units by sl.settings.unitSystemFlow.collectAsState()
-    val recentActs by sl.db.activities().recentSummaries(1).collectAsState(initial = emptyList())
+    val recentActs by sl.db.activities().recentSummaries(10).collectAsState(initial = emptyList())
     val currentDateKey = LocalDate.now(ZoneId.of(sl.settings.zoneId)).toString()
     val importWorkInfos by androidx.work.WorkManager.getInstance(ctx)
         .getWorkInfosForUniqueWorkFlow("import-now")
@@ -950,7 +968,7 @@ fun TodayScreen(
         )
 
         // 3. Poslední sportovní aktivita (Garmin FIT), pokud je k dispozici
-        val latestAct = recentActs.firstOrNull()
+        val latestAct = filterTopLevelActivities(recentActs).firstOrNull() ?: recentActs.firstOrNull()
         if (latestAct != null) {
             Spacer(Modifier.height(12.dp))
             OuraFeaturedActivityBanner(
@@ -3372,16 +3390,24 @@ fun LazyMetricHistoryListCard(
         if (!isExpanded || loadedItems.isNotEmpty()) return@LaunchedEffect
         isInitialLoading = true
         val (firstBatch, count) = withContext(Dispatchers.IO) {
-            val total = sl.db.observations().countForType(type.name)
-            val rows = sl.db.observations()
-                .pagedForType(type.name, limit = pageSize, offset = 0)
-                .map { it.toDomain() }
-            rows to total
+            if (type == MetricType.ECG) {
+                val allEcg = ECG_METRIC_TYPES.flatMap { t ->
+                    sl.db.observations().pagedForType(t.name, limit = 1000, offset = 0)
+                }.map { it.toDomain() }
+                val merged = mergeEcgHistoryObservations(allEcg)
+                merged.take(pageSize) to merged.size
+            } else {
+                val total = sl.db.observations().countForType(type.name)
+                val rows = sl.db.observations()
+                    .pagedForType(type.name, limit = pageSize, offset = 0)
+                    .map { it.toDomain() }
+                rows to total
+            }
         }
         loadedItems = firstBatch
         totalCount = maxOf(count, firstBatch.size)
         dbOffset = firstBatch.size
-        hasMore = firstBatch.size >= pageSize && dbOffset < totalCount
+        hasMore = dbOffset < totalCount && (type == MetricType.ECG || firstBatch.size >= pageSize)
         isInitialLoading = false
     }
 
@@ -3398,9 +3424,16 @@ fun LazyMetricHistoryListCard(
         if (isExpanded && shouldLoadMore && hasMore && !isInitialLoading && !isLoadingMore) {
             isLoadingMore = true
             val nextBatch = withContext(Dispatchers.IO) {
-                sl.db.observations()
-                    .pagedForType(type.name, limit = pageSize, offset = dbOffset)
-                    .map { it.toDomain() }
+                if (type == MetricType.ECG) {
+                    val allEcg = ECG_METRIC_TYPES.flatMap { t ->
+                        sl.db.observations().pagedForType(t.name, limit = 1000, offset = 0)
+                    }.map { it.toDomain() }
+                    mergeEcgHistoryObservations(allEcg).drop(dbOffset).take(pageSize)
+                } else {
+                    sl.db.observations()
+                        .pagedForType(type.name, limit = pageSize, offset = dbOffset)
+                        .map { it.toDomain() }
+                }
             }
             if (nextBatch.isEmpty()) {
                 hasMore = false
@@ -3713,10 +3746,10 @@ fun LazyMetricHistoryListCard(
                                 }
 
                                 else -> {
-                                    val displayValue = if (isConvertibleBodyCompMetric(type)) {
-                                        formatBodyCompValue(type, obs.value, refWeightKg, bodyUnitMode, includeSecondary = true)
+                                    val displayValue = if (isConvertibleBodyCompMetric(obs.type)) {
+                                        formatBodyCompValue(obs.type, obs.value, refWeightKg, bodyUnitMode, includeSecondary = true)
                                     } else {
-                                        formatMetricValue(type, obs.value)
+                                        formatMetricValue(obs.type, obs.value)
                                     }
 
                                     val bandDotColor = if (usual == null) {
@@ -3760,7 +3793,7 @@ fun LazyMetricHistoryListCard(
                                                 if (type in ECG_METRIC_TYPES) {
                                                     val det = parseEcgOrigin(obs.origin, obs.value)
                                                     val rhythm = when (det.afibClassification) {
-                                                        0 -> "Sinusový rytmus"
+                                                        0 -> "AFib nezjištěna"
                                                         1 -> "AFib detekována"
                                                         2 -> "Neprůkazný záznam"
                                                         else -> "Záznam EKG"
@@ -5966,7 +5999,7 @@ fun ActivitiesScreen(
         value = withContext(Dispatchers.Default) {
             val zoneCache = HashMap<String, ZoneId>()
             val defaultZone = ZoneId.systemDefault()
-            val mine = acts.map { row ->
+            val mine = filterTopLevelActivities(acts).map { row ->
                 val sportEnum = runCatching { Sport.valueOf(row.sport) }.getOrDefault(Sport.OTHER)
                 val title = row.title?.takeIf { it.isNotBlank() } ?: sportEnum.czechName()
                 val zone = row.zoneId?.let { zid ->
@@ -7290,7 +7323,7 @@ data class LoadedActivityDetail(
 )
 
 fun loadUnifiedActivity(sl: ServiceLocator, key: String): LoadedActivityDetail? {
-    android.util.Log.i("Pulse4", "loadUnifiedActivity called for key=$key")
+    PLog.i("Pulse4") { "loadUnifiedActivity called for key=$key" }
     if (key.startsWith("shared:")) {
         val parts = key.split(":", limit = 3)
         if (parts.size < 3) return null
@@ -7473,12 +7506,18 @@ fun ActivityDetailScreen(sl: ServiceLocator, id: String, onBack: () -> Unit = {}
     val loaded by io(id to units) {
         try {
             val res = loadUnifiedActivity(sl, id)
-            android.util.Log.i("Pulse4", "ActivityDetailScreen: loaded $id -> title=${res?.title}, pts=${res?.track?.size}")
+            PLog.i("Pulse4") { "ActivityDetailScreen: loaded $id -> title=${res?.title}, pts=${res?.track?.size}" }
             res
         } catch (e: Throwable) {
             PLog.e("Pulse4", e) { "ActivityDetailScreen: error loading $id" }
             null
         }
+    }
+    val childLegs by io(id) {
+        if (id.startsWith("shared:") || ImportService.isMultisportLegId(id)) emptyList()
+        else sl.db.activities().allSummariesNow()
+            .filter { ImportService.parentIdFromLegId(it.id) == id }
+            .sortedBy { it.id.substringAfterLast("-s").toIntOrNull() ?: Int.MAX_VALUE }
     }
     var cursor by remember { mutableStateOf<Int?>(null) }
     var range by remember { mutableStateOf<IntRange?>(null) }
@@ -8094,6 +8133,47 @@ fun ActivityDetailScreen(sl: ServiceLocator, id: String, onBack: () -> Unit = {}
 
             Spacer(Modifier.height(12.dp))
 
+            val legs = childLegs.orEmpty()
+            if (legs.isNotEmpty()) {
+                Card(
+                    shape = RoundedCornerShape(22.dp),
+                    border = BorderStroke(1.dp, Color(0xFF38BDF8).copy(alpha = 0.40f)),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF070D18)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            "ÚSEKY MULTISPORTU (${legs.size})",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color(0xFF38BDF8),
+                            letterSpacing = 0.8.sp
+                        )
+                        for (leg in legs) {
+                            val legSport = runCatching { Sport.valueOf(leg.sport) }.getOrDefault(Sport.OTHER)
+                            val legTitle = leg.title?.takeIf { it.isNotBlank() } ?: legSport.czechName()
+                            val legDetails = buildList {
+                                leg.distanceM?.takeIf { it > 0 }?.let { add(fmt.km(it)) }
+                                leg.movingTimeS?.takeIf { it > 0 }?.let { add(fmt.duration(it)) }
+                                leg.avgHeartRate?.let { add("$it bpm") }
+                                leg.ascentM?.takeIf { it > 0 }?.let { add("+${fmt.elevation(it)}") }
+                            }.joinToString(" · ")
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(legTitle, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold, color = Color.White, modifier = Modifier.weight(1f))
+                                if (legDetails.isNotBlank()) {
+                                    Text(legDetails, style = MaterialTheme.typography.labelSmall, color = Color(0xFFCBD5E1))
+                                }
+                            }
+                        }
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+            }
+
             // Garmin Firstbeat Training Effect, Stamina, Kondice, Kardio úsilí, GAP a Best Efforts
             val aeVal = dom?.aerobicTrainingEffect ?: act.sharedProjection?.aerobicTrainingEffect
             val anVal = dom?.anaerobicTrainingEffect ?: act.sharedProjection?.anaerobicTrainingEffect
@@ -8626,17 +8706,8 @@ fun ActivityDetailScreen(sl: ServiceLocator, id: String, onBack: () -> Unit = {}
             Spacer(Modifier.height(12.dp))
 
             // 5. SPEKTRUM TEPOVÝCH ZÓN (Z1–Z5) A VÝKONOVÝCH ZÓN (Z1–Z5) S ATMOSFÉRICKÝM POZADÍM
-            val hrZones = remember(dom, track, act.maxHeartRate) {
-                val fromDom = dom?.hrZoneTimesS.orEmpty()
-                if (fromDom.size == 5 && fromDom.any { it > 0.0 }) fromDom
-                else if (track.size >= 2 && track.any { it.heartRate != null }) {
-                    val maxRef = (act.maxHeartRate ?: 185).coerceAtLeast(150).toDouble()
-                    val bounds = listOf(maxRef * 0.60, maxRef * 0.70, maxRef * 0.80, maxRef * 0.90)
-                    app.pulse4.analytics.Zones.timeInZones(
-                        track.map { it.tMs to it.heartRate?.toDouble() },
-                        app.pulse4.analytics.Zones.ZoneSet(bounds)
-                    ).toList()
-                } else emptyList()
+            val hrZones = remember(dom) {
+                resolveHrZonesForUi(dom?.hrZoneTimesS.orEmpty())
             }
 
             if (hrZones.size == 5 && hrZones.sum() > 0.0) {

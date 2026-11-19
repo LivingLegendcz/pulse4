@@ -35,15 +35,15 @@ class Pulse4App : Application() {
             }
         }
         if (BuildConfig.DEBUG) {
-            // L5 (R4-3): v debug buildu je jakékoli čtení / zápis disku na hlavním vlákně fatální, ne jen
-            // v migračních rámcích. ThreadPolicy platí jen pro vlákno, které ji nastaví (= hlavní vlákno).
+            // L5 (R4-3): v debug buildu se každé čtení / zápis disku na hlavním vlákně loguje (tag StrictMode).
+            // Záměrně BEZ penaltyDeath: debug APK používají i reální uživatelé, pád by je potrestal za
+            // případné zbývající porušení. Porušení hlídá upgrade test (grep StrictMode v logcatu).
             runCatching {
                 StrictMode.setThreadPolicy(
                     StrictMode.ThreadPolicy.Builder()
                         .detectDiskReads()
                         .detectDiskWrites()
                         .penaltyLog()
-                        .penaltyDeath()
                         .build()
                 )
             }

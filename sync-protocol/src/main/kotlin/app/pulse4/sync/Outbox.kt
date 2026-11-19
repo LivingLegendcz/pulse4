@@ -31,9 +31,11 @@ data class OutboxItem(
     val attempts: Int = 0,
     val nextAttemptAtMs: Long = 0,
     val lastError: String? = null,
+    val grantRefs: List<String> = listOfNotNull(grantId),
 ) {
     val sizeBytes: Int get() = wire.size
     val objectKey: String get() = "$objectType/$objectId"
+    val effectiveGrantRefs: Set<String> get() = (grantRefs + listOfNotNull(grantId)).toSet()
     override fun equals(other: Any?) = other is OutboxItem && other.eventId == eventId && other.state == state && other.attempts == attempts
     override fun hashCode() = eventId.hashCode()
 }
@@ -64,6 +66,7 @@ class OutboxManager(
     private val random: Random = Random.Default,
     private val baseBackoffMs: Long = 30_000,
     private val maxBackoffMs: Long = 6L * 3600 * 1000,
+    private val onPermissionDenied: ((recipient: String, objectKey: String) -> Unit)? = null,
 ) {
     private val open = setOf(DeliveryState.QUEUED, DeliveryState.HANDED_TO_TRANSPORT, DeliveryState.STORED_IN_PROPAGATION)
     private val pendingSnapshotResets = LinkedHashSet<Pair<String, String>>()
@@ -103,11 +106,21 @@ class OutboxManager(
         if (item.sizeBytes > limits.maxEventBytes) return@synchronized EnqueueResult.OverQuota
         if (queuedBytes() + item.sizeBytes > limits.maxQueueBytes) return@synchronized EnqueueResult.OverQuota
         val superseded = mutableListOf<String>()
-        if (item.kind in Kinds.supersedable) {
+        val isProjectionMutation = item.kind == Kinds.PROJECTION_UPSERT || item.kind == Kinds.PROJECTION_REMOVE
+        if (item.kind in Kinds.supersedable || isProjectionMutation) {
             // Nahrazuje se jen to, co ještě neopustilo telefon; co už leží na cizím uzlu, vyřeší pořadí verzí u příjemce.
-            store.all().filter {
-                it.state == DeliveryState.QUEUED && it.recipient == item.recipient && it.kind == item.kind &&
-                    it.objectKey == item.objectKey && it.objectVersion < item.objectVersion
+            // Zároveň nový upsert ruší neodeslaný PROJECTION_REMOVE stejného klíče a naopak (N-2).
+            store.all().filter { existing ->
+                existing.state == DeliveryState.QUEUED &&
+                    existing.recipient == item.recipient &&
+                    existing.objectKey == item.objectKey &&
+                    (
+                        (existing.kind == item.kind && existing.objectVersion < item.objectVersion) ||
+                            (isProjectionMutation &&
+                                existing.kind != item.kind &&
+                                (existing.kind == Kinds.PROJECTION_UPSERT || existing.kind == Kinds.PROJECTION_REMOVE) &&
+                                existing.createdAtMs <= item.createdAtMs)
+                        )
             }.forEach {
                 store.update(it.copy(state = DeliveryState.SUPERSEDED))
                 superseded += it.eventId
@@ -119,15 +132,29 @@ class OutboxManager(
 
     /** Položky připravené k pokusu, v pořadí vzniku (stabilní pro jednoho příjemce). */
     fun due(nowMs: Long, recipient: String? = null, localPeers: Set<String> = emptySet()): List<OutboxItem> = synchronized(this) {
-        store.all().filter {
+        val allItems = store.all()
+        val newestOpenRemoveAt = HashMap<Pair<String, String>, Long>()
+        for (it in allItems) {
+            if (it.kind == Kinds.PROJECTION_REMOVE && it.state in open && (recipient == null || it.recipient == recipient)) {
+                val key = it.recipient to it.objectKey
+                val prev = newestOpenRemoveAt[key]
+                if (prev == null || it.createdAtMs > prev) newestOpenRemoveAt[key] = it.createdAtMs
+            }
+        }
+        allItems.filter {
             val isLocalFastTrack = it.state == DeliveryState.STORED_IN_PROPAGATION &&
                 it.recipient in localPeers &&
                 (inFlightLocalFastTrackUntil[it.eventId] ?: 0L) <= nowMs
             val isStoredRetry = it.state == DeliveryState.STORED_IN_PROPAGATION && it.nextAttemptAtMs <= nowMs
-            (it.state == DeliveryState.QUEUED || it.state == DeliveryState.HANDED_TO_TRANSPORT || isLocalFastTrack || isStoredRetry) &&
+            val maskedByNewerRemove = it.kind == Kinds.PROJECTION_UPSERT &&
+                newestOpenRemoveAt[it.recipient to it.objectKey]?.let { rmAt -> it.createdAtMs <= rmAt } == true
+            !maskedByNewerRemove &&
+                (it.state == DeliveryState.QUEUED || it.state == DeliveryState.HANDED_TO_TRANSPORT || isLocalFastTrack || isStoredRetry) &&
                 (isLocalFastTrack || it.nextAttemptAtMs <= nowMs) &&
                 (recipient == null || it.recipient == recipient)
-        }.sortedWith(compareBy({ it.createdAtMs }, { it.objectVersion }))
+        }.sortedWith(
+            compareBy<OutboxItem>({ it.createdAtMs }, { if (it.kind == Kinds.PROJECTION_REMOVE) 0 else 1 }, { it.objectVersion })
+        )
     }
 
     fun onTransportResult(eventId: String, result: TransportResult, nowMs: Long) = synchronized(this) {
@@ -171,10 +198,26 @@ class OutboxManager(
         if (it.recipient != from) return@synchronized false
         if (it.state == DeliveryState.ACKED) return@synchronized true
         return@synchronized when (ack.status) {
-            Ack.Status.ACCEPTED, Ack.Status.DUPLICATE, Ack.Status.STALE -> { store.update(it.copy(state = DeliveryState.ACKED)); true }
+            Ack.Status.ACCEPTED, Ack.Status.DUPLICATE, Ack.Status.STALE -> {
+                store.update(it.copy(state = DeliveryState.ACKED))
+                if (it.kind == Kinds.PROJECTION_REMOVE) {
+                    store.all().filter { old ->
+                        old.state in open &&
+                            old.kind == Kinds.PROJECTION_UPSERT &&
+                            old.recipient == it.recipient &&
+                            old.objectKey == it.objectKey &&
+                            old.createdAtMs <= it.createdAtMs
+                    }.forEach { old ->
+                        store.update(old.copy(state = DeliveryState.SUPERSEDED))
+                    }
+                }
+                true
+            }
             Ack.Status.REJECTED if ack.reason == RejectReason.NOT_PERMITTED.name -> {
                 // Oprávnění bylo odepřeno (např. příjemce vypnul příjem): neresetovat snapshot, jinak vznikne nekonečná smyčka.
+                // Zároveň smažeme contentHash v sent ledgeru, aby pozdější zapnutí příjmu znovu poslalo celé okno (RE-5).
                 store.update(it.copy(state = DeliveryState.CANCELLED, lastError = ack.reason))
+                onPermissionDenied?.invoke(it.recipient, it.objectKey)
                 true
             }
             // Odmítnutí (jiný důvod) a mezera nejsou doručení: položka se zastaví s chybou, aplikace vygeneruje snapshot.
@@ -191,7 +234,7 @@ class OutboxManager(
 
     fun cancelForGrant(grantId: String): CancelResult = synchronized(this) {
         var c = 0; var left = 0
-        store.all().filter { it.grantId == grantId }.forEach {
+        store.all().filter { grantId in it.effectiveGrantRefs }.forEach {
             when (it.state) {
                 DeliveryState.QUEUED -> { store.update(it.copy(state = DeliveryState.CANCELLED)); c++ }
                 DeliveryState.HANDED_TO_TRANSPORT, DeliveryState.STORED_IN_PROPAGATION -> left++

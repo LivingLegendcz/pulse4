@@ -3,6 +3,7 @@ package app.pulse4.ui
 import app.pulse4.domain.Provider
 import app.pulse4.sharing.Category
 import app.pulse4.sharing.Field
+import app.pulse4.sharing.PlanRight
 import app.pulse4.sharing.ShareGrant
 import app.pulse4.sharing.TimeScope
 import java.time.LocalDate
@@ -157,7 +158,46 @@ object GrantEditor {
         val sourcesChanged: Boolean = false,
         val activityFieldsChanged: Boolean = false,
         val hasChanges: Boolean = false,
+        val oldScope: TimeScope? = null,
+        val newScope: TimeScope? = null,
+        val scopeChanged: Boolean = false,
     )
+
+    fun preservedGlobalScope(existingDirectGrants: List<ShareGrant>, today: LocalDate): TimeScope {
+        if (existingDirectGrants.isEmpty()) return TimeScope.continuousFrom(today.minusDays(7))
+        if (existingDirectGrants.size == 1) return existingDirectGrants.first().scope
+        val earliestFrom = existingDirectGrants
+            .mapNotNull { it.scope.from?.let { f -> runCatching { LocalDate.parse(f) }.getOrNull() } }
+            .minOrNull()
+            ?: today.minusDays(7)
+        if (existingDirectGrants.all { it.scope.kind == TimeScope.Kind.ONCE }) {
+            val latestTo = existingDirectGrants
+                .mapNotNull { it.scope.to?.let { t -> runCatching { LocalDate.parse(t) }.getOrNull() } }
+                .maxOrNull()
+                ?: today
+            return TimeScope.once(earliestFrom, latestTo)
+        }
+        val kind = if (existingDirectGrants.all { it.scope.kind == TimeScope.Kind.FROM }) {
+            TimeScope.Kind.FROM
+        } else {
+            TimeScope.Kind.CONTINUOUS
+        }
+        return TimeScope(kind, earliestFrom.toString())
+    }
+
+    fun mergedPlanRights(existingDirectGrants: List<ShareGrant>): Map<String, PlanRight> {
+        if (existingDirectGrants.isEmpty()) return emptyMap()
+        val merged = LinkedHashMap<String, PlanRight>()
+        for (grant in existingDirectGrants) {
+            for ((planId, right) in grant.planRights) {
+                val prev = merged[planId]
+                if (prev == null || right.ordinal > prev.ordinal) {
+                    merged[planId] = right
+                }
+            }
+        }
+        return merged
+    }
 
     /** S2: Pracuje výhradně s přímými granty (`groupId == null`). */
     fun directGrants(activeGrants: List<ShareGrant>, ownerId: String? = null): List<ShareGrant> =
@@ -204,6 +244,8 @@ object GrantEditor {
         targetRecipients: Set<String>,
         targetExtraActivityFields: Set<Field> = emptySet(),
         targetSources: Set<Provider>? = existingDirectGrants.firstOrNull()?.sources,
+        today: LocalDate? = null,
+        targetScope: TimeScope? = null,
     ): GlobalSaveDiff {
         val oldRecipients = existingDirectGrants.flatMap { it.recipients }.toSet()
         val oldCategories = existingDirectGrants.flatMap { it.fields }.map { it.category }.toSet()
@@ -240,10 +282,19 @@ object GrantEditor {
             (Category.ACTIVITY in effectiveNewCategories) &&
             newExtraAct != oldExtraAct
 
+        val fallbackToday = today ?: LocalDate.of(1970, 1, 1)
+        val oldScope = existingDirectGrants.takeIf { it.isNotEmpty() }?.let { preservedGlobalScope(it, fallbackToday) }
+        val newScope = if (effectiveNewRecipients.isNotEmpty() && effectiveNewCategories.isNotEmpty()) {
+            targetScope ?: today?.let { preservedGlobalScope(existingDirectGrants, it) } ?: oldScope
+        } else {
+            null
+        }
+        val scopeChanged = oldScope != null && newScope != null && oldScope != newScope
+
         val hasChanges = if (existingDirectGrants.isEmpty()) {
             effectiveNewRecipients.isNotEmpty() && effectiveNewCategories.isNotEmpty()
         } else {
-            addedByRecipient.isNotEmpty() || removedByRecipient.isNotEmpty() || sourcesChanged || activityFieldsChanged
+            addedByRecipient.isNotEmpty() || removedByRecipient.isNotEmpty() || sourcesChanged || activityFieldsChanged || scopeChanged
         }
 
         return GlobalSaveDiff(
@@ -256,6 +307,9 @@ object GrantEditor {
             sourcesChanged = sourcesChanged,
             activityFieldsChanged = activityFieldsChanged,
             hasChanges = hasChanges,
+            oldScope = oldScope,
+            newScope = newScope,
+            scopeChanged = scopeChanged,
         )
     }
 
@@ -269,6 +323,7 @@ object GrantEditor {
         today: LocalDate,
         nowMs: Long,
         sources: Set<Provider>? = existingDirectGrants.firstOrNull()?.sources,
+        scope: TimeScope = preservedGlobalScope(existingDirectGrants, today),
     ): ShareGrant? {
         if (hasIncompatibleDirectGrants(existingDirectGrants)) return null
         if (selectedRecipients.isEmpty() || selectedCategories.isEmpty()) return null
@@ -292,7 +347,8 @@ object GrantEditor {
             ownerId = ownerId,
             recipients = selectedRecipients,
             fields = chosenFields,
-            scope = TimeScope.continuousFrom(today.minusDays(7)),
+            planRights = mergedPlanRights(existingDirectGrants),
+            scope = scope,
             groupId = null,
             createdAtMs = nowMs,
             sources = sources,

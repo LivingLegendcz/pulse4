@@ -134,6 +134,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -252,7 +253,7 @@ fun getMetricUiConfig(type: MetricType): MetricUiConfig = when (type) {
         title = "Variabilita tepu (HRV)",
         shortLabel = "HRV",
         unit = "ms",
-        color = Color(0xFF2DD4BF),
+        color = MetricPalette.of(type),
         explanation = "Noční HRV (rMSSD) odráží rovnováhu autonomního nervového systému. Vyšší hodnoty v rámci vašeho pásma značí vysokou připravenost na zátěž a efektivní regeneraci."
     )
     MetricType.RESTING_HEART_RATE, MetricType.HEART_RATE -> MetricUiConfig(
@@ -260,7 +261,7 @@ fun getMetricUiConfig(type: MetricType): MetricUiConfig = when (type) {
         title = if (type == MetricType.HEART_RATE) "Srdeční frekvence" else "Klidový tep (RHR)",
         shortLabel = if (type == MetricType.HEART_RATE) "Tep" else "Klidový tep",
         unit = "bpm",
-        color = Color(0xFFFB7185),
+        color = MetricPalette.of(type),
         explanation = "Klidová srdeční frekvence měřená ve spánku. Trvalé snížení značí růst aerobní kondice; vzestup o více než 5 bpm může signalizovat začínající nemoc, únavu či alkohol."
     )
     MetricType.SLEEP_DURATION, MetricType.SLEEP_SCORE,
@@ -287,7 +288,7 @@ fun getMetricUiConfig(type: MetricType): MetricUiConfig = when (type) {
             MetricType.SLEEP_AWAKE_COUNT -> "×"
             else -> "hod"
         },
-        color = Color(0xFF818CF8),
+        color = MetricPalette.of(type),
         explanation = "Celková doba nočního spánku. Dlouhodobý spánek 7–9 hodin je klíčový pro buněčnou a svalovou obnovu, syntézu růstového hormonu a konsolidaci paměti."
     )
     MetricType.BODY_BATTERY -> MetricUiConfig(
@@ -295,7 +296,7 @@ fun getMetricUiConfig(type: MetricType): MetricUiConfig = when (type) {
         title = "Body Battery",
         shortLabel = "B.Battery",
         unit = "/ 100",
-        color = Color(0xFFF59E0B),
+        color = MetricPalette.of(type),
         explanation = "Komplexní energetické skóre Garminu (0–100) kalkulované z HRV, spánku, stresu a denních aktivit. Ranní hodnota 75+ značí plně dobité baterie."
     )
     MetricType.STRESS -> MetricUiConfig(
@@ -303,7 +304,7 @@ fun getMetricUiConfig(type: MetricType): MetricUiConfig = when (type) {
         title = "Hladina stresu",
         shortLabel = "Stres",
         unit = "/ 100",
-        color = Color(0xFFA855F7),
+        color = MetricPalette.of(type),
         explanation = "Fyziologický stres měřený z odchylek intervalů tepu (0–25 odpočinek, 26–50 mírný, 51–75 střední, 76–100 vysoký stres). Zobrazuje aktivaci sympatiku."
     )
     MetricType.STEPS -> MetricUiConfig(
@@ -311,7 +312,7 @@ fun getMetricUiConfig(type: MetricType): MetricUiConfig = when (type) {
         title = "Denní kroky",
         shortLabel = "Kroky",
         unit = "kroků",
-        color = Color(0xFF38BDF8),
+        color = MetricPalette.of(type),
         explanation = "Počet kroků za den jako ukazatel spontánní neúmyslné fyzické aktivity (NEAT). Pravidelný pohyb podporuje kardiovaskulární zdraví a inzulinovou senzitivitu."
     )
     MetricType.WEIGHT -> MetricUiConfig(
@@ -319,7 +320,7 @@ fun getMetricUiConfig(type: MetricType): MetricUiConfig = when (type) {
         title = "Tělesná hmotnost",
         shortLabel = "Váha",
         unit = fmt.weightUnit(),
-        color = Color(0xFF2DD4BF),
+        color = MetricPalette.of(type),
         explanation = "Dlouhodobý trend tělesné hmotnosti sloučený ze všech připojených vah (Withings, Health Connect, Garmin), očištěný od krátkodobých výkyvů vody."
     )
     MetricType.BODY_FAT -> MetricUiConfig(
@@ -327,7 +328,7 @@ fun getMetricUiConfig(type: MetricType): MetricUiConfig = when (type) {
         title = "Tělesný tuk",
         shortLabel = "Tuk",
         unit = "%",
-        color = Color(0xFFF59E0B),
+        color = MetricPalette.of(type),
         explanation = "Procentuální podíl tělesné tukové tkáně. Pro sledování sportovní formy a složení těla je spolehlivějším ukazatelem než samotné BMI."
     )
     MetricType.MUSCLE_MASS -> MetricUiConfig(
@@ -335,7 +336,7 @@ fun getMetricUiConfig(type: MetricType): MetricUiConfig = when (type) {
         title = "Svalová hmota",
         shortLabel = "Svaly",
         unit = fmt.weightUnit(),
-        color = Color(0xFF10B981),
+        color = MetricPalette.of(type),
         explanation = "Hmotnost kosterního a hladkého svalstva v těle. Zásadní ukazatel silové kondice, regenerace a bazální rychlosti metabolismu."
     )
     MetricType.BODY_WATER -> MetricUiConfig(
@@ -343,7 +344,7 @@ fun getMetricUiConfig(type: MetricType): MetricUiConfig = when (type) {
         title = "Tělesná voda",
         shortLabel = "Voda",
         unit = "%",
-        color = Color(0xFF06B6D4),
+        color = MetricPalette.of(type),
         explanation = "Procentuální podíl vody v těle odrážející celkovou hydrataci organismu. Zdravé rozmezí u dospělých je obvykle 50–65 %."
     )
     MetricType.BONE_MASS -> MetricUiConfig(
@@ -351,7 +352,7 @@ fun getMetricUiConfig(type: MetricType): MetricUiConfig = when (type) {
         title = "Kostní hmota",
         shortLabel = "Kosti",
         unit = fmt.weightUnit(),
-        color = Color(0xFF38BDF8),
+        color = MetricPalette.of(type),
         explanation = "Minerální hmotnost kosterní soustavy. Pomáhá sledovat stabilitu a denzitu kostní tkáně v průběhu času."
     )
     MetricType.FAT_FREE_MASS -> MetricUiConfig(
@@ -359,7 +360,7 @@ fun getMetricUiConfig(type: MetricType): MetricUiConfig = when (type) {
         title = "Beztuková hmota (FFM)",
         shortLabel = "FFM",
         unit = fmt.weightUnit(),
-        color = Color(0xFF34D399),
+        color = MetricPalette.of(type),
         explanation = "Celková beztuková tělesná hmota (Lean Body Mass) zahrnující svalstvo, vnitřní orgány, kosti a tělesnou tekutinu."
     )
     MetricType.VISCERAL_FAT -> MetricUiConfig(
@@ -367,7 +368,7 @@ fun getMetricUiConfig(type: MetricType): MetricUiConfig = when (type) {
         title = "Viscerální tuk",
         shortLabel = "Viscerální tuk",
         unit = "index",
-        color = Color(0xFFF97316),
+        color = MetricPalette.of(type),
         explanation = "Tuk obklopující vnitřní orgány v dutině břišní. Hodnoty 1–9 značí zdravou úroveň, 10–14 zvýšenou a 15+ vysoké kardiovaskulární riziko."
     )
     MetricType.VASCULAR_AGE -> MetricUiConfig(
@@ -375,7 +376,7 @@ fun getMetricUiConfig(type: MetricType): MetricUiConfig = when (type) {
         title = "Cévní věk",
         shortLabel = "Cévní věk",
         unit = "let",
-        color = Color(0xFFEC4899),
+        color = MetricPalette.of(type),
         explanation = "Orientační biologické stáří tepen vypočtené z rychlosti pulzní vlny v porovnání s vaší věkovou skupinou."
     )
     MetricType.PULSE_WAVE_VELOCITY -> MetricUiConfig(
@@ -383,7 +384,7 @@ fun getMetricUiConfig(type: MetricType): MetricUiConfig = when (type) {
         title = "Rychlost pulzní vlny (PWV)",
         shortLabel = "PWV",
         unit = "m/s",
-        color = Color(0xFF8B5CF6),
+        color = MetricPalette.of(type),
         explanation = "Rychlost šíření pulzní vlny v cévách (m/s). Nižší hodnoty ukazují na pružné, zdravé cévy."
     )
     MetricType.BMR -> MetricUiConfig(
@@ -391,7 +392,7 @@ fun getMetricUiConfig(type: MetricType): MetricUiConfig = when (type) {
         title = "Bazální metabolismus (BMR)",
         shortLabel = "BMR",
         unit = "kcal",
-        color = Color(0xFFF97316),
+        color = MetricPalette.of(type),
         explanation = "Denní energetický výdej organismu v úplném klidovém stavu."
     )
     MetricType.METABOLIC_AGE -> MetricUiConfig(
@@ -399,7 +400,7 @@ fun getMetricUiConfig(type: MetricType): MetricUiConfig = when (type) {
         title = "Metabolický věk",
         shortLabel = "Metab. věk",
         unit = "let",
-        color = Color(0xFFEAB308),
+        color = MetricPalette.of(type),
         explanation = "Srovnání vašeho bazálního metabolismu s průměrnými hodnotami populace stejného věku."
     )
     MetricType.SPO2 -> MetricUiConfig(
@@ -407,7 +408,7 @@ fun getMetricUiConfig(type: MetricType): MetricUiConfig = when (type) {
         title = "Okysličení krve (SpO2)",
         shortLabel = "SpO2",
         unit = "%",
-        color = Color(0xFF0EA5E9),
+        color = MetricPalette.of(type),
         explanation = "Procento nasycení periferní krve kyslíkem. Běžné noční hodnoty u zdravého člověka se pohybují v rozmezí 95–100 %."
     )
     MetricType.RESPIRATION -> MetricUiConfig(
@@ -415,7 +416,7 @@ fun getMetricUiConfig(type: MetricType): MetricUiConfig = when (type) {
         title = "Dechová frekvence",
         shortLabel = "Dech",
         unit = "d/min",
-        color = Color(0xFF22D3EE),
+        color = MetricPalette.of(type),
         explanation = "Průměrná dechová frekvence za minutu během spánku a klidového režimu."
     )
     MetricType.ECG -> MetricUiConfig(
@@ -423,7 +424,7 @@ fun getMetricUiConfig(type: MetricType): MetricUiConfig = when (type) {
         title = "Elektrokardiogram (ECG)",
         shortLabel = "ECG",
         unit = "ms",
-        color = Color(0xFFF43F5E),
+        color = MetricPalette.of(type),
         explanation = "Záznam elektrické aktivity srdce z elektrod váhy Withings Body Scan a hodinek ScanWatch. Sleduje sinusový rytmus, vylučuje fibrilaci síní (AFib) a měří korigovaný interval QTc (norma obvykle 350–450 ms)."
     )
     else -> MetricUiConfig(
@@ -431,7 +432,7 @@ fun getMetricUiConfig(type: MetricType): MetricUiConfig = when (type) {
         title = type.name.lowercase().replace('_', ' ').replaceFirstChar { it.uppercase() },
         shortLabel = type.name.lowercase().replace('_', ' '),
         unit = type.unit,
-        color = Color(0xFF6366F1),
+        color = MetricPalette.of(type),
         explanation = "Biometrická metrika zaznamenávaná vaším nositelným zařízením."
     )
 }
@@ -1736,9 +1737,9 @@ fun BodyCompositionStackedBar(
             1.dp,
             Brush.horizontalGradient(
                 listOf(
-                    Color(0xFF2DD4BF).copy(alpha = 0.55f),
-                    Color(0xFFF59E0B).copy(alpha = 0.35f),
-                    Color(0xFF38BDF8).copy(alpha = 0.45f)
+                    MetricPalette.Muscle.copy(alpha = 0.55f),
+                    MetricPalette.Fat.copy(alpha = 0.35f),
+                    MetricPalette.Bone.copy(alpha = 0.45f)
                 )
             )
         ),
@@ -1814,15 +1815,15 @@ fun BodyCompositionStackedBar(
                             .clip(RoundedCornerShape(8.dp))
                     ) {
                         if (mShare > 0f) {
-                            Box(Modifier.weight(mShare).fillMaxSize().background(Color(0xFF10B981)))
+                            Box(Modifier.weight(mShare).fillMaxSize().background(MetricPalette.Muscle))
                         }
                         if (fShare > 0f) {
                             if (mShare > 0f) Spacer(Modifier.width(2.dp))
-                            Box(Modifier.weight(fShare).fillMaxSize().background(Color(0xFFF59E0B)))
+                            Box(Modifier.weight(fShare).fillMaxSize().background(MetricPalette.Fat))
                         }
                         if (bShare > 0f) {
                             if (mShare > 0f || fShare > 0f) Spacer(Modifier.width(2.dp))
-                            Box(Modifier.weight(bShare).fillMaxSize().background(Color(0xFF38BDF8)))
+                            Box(Modifier.weight(bShare).fillMaxSize().background(MetricPalette.Bone))
                         }
                     }
                 }
@@ -1850,22 +1851,22 @@ fun BodyCompositionStackedBar(
                     }
                     Column {
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Icon(PulseIcons.Muscle, contentDescription = null, tint = Color(0xFF10B981), modifier = Modifier.size(13.dp))
-                            Text("Svaly", style = MaterialTheme.typography.labelSmall, color = Color(0xFF10B981), fontWeight = FontWeight.Bold)
+                            Icon(PulseIcons.Muscle, contentDescription = null, tint = MetricPalette.Muscle, modifier = Modifier.size(13.dp))
+                            Text("Svaly", style = MaterialTheme.typography.labelSmall, color = MetricPalette.Muscle, fontWeight = FontWeight.Bold)
                         }
                         Text(mText, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.ExtraBold, color = Color.White)
                     }
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Icon(PulseIcons.BodyFat, contentDescription = null, tint = Color(0xFFF59E0B), modifier = Modifier.size(13.dp))
-                            Text("Tuk", style = MaterialTheme.typography.labelSmall, color = Color(0xFFF59E0B), fontWeight = FontWeight.Bold)
+                            Icon(PulseIcons.BodyFat, contentDescription = null, tint = MetricPalette.Fat, modifier = Modifier.size(13.dp))
+                            Text("Tuk", style = MaterialTheme.typography.labelSmall, color = MetricPalette.Fat, fontWeight = FontWeight.Bold)
                         }
                         Text(fText, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.ExtraBold, color = Color.White)
                     }
                     Column(horizontalAlignment = Alignment.End) {
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Icon(PulseIcons.BoneMass, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(13.dp))
-                            Text("Kosti", style = MaterialTheme.typography.labelSmall, color = Color(0xFF38BDF8), fontWeight = FontWeight.Bold)
+                            Icon(PulseIcons.BoneMass, contentDescription = null, tint = MetricPalette.Bone, modifier = Modifier.size(13.dp))
+                            Text("Kosti", style = MaterialTheme.typography.labelSmall, color = MetricPalette.Bone, fontWeight = FontWeight.Bold)
                         }
                         Text(bText, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.ExtraBold, color = Color.White)
                     }
@@ -1930,7 +1931,7 @@ fun SegmentalBodyCompositionSection(
     Card(
         modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
         shape = RoundedCornerShape(22.dp),
-        border = BorderStroke(1.dp, if (showFatMode) Color(0xFFF59E0B).copy(alpha = 0.55f) else Color(0xFF10B981).copy(alpha = 0.55f)),
+        border = BorderStroke(1.dp, if (showFatMode) MetricPalette.Fat.copy(alpha = 0.55f) else MetricPalette.Muscle.copy(alpha = 0.55f)),
         colors = CardDefaults.cardColors(containerColor = Color(0xFF070C15))
     ) {
         Box(Modifier.fillMaxWidth()) {
@@ -1967,7 +1968,7 @@ fun SegmentalBodyCompositionSection(
                             else "SEGMENTÁLNÍ ROZLOŽENÍ SVALŮ (RUCE, TRUP, NOHY)",
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.Bold,
-                            color = if (showFatMode) Color(0xFFF59E0B) else Color(0xFF10B981),
+                            color = if (showFatMode) MetricPalette.Fat else MetricPalette.Muscle,
                             letterSpacing = 1.0.sp
                         )
                         Text(
@@ -3972,13 +3973,34 @@ private data class CorrelationPresetCardDef(
  * vizuálními kartami korelačních předvoleb a chronografickými ukazateli.
  */
 @Composable
-fun MetricsScreen(sl: ServiceLocator, initialType: MetricType = MetricType.HRV) {
-    var selectedTypes by remember(initialType) { mutableStateOf(linkedSetOf(initialType)) }
-    var normalizeMultiChart by remember { mutableStateOf(false) }
-    var bodyUnitMode by remember { mutableStateOf(BodyUnitMode.KG) }
-    var showSeparateCards by remember { mutableStateOf(true) }
+fun MetricsScreen(sl: ServiceLocator, initialType: MetricType? = null) {
+    // Filter state uses rememberSaveable so it survives rotation (Activity recreation) and process
+    // death; the last selection is also persisted in Settings for app restarts. A deep link with
+    // an explicit type overrides only the metric selection.
+    val initialFilter = remember(initialType) {
+        val stored = sl.settings.metricsFilterState ?: MetricsFilterState()
+        if (initialType != null) stored.copy(types = listOf(initialType)) else stored
+    }
+    var selectedTypes by rememberSaveable(initialType, stateSaver = MetricTypeSetSaver) {
+        mutableStateOf(initialFilter.selectedTypes)
+    }
+    var normalizeMultiChart by rememberSaveable(initialType) { mutableStateOf(initialFilter.normalize) }
+    var bodyUnitMode by rememberSaveable(initialType) { mutableStateOf(initialFilter.bodyUnitMode) }
+    var showSeparateCards by rememberSaveable(initialType) { mutableStateOf(initialFilter.showSeparateCards) }
     var multiInfoDialogType by remember { mutableStateOf<MetricType?>(null) }
-    var daysCount by remember { mutableStateOf(30) }
+    var daysCount by rememberSaveable(initialType) { mutableStateOf(initialFilter.daysCount) }
+    LaunchedEffect(selectedTypes, daysCount, normalizeMultiChart, bodyUnitMode, showSeparateCards) {
+        val snapshot = MetricsFilterState(
+            types = selectedTypes.toList(),
+            daysCount = daysCount,
+            normalize = normalizeMultiChart,
+            bodyUnitMode = bodyUnitMode,
+            showSeparateCards = showSeparateCards,
+        )
+        withContext(Dispatchers.IO) {
+            runCatching { sl.settings.metricsFilterState = snapshot }
+        }
+    }
     val units by sl.settings.unitSystemFlow.collectAsState()
 
     var metricsMenuExpanded by remember { mutableStateOf(false) }
@@ -4019,8 +4041,8 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType = MetricType.HRV) 
                 icon = PulseIcons.Hrv,
                 types = linkedSetOf(MetricType.HRV, MetricType.RESTING_HEART_RATE),
                 artworkRes = R.drawable.img_nordic_wellness_hero,
-                accentColor = Color(0xFF2DD4BF),
-                secondaryColor = Color(0xFFFB7185)
+                accentColor = MetricPalette.Hrv,
+                secondaryColor = MetricPalette.RestingHeartRate
             ),
             CorrelationPresetCardDef(
                 title = "Noční obnova",
@@ -4028,8 +4050,8 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType = MetricType.HRV) 
                 icon = PulseIcons.Sleep,
                 types = linkedSetOf(MetricType.SLEEP_DURATION, MetricType.HRV, MetricType.BODY_BATTERY),
                 artworkRes = R.drawable.img_motif_sleep_night,
-                accentColor = Color(0xFF818CF8),
-                secondaryColor = Color(0xFF2DD4BF)
+                accentColor = MetricPalette.SleepDuration,
+                secondaryColor = MetricPalette.Hrv
             ),
             CorrelationPresetCardDef(
                 title = "Složení těla",
@@ -4037,8 +4059,8 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType = MetricType.HRV) 
                 icon = PulseIcons.BodyComposition,
                 types = linkedSetOf(MetricType.WEIGHT, MetricType.MUSCLE_MASS, MetricType.BODY_FAT),
                 artworkRes = R.drawable.img_motif_body_silhouette,
-                accentColor = Color(0xFF10B981),
-                secondaryColor = Color(0xFFF59E0B)
+                accentColor = MetricPalette.Muscle,
+                secondaryColor = MetricPalette.Fat
             ),
             CorrelationPresetCardDef(
                 title = "Srdce & EKG",
@@ -4046,8 +4068,8 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType = MetricType.HRV) 
                 icon = PulseIcons.Ecg,
                 types = linkedSetOf(MetricType.RESTING_HEART_RATE, MetricType.ECG_QTC),
                 artworkRes = R.drawable.img_motif_ecg_signal,
-                accentColor = Color(0xFFF43F5E),
-                secondaryColor = Color(0xFF38BDF8)
+                accentColor = MetricPalette.RestingHeartRate,
+                secondaryColor = MetricPalette.EcgQtc
             ),
             CorrelationPresetCardDef(
                 title = "Energie & Stres",
@@ -4055,8 +4077,8 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType = MetricType.HRV) 
                 icon = PulseIcons.BodyBattery,
                 types = linkedSetOf(MetricType.BODY_BATTERY, MetricType.STRESS),
                 artworkRes = R.drawable.img_motif_body_battery,
-                accentColor = Color(0xFFF59E0B),
-                secondaryColor = Color(0xFFA855F7)
+                accentColor = MetricPalette.BodyBattery,
+                secondaryColor = MetricPalette.Stress
             ),
             CorrelationPresetCardDef(
                 title = "Hydratace & Kosti",
@@ -4064,8 +4086,8 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType = MetricType.HRV) 
                 icon = PulseIcons.BodyWater,
                 types = linkedSetOf(MetricType.BODY_WATER, MetricType.BONE_MASS),
                 artworkRes = R.drawable.img_motif_body_water,
-                accentColor = Color(0xFF06B6D4),
-                secondaryColor = Color(0xFF38BDF8)
+                accentColor = MetricPalette.Water,
+                secondaryColor = MetricPalette.Bone
             ),
             CorrelationPresetCardDef(
                 title = "Váha & Pohyb",
@@ -4073,8 +4095,8 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType = MetricType.HRV) 
                 icon = PulseIcons.Steps,
                 types = linkedSetOf(MetricType.WEIGHT, MetricType.STEPS),
                 artworkRes = R.drawable.img_alpine_trail_hero,
-                accentColor = Color(0xFF38BDF8),
-                secondaryColor = Color(0xFFF59E0B)
+                accentColor = MetricPalette.Weight,
+                secondaryColor = MetricPalette.Steps
             )
         )
     }
@@ -4778,7 +4800,9 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType = MetricType.HRV) 
                     label = c.shortLabel,
                     color = c.color,
                     values = displayVals,
-                    unit = seriesUnit
+                    unit = seriesUnit,
+                    // Fat-type series are dashed so they never read like the solid muscle line.
+                    dashed = entry.type == MetricType.BODY_FAT || entry.type == MetricType.VISCERAL_FAT
                 )
             }
 
@@ -4841,8 +4865,8 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType = MetricType.HRV) 
                         1.dp,
                         Brush.horizontalGradient(
                             listOf(
-                                Color(0xFF2DD4BF).copy(alpha = 0.55f),
-                                Color(0xFFF59E0B).copy(alpha = 0.35f)
+                                MetricPalette.Weight.copy(alpha = 0.55f),
+                                MetricPalette.Fat.copy(alpha = 0.35f)
                             )
                         )
                     ),
@@ -4875,13 +4899,13 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType = MetricType.HRV) 
                                     modifier = Modifier.weight(1f, fill = false),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Icon(PulseIcons.BodyComposition, contentDescription = null, tint = Color(0xFF2DD4BF), modifier = Modifier.size(18.dp))
+                                    Icon(PulseIcons.BodyComposition, contentDescription = null, tint = MetricPalette.Weight, modifier = Modifier.size(18.dp))
                                     Spacer(Modifier.width(6.dp))
                                     Text(
                                         "SKLÁDANÉ SLOŽENÍ HMOTNOSTI (VÁHA + SVALY + TUK)",
                                         style = MaterialTheme.typography.labelSmall,
                                         fontWeight = FontWeight.Bold,
-                                        color = Color(0xFF2DD4BF),
+                                        color = MetricPalette.Weight,
                                         maxLines = 1
                                     )
                                 }
@@ -4907,7 +4931,7 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType = MetricType.HRV) 
                                     val mTxt = if (lMuscle == null) "—"
                                     else if (bodyUnitMode == BodyUnitMode.KG || rw == null) fmt.weight(lMuscle)
                                     else "${fmt.number((lMuscle / rw) * 100.0, 1)} %"
-                                    Text(mTxt, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold, color = Color(0xFF10B981))
+                                    Text(mTxt, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold, color = MetricPalette.Muscle)
                                 }
                                 Column {
                                     Text("Tělesný tuk", style = MaterialTheme.typography.labelSmall, color = Color(0xFFCBD5E1))
@@ -4920,7 +4944,7 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType = MetricType.HRV) 
                                     } else {
                                         "${fmt.number(lFat, 1)} %"
                                     }
-                                    Text(fTxt, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold, color = Color(0xFFF59E0B))
+                                    Text(fTxt, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold, color = MetricPalette.Fat)
                                 }
                             }
 

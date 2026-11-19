@@ -219,4 +219,169 @@ class RnsResourceTest {
         link.touchInbound()
         assertTrue(link.lastInboundMs > initialInbound)
     }
+
+    @Test
+    fun `multi-segment resource over 1MB transfers and reassembles cleanly`() {
+        val link = createActiveLink(mtu = 32768)
+        // 1.2 MB incompressible random data -> exceeds MAX_EFFICIENT_SIZE (1 MB - 1) -> 2 segments
+        val payload = Random(777).nextBytes(1_250_000)
+        val metadata = mapOf("kind" to "multi-seg")
+        var sender = RnsResourceSender(link, payload, metadata = metadata, autoCompress = false)
+        assertTrue(sender.split)
+        assertEquals(2, sender.totalSegments)
+        assertEquals(1, sender.segmentIndex)
+
+        var priorData: ByteArray? = null
+        var priorMeta: Any? = null
+        var finalReceiver: RnsResourceReceiver? = null
+
+        for (seg in 1..2) {
+            assertEquals(seg, sender.segmentIndex)
+            val advPkt = sender.buildAdvertisementPacket()!!
+            val advPlain = link.decryptLinkPayload(extractPayload(advPkt).second)!!
+            val accepted = RnsResourceReceiver.accept(
+                link = link,
+                advPlaintext = advPlain,
+                maxDecompressedSize = RnsResourceConstants.DEFAULT_MAX_DECOMPRESSED_SIZE,
+                priorSegmentsData = priorData,
+                priorMetadata = priorMeta,
+            )
+            assertNotNull(accepted, "Segment $seg accept failed")
+            val (receiver, initialReq) = accepted
+            val queue = ArrayDeque<ByteArray>()
+            queue.addLast(initialReq)
+
+            var steps = 0
+            while (queue.isNotEmpty() && steps < 1000) {
+                steps++
+                val pkt = queue.removeFirst()
+                val (ctx, body) = extractPayload(pkt)
+                when (ctx) {
+                    RnsContext.RESOURCE_REQ -> {
+                        val dec = link.decryptLinkPayload(body)!!
+                        sender.handleRequest(dec).forEach { queue.addLast(it) }
+                    }
+                    RnsContext.RESOURCE -> receiver.handlePart(body).forEach { queue.addLast(it) }
+                    RnsContext.RESOURCE_HMU -> {
+                        val dec = link.decryptLinkPayload(body)!!
+                        receiver.handleHashmapUpdate(dec).forEach { queue.addLast(it) }
+                    }
+                    RnsContext.RESOURCE_PRF -> assertTrue(sender.handleProof(body))
+                    else -> error("Unexpected context: $ctx")
+                }
+            }
+            assertEquals(RnsResourceStatus.COMPLETE, sender.status)
+            assertEquals(RnsResourceStatus.COMPLETE, receiver.status)
+            priorData = receiver.assembledData
+            priorMeta = receiver.assembledMetadata
+            if (seg == 1) {
+                assertFalse(receiver.isFinalSegment)
+                sender = sender.nextSegment()!!
+                assertContentEquals(receiver.originalHash, sender.originalHash)
+            } else {
+                assertTrue(receiver.isFinalSegment)
+                finalReceiver = receiver
+            }
+        }
+
+        assertNotNull(finalReceiver)
+        assertContentEquals(payload, finalReceiver.assembledData)
+        val decMeta = finalReceiver.assembledMetadata as? Map<*, *>
+        assertEquals("multi-seg", decMeta?.get("kind"))
+    }
+
+    @Test
+    fun `DoS ADV and HMU validation rejects mismatched n, huge n, negative n, oversized d, and bad HMU`() {
+        val link = createActiveLink(mtu = 500)
+        val validHash = ByteArray(32) { 0x11 }
+        val validRand = ByteArray(4) { 0x22 }
+
+        fun packAdv(t: Long, d: Long, n: Long): ByteArray = MsgPack.encode(
+            linkedMapOf(
+                "t" to t,
+                "d" to d,
+                "n" to n,
+                "h" to validHash,
+                "r" to validRand,
+                "o" to validHash,
+                "i" to 1,
+                "l" to 1,
+                "q" to null,
+                "f" to 0x01,
+                "m" to ByteArray(4),
+            ),
+        )
+
+        // Huge n = 0x7fffffff must not OOM or accept
+        assertNull(RnsResourceReceiver.accept(link, packAdv(t = 100L, d = 100L, n = 0x7fffffffL)))
+        // Negative n
+        assertNull(RnsResourceReceiver.accept(link, packAdv(t = 100L, d = 100L, n = -1L)))
+        // Mismatched n vs ceil(t / sdu)
+        assertNull(RnsResourceReceiver.accept(link, packAdv(t = 1000L, d = 1000L, n = 1L)))
+        // Data size exceeding maxDecompressedSize
+        assertNull(
+            RnsResourceReceiver.accept(
+                link = link,
+                advPlaintext = packAdv(t = 500L, d = 10_000_000L, n = 2L),
+                maxDecompressedSize = 4 * 1024 * 1024,
+            ),
+        )
+
+        // Bad HMU (negative segment / out of bounds)
+        val sender = RnsResourceSender(link, Random(1).nextBytes(48 * 1024), autoCompress = false)
+        val advPkt = sender.buildAdvertisementPacket()!!
+        val advPlain = link.decryptLinkPayload(extractPayload(advPkt).second)!!
+        val (receiver, _) = RnsResourceReceiver.accept(link, advPlain)!!
+        val badHmu = sender.hash + MsgPack.encode(listOf(-1, ByteArray(4)))
+        assertTrue(receiver.handleHashmapUpdate(badHmu).isEmpty())
+    }
+
+    @Test
+    fun `resource watchdog retries ADV up to MAX_ADV_RETRIES and retries receiver parts on timeout`() {
+        val link = createActiveLink(mtu = 500)
+        val sender = RnsResourceSender(link, ByteArray(1024) { 0x33 }, autoCompress = false)
+        val t0 = 1_000_000L
+        assertNotNull(sender.buildAdvertisementPacket(t0))
+        assertEquals(RnsResourceConstants.MAX_ADV_RETRIES, sender.retriesLeft)
+
+        var t = t0
+        for (attempt in 1..RnsResourceConstants.MAX_ADV_RETRIES) {
+            t += 20_000L
+            val pkts = sender.checkTimeout(t)
+            assertEquals(1, pkts.size, "Expected ADV retry $attempt")
+            assertEquals(RnsContext.RESOURCE_ADV, extractPayload(pkts.first()).first)
+            assertEquals(RnsResourceStatus.ADVERTISED, sender.status)
+        }
+        t += 20_000L
+        val cancelPkts = sender.checkTimeout(t)
+        assertEquals(1, cancelPkts.size)
+        assertEquals(RnsContext.RESOURCE_ICL, extractPayload(cancelPkts.first()).first)
+        assertEquals(RnsResourceStatus.FAILED, sender.status)
+
+        // Receiver part timeout triggers buildRetryRequest and eventually RESOURCE_RCL
+        val sender2 = RnsResourceSender(link, ByteArray(2048) { 0x44 }, autoCompress = false)
+        val advPlain2 = link.decryptLinkPayload(extractPayload(sender2.buildAdvertisementPacket(t0)!!).second)!!
+        val (receiver, _) = RnsResourceReceiver.accept(link, advPlain2, nowMs = t0)!!
+        var rt = t0
+        var retriesSeen = 0
+        while (receiver.status == RnsResourceStatus.TRANSFERRING && retriesSeen < 30) {
+            rt += 30_000L
+            val pkts = receiver.checkTimeout(rt)
+            if (pkts.isNotEmpty() && receiver.status == RnsResourceStatus.TRANSFERRING) {
+                assertEquals(RnsContext.RESOURCE_REQ, extractPayload(pkts.first()).first)
+                retriesSeen++
+            }
+        }
+        assertEquals(RnsResourceConstants.MAX_RETRIES, retriesSeen)
+        assertEquals(RnsResourceStatus.FAILED, receiver.status)
+    }
+
+    @Test
+    fun `stamper rejects cost above 24 and supports cooperative cancellation`() {
+        val mat = ByteArray(32) { 0x55 }
+        assertNull(LxmfStamper.generateStamp(mat, targetCost = 25, expandRounds = 4))
+        assertNull(LxmfStamper.generateStamp(mat, targetCost = 12, expandRounds = 10, isCancelled = { true }))
+        val reqWithLimitKb = LxmfCodec.buildGetMessagesRequest(emptyList(), emptyList(), transferLimitKb = 256)
+        assertEquals(listOf(emptyList<ByteArray>(), emptyList<ByteArray>(), 256), reqWithLimitKb)
+    }
 }

@@ -9,6 +9,7 @@ import app.pulse4.android.reticulum.RnsCrypto
 import app.pulse4.android.reticulum.RnsHeaderType
 import app.pulse4.android.reticulum.RnsLinkSession
 import app.pulse4.android.reticulum.RnsPacketType
+import app.pulse4.android.reticulum.RnsResourceConstants
 import app.pulse4.android.reticulum.RnsResourceReceiver
 import app.pulse4.android.reticulum.RnsResourceSender
 import app.pulse4.android.reticulum.RnsResourceStatus
@@ -31,6 +32,8 @@ fun main(args: Array<String>) {
     val keepaliveSecs = args.getOrNull(8)?.toIntOrNull() ?: 50
     val bobPubHex = args[9]
     val bobDestHex = args[10]
+    val restrictedPropDestHex = args[11]
+    val pyLargeKtTid = args[12]
 
     val seed = RnsCrypto.hexToBytes(seedHex)
     val edPriv = Ed25519PrivateKeyParameters(seed, 0)
@@ -97,53 +100,133 @@ fun main(args: Array<String>) {
         return null
     }
 
-    // Request path to PN so node responds with its announce
-    sendPkt(RnsCrypto.buildPathRequestPacket(RnsCrypto.hexToBytes(propDestHex)))
-
-    // Wait for PN announce
-    var propPub64: ByteArray? = null
-    var transportId: ByteArray? = null
-    val annDeadline = System.currentTimeMillis() + 8000
-    while (System.currentTimeMillis() < annDeadline && propPub64 == null) {
-        val pkt = pollPacket(300) ?: continue
-        val parsed = RnsAnnounceParser.parse(pkt)
-        if (parsed != null && parsed.verified && parsed.destinationHash == propDestHex) {
-            propPub64 = parsed.publicKey64
-            if (((pkt[0].toInt() and 0xFF) and 0x40) != 0) {
-                transportId = pkt.copyOfRange(2, 18)
-            }
-            println("[1] PN announce verified: dest=${parsed.destinationHash}")
-        }
-    }
-    checkNotNull(propPub64) { "Did not receive PN announce" }
-
-    // 1. Link request -> LRPROOF -> ACTIVE
-    val link = RnsLinkSession(propDestHex, propPub64)
-    sendPkt(link.buildLinkRequestPacket(transportId))
-    val lrDeadline = System.currentTimeMillis() + 5000
-    while (System.currentTimeMillis() < lrDeadline && link.state != RnsLinkSession.State.ACTIVE) {
-        val pkt = pollPacket(200) ?: continue
-        val flags = pkt[0].toInt() and 0xFF
-        val pt = flags and 0x03
-        val h2 = ((flags and 0x40) shr 6) == RnsHeaderType.HEADER_2
-        val destOff = if (h2) 18 else 2
-        val ctxOff = if (h2) 34 else 18
-        val payOff = if (h2) 35 else 19
-        if (pt == RnsPacketType.PROOF && pkt.size > payOff && pkt[ctxOff] == RnsContext.LRPROOF) {
-            val destHex = RnsCrypto.bytesToHex(pkt.copyOfRange(destOff, destOff + 16))
-            if (destHex == link.linkIdHex) {
-                val rttPkt = link.handleLinkProof(pkt.copyOfRange(payOff, pkt.size))
-                if (rttPkt != null) {
-                    sendPkt(rttPkt)
+    fun awaitAnnounce(targetDestHex: String, timeoutMs: Long = 8000): Pair<ByteArray, ByteArray?> {
+        sendPkt(RnsCrypto.buildPathRequestPacket(RnsCrypto.hexToBytes(targetDestHex)))
+        var pub64Found: ByteArray? = null
+        var transportId: ByteArray? = null
+        val dl = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < dl && pub64Found == null) {
+            val pkt = pollPacket(300) ?: continue
+            val parsed = RnsAnnounceParser.parse(pkt)
+            if (parsed != null && parsed.verified && parsed.destinationHash == targetDestHex) {
+                pub64Found = parsed.publicKey64
+                if (((pkt[0].toInt() and 0xFF) and 0x40) != 0) {
+                    transportId = pkt.copyOfRange(2, 18)
                 }
             }
         }
+        checkNotNull(pub64Found) { "Did not receive announce for $targetDestHex" }
+        return pub64Found to transportId
     }
-    check(link.state == RnsLinkSession.State.ACTIVE) { "Link did not become ACTIVE" }
+
+    fun establishLink(destHex: String, pubKey64: ByteArray, transportId: ByteArray?): RnsLinkSession {
+        val link = RnsLinkSession(destHex, pubKey64)
+        sendPkt(link.buildLinkRequestPacket(transportId))
+        val dl = System.currentTimeMillis() + 5000
+        while (System.currentTimeMillis() < dl && link.state != RnsLinkSession.State.ACTIVE) {
+            val pkt = pollPacket(200) ?: continue
+            val flags = pkt[0].toInt() and 0xFF
+            val pt = flags and 0x03
+            val h2 = ((flags and 0x40) shr 6) == RnsHeaderType.HEADER_2
+            val destOff = if (h2) 18 else 2
+            val ctxOff = if (h2) 34 else 18
+            val payOff = if (h2) 35 else 19
+            if (pt == RnsPacketType.PROOF && pkt.size > payOff && pkt[ctxOff] == RnsContext.LRPROOF) {
+                if (RnsCrypto.bytesToHex(pkt.copyOfRange(destOff, destOff + 16)) == link.linkIdHex) {
+                    link.handleLinkProof(pkt.copyOfRange(payOff, pkt.size))?.let { sendPkt(it) }
+                }
+            }
+        }
+        check(link.state == RnsLinkSession.State.ACTIVE) { "Link to $destHex did not become ACTIVE" }
+        return link
+    }
+
+    fun sendGetRaw(link: RnsLinkSession, reqData: List<Any?>, timeoutMs: Long = 15000): Any? {
+        val (reqId, reqPkt) = link.buildRequestPacket(LxmfCodec.MESSAGE_GET_PATH, reqData)!!
+        sendPkt(reqPkt)
+        val dl = System.currentTimeMillis() + timeoutMs
+        var respReceiver: RnsResourceReceiver? = null
+        while (System.currentTimeMillis() < dl) {
+            val pkt = pollPacket(200) ?: continue
+            val flags = pkt[0].toInt() and 0xFF
+            val pt = flags and 0x03
+            val h2 = ((flags and 0x40) shr 6) == RnsHeaderType.HEADER_2
+            val destOff = if (h2) 18 else 2
+            val ctxOff = if (h2) 34 else 18
+            val payOff = if (h2) 35 else 19
+            if (pkt.size <= payOff) continue
+            if (RnsCrypto.bytesToHex(pkt.copyOfRange(destOff, destOff + 16)) != link.linkIdHex) continue
+
+            val ctx = pkt[ctxOff]
+            val body = pkt.copyOfRange(payOff, pkt.size)
+            when {
+                pt == RnsPacketType.DATA && ctx == RnsContext.RESPONSE -> {
+                    val dec = link.decryptLinkPayload(body) ?: continue
+                    val list = MsgPack.decode(dec).first as? List<*> ?: continue
+                    val respId = list.getOrNull(0) as? ByteArray
+                    if (respId != null && MessageDigest.isEqual(reqId, respId)) {
+                        return list.getOrNull(1)
+                    }
+                }
+                pt == RnsPacketType.DATA && ctx == RnsContext.RESOURCE_ADV -> {
+                    val dec = link.decryptLinkPayload(body) ?: continue
+                    val accepted = RnsResourceReceiver.accept(link, dec)
+                    if (accepted != null && accepted.first.adv.isResponse) {
+                        val advReqId = accepted.first.adv.requestId
+                        if (advReqId != null && MessageDigest.isEqual(reqId, advReqId)) {
+                            respReceiver = accepted.first
+                            sendPkt(accepted.second)
+                        }
+                    }
+                }
+                pt == RnsPacketType.DATA && ctx == RnsContext.RESOURCE_HMU -> {
+                    val dec = link.decryptLinkPayload(body) ?: continue
+                    respReceiver?.handleHashmapUpdate(dec)?.forEach { sendPkt(it) }
+                }
+                pt == RnsPacketType.DATA && ctx == RnsContext.RESOURCE -> {
+                    val r = respReceiver ?: continue
+                    r.handlePart(body).forEach { sendPkt(it) }
+                    if (r.status == RnsResourceStatus.COMPLETE) {
+                        val packed = r.assembledData!!
+                        val decoded = MsgPack.decode(packed).first as List<*>
+                        val respId = decoded[0] as ByteArray
+                        check(MessageDigest.isEqual(reqId, respId)) { "Resource response requestId mismatch" }
+                        return decoded[1]
+                    }
+                }
+            }
+        }
+        error("Timeout waiting for /get response")
+    }
+
+    // Wait for PN announce
+    val (propPub64, transportId) = awaitAnnounce(propDestHex)
+    println("[1] PN announce verified: dest=$propDestHex")
+
+    // 1. Link request -> LRPROOF -> ACTIVE
+    val link = establishLink(propDestHex, propPub64, transportId)
     println("[1] PASS: Link ACTIVE id=${link.linkIdHex} mtu=${link.negotiatedMtu} kaIntervalMs=${link.keepaliveIntervalMs}")
+
+    // 1b. N-4: /get before LINKIDENTIFY -> ERROR_NO_IDENTITY (0xF0)
+    val noIdResp = sendGetRaw(link, LxmfCodec.buildGetMessagesRequest(null, null))
+    check((noIdResp as? Number)?.toInt() == LxmfCodec.ERROR_NO_IDENTITY) {
+        "Expected ERROR_NO_IDENTITY (0xF0), got: $noIdResp"
+    }
+    println("[1b] PASS: /get before LINKIDENTIFY returned ERROR_NO_IDENTITY (0xF0)")
 
     // Identify on link
     sendPkt(link.buildIdentifyPacket(pub64, edPriv)!!)
+
+    // 1c. N-4: Restricted PN -> ERROR_NO_ACCESS (0xF1)
+    val (restPub64, restTid) = awaitAnnounce(restrictedPropDestHex)
+    val restLink = establishLink(restrictedPropDestHex, restPub64, restTid)
+    sendPkt(restLink.buildIdentifyPacket(pub64, edPriv)!!)
+    val noAccessResp = sendGetRaw(restLink, LxmfCodec.buildGetMessagesRequest(null, null))
+    check((noAccessResp as? Number)?.toInt() == LxmfCodec.ERROR_NO_ACCESS) {
+        "Expected ERROR_NO_ACCESS (0xF1), got: $noAccessResp"
+    }
+    sendPkt(restLink.buildLinkClosePacket()!!)
+    println("[1c] PASS: Restricted PN returned ERROR_NO_ACCESS (0xF1)")
 
     // 3a. Deposit Kotlin -> Python LXMF with PN stamp and await RNS PROOF
     val ktWire = LxmfCodec.pack(
@@ -178,36 +261,17 @@ fun main(args: Array<String>) {
     check(proofVerified) { "Did not receive valid PROOF for stamped deposit" }
     println("[3a] PASS: Deposit accepted with valid PROOF (cost=$targetCost, kt->py tid=${RnsCrypto.bytesToHex(tid)})")
 
-    // 3b. Two-phase /get: Phase 1 [null, null] -> transient IDs
-    fun sendGetAndAwait(wants: List<ByteArray>?, haves: List<ByteArray>?): List<*> {
-        val (_, reqPkt) = link.buildRequestPacket(LxmfCodec.MESSAGE_GET_PATH, LxmfCodec.buildGetMessagesRequest(wants, haves))!!
-        sendPkt(reqPkt)
-        val dl = System.currentTimeMillis() + 5000
-        while (System.currentTimeMillis() < dl) {
-            val pkt = pollPacket(200) ?: continue
-            val flags = pkt[0].toInt() and 0xFF
-            val pt = flags and 0x03
-            val h2 = ((flags and 0x40) shr 6) == RnsHeaderType.HEADER_2
-            val ctxOff = if (h2) 34 else 18
-            val payOff = if (h2) 35 else 19
-            if (pt == RnsPacketType.DATA && pkt.size > payOff && pkt[ctxOff] == RnsContext.RESPONSE) {
-                val dec = link.decryptLinkPayload(pkt.copyOfRange(payOff, pkt.size)) ?: continue
-                val list = MsgPack.decode(dec).first as? List<*> ?: continue
-                return list.getOrNull(1) as? List<*> ?: emptyList<Any?>()
-            }
-        }
-        error("Timeout waiting for /get response")
-    }
-
-    val avail = sendGetAndAwait(null, null).mapNotNull { it as? ByteArray }
+    // 3b. Two-phase /get: Phase 1 [null, null] -> transient IDs (includes small + large)
+    val avail = (sendGetRaw(link, LxmfCodec.buildGetMessagesRequest(null, null)) as List<*>).mapNotNull { it as? ByteArray }
     check(avail.any { RnsCrypto.bytesToHex(it) == pyToKtTid }) { "Expected py_to_kt_tid $pyToKtTid in /get phase 1" }
-    println("[3b] PASS: /get phase 1 returned ${avail.size} transient IDs including $pyToKtTid")
+    check(avail.any { RnsCrypto.bytesToHex(it) == pyLargeKtTid }) { "Expected py_large_kt_tid $pyLargeKtTid in /get phase 1" }
+    println("[3b] PASS: /get phase 1 returned ${avail.size} transient IDs including small & 100KB large")
 
-    // Phase 2: download wants
-    val msgs = sendGetAndAwait(avail, emptyList()).mapNotNull { it as? ByteArray }
-    check(msgs.isNotEmpty()) { "Expected messages in /get phase 2" }
+    // Phase 2 (small): download pyToKtTid
+    val smallMsgs = (sendGetRaw(link, LxmfCodec.buildGetMessagesRequest(listOf(RnsCrypto.hexToBytes(pyToKtTid)), emptyList(), 256)) as List<*>).mapNotNull { it as? ByteArray }
+    check(smallMsgs.isNotEmpty()) { "Expected small message in /get phase 2" }
     var unpackedPyMsg = false
-    for (stored in msgs) {
+    for (stored in smallMsgs) {
         val wire = LxmfCodec.unpackPropagationMessage(stored, xPriv, idHash) ?: continue
         val msg = LxmfCodec.unpack(wire, aliceEdPub) ?: continue
         if (msg.signatureValid && String(msg.content, Charsets.UTF_8) == "hello from python lxmf 1.3.0") {
@@ -217,11 +281,23 @@ fun main(args: Array<String>) {
     check(unpackedPyMsg) { "Failed to decrypt/verify Python LXMF message" }
     println("[2] PASS: Python -> Kotlin LXMF message decrypted and Ed25519 signature verified")
 
+    // Phase 2 (large > MDU): download 100KB pyLargeKtTid delivered as RNS.Resource response (N-3 KB limit = 256)
+    val largeMsgs = (sendGetRaw(link, LxmfCodec.buildGetMessagesRequest(listOf(RnsCrypto.hexToBytes(pyLargeKtTid)), emptyList(), 256)) as List<*>).mapNotNull { it as? ByteArray }
+    check(largeMsgs.size == 1) { "Expected 100KB message via Resource /get response, got ${largeMsgs.size}" }
+    val largeWire = LxmfCodec.unpackPropagationMessage(largeMsgs.first(), xPriv, idHash)!!
+    val largeMsg = LxmfCodec.unpack(largeWire, aliceEdPub)!!
+    check(largeMsg.signatureValid && largeMsg.title == "py-large-get" && largeMsg.content.size == 100_000) {
+        "Invalid 100KB /get Resource message: sig=${largeMsg.signatureValid} len=${largeMsg.content.size}"
+    }
+    println("[3b-res] PASS: /get 100KB response delivered via RNS.Resource with KB limit=256 and verified")
+
     // Phase 2b: purge haves
-    sendGetAndAwait(emptyList(), avail)
-    val availAfterPurge = sendGetAndAwait(null, null).mapNotNull { it as? ByteArray }
-    check(availAfterPurge.none { RnsCrypto.bytesToHex(it) == pyToKtTid }) { "Message was not purged!" }
-    println("[3c] PASS: /get purge removed $pyToKtTid from PN")
+    sendGetRaw(link, LxmfCodec.buildGetMessagesRequest(emptyList(), avail, 256))
+    val availAfterPurge = (sendGetRaw(link, LxmfCodec.buildGetMessagesRequest(null, null)) as List<*>).mapNotNull { it as? ByteArray }
+    check(availAfterPurge.none { RnsCrypto.bytesToHex(it) == pyToKtTid || RnsCrypto.bytesToHex(it) == pyLargeKtTid }) {
+        "Messages were not purged!"
+    }
+    println("[3c] PASS: /get purge removed both messages from PN")
 
     // 4. Keepalive test
     val kaDeadline = System.currentTimeMillis() + keepaliveSecs * 1000L
@@ -250,65 +326,24 @@ fun main(args: Array<String>) {
     }
     check(!closedByPeer) { "Peer sent LINKCLOSE during keepalive window!" }
     println("[4] PASS: Link survived ${keepaliveSecs}s idle with keepalive")
-    sendPkt(link.buildLinkClosePacket()!!)
 
-    // 5. >MDU 16KB LXMF message end-to-end via RNS Resource on lxmf.delivery
-    val bobPub = RnsCrypto.hexToBytes(bobPubHex)
-    val bobEdPub = bobPub.copyOfRange(32, 64)
-    sendPkt(RnsCrypto.buildPathRequestPacket(RnsCrypto.hexToBytes(bobDestHex)))
-    var bobTid: ByteArray? = null
-    var bobFound = false
-    val bobAnnDeadline = System.currentTimeMillis() + 5000
-    while (System.currentTimeMillis() < bobAnnDeadline && !bobFound) {
-        val pkt = pollPacket(200) ?: continue
-        val parsed = RnsAnnounceParser.parse(pkt)
-        if (parsed != null && parsed.verified && parsed.destinationHash == bobDestHex) {
-            bobFound = true
-            if (((pkt[0].toInt() and 0xFF) and 0x40) != 0) {
-                bobTid = pkt.copyOfRange(2, 18)
-            }
-        }
-    }
-    check(bobFound) { "Did not receive Bob lxmf.delivery announce" }
-
-    val bobLink = RnsLinkSession(bobDestHex, bobPub)
-    sendPkt(bobLink.buildLinkRequestPacket(bobTid))
-    val bobLrDeadline = System.currentTimeMillis() + 5000
-    while (System.currentTimeMillis() < bobLrDeadline && bobLink.state != RnsLinkSession.State.ACTIVE) {
-        val pkt = pollPacket(200) ?: continue
-        val flags = pkt[0].toInt() and 0xFF
-        val pt = flags and 0x03
-        val h2 = ((flags and 0x40) shr 6) == RnsHeaderType.HEADER_2
-        val destOff = if (h2) 18 else 2
-        val ctxOff = if (h2) 34 else 18
-        val payOff = if (h2) 35 else 19
-        if (pt == RnsPacketType.PROOF && pkt.size > payOff && pkt[ctxOff] == RnsContext.LRPROOF) {
-            if (RnsCrypto.bytesToHex(pkt.copyOfRange(destOff, destOff + 16)) == bobLink.linkIdHex) {
-                bobLink.handleLinkProof(pkt.copyOfRange(payOff, pkt.size))?.let { sendPkt(it) }
-            }
-        }
-    }
-    check(bobLink.state == RnsLinkSession.State.ACTIVE) { "Bob lxmf.delivery link did not become ACTIVE" }
-    sendPkt(bobLink.buildIdentifyPacket(pub64, edPriv)!!)
-
-    // 5a. Kotlin -> Python 16KB incompressible LXMF message via RnsResourceSender (>16KB SDU => multi-part)
-    val kt16kPayload = kotlin.random.Random(12345).nextBytes(16384)
-    val kt16kWire = LxmfCodec.pack(
-        destinationHash = bobDestHex,
+    // 4b. N-12: Resource deposit (> MDU) with invalid zero stamp -> lxmd sends RESOURCE_PRF then tears down link!
+    val badStampPayload = kotlin.random.Random(9876).nextBytes(40_000)
+    val badWire = LxmfCodec.pack(
+        destinationHash = aliceDestHex,
         sourceHash = selfDestHex,
         edPriv = edPriv,
-        content = kt16kPayload,
-        title = "kt-16k-resource",
+        content = badStampPayload,
+        title = "bad-stamp-resource",
     )
-    val resSender = RnsResourceSender(bobLink, kt16kWire, autoCompress = true)
-    sendPkt(resSender.buildAdvertisementPacket()!!)
+    val badEnc = LxmfCodec.encryptPropagationPayload(badWire, aliceXPub, aliceIdHash)
+    val badDeposit = LxmfCodec.packPropagationDepositRaw(badEnc + ByteArray(32)) // invalid all-zero stamp
+    val badSender = RnsResourceSender(link, badDeposit, autoCompress = false)
+    sendPkt(badSender.buildAdvertisementPacket()!!)
 
-    // 5b. Drive Resource sender AND receive Python -> Kotlin 16KB LXMF via RnsResourceReceiver
-    var resReceiver: RnsResourceReceiver? = null
-    val resDeadline = System.currentTimeMillis() + 15000
-    while (System.currentTimeMillis() < resDeadline &&
-        (resSender.status != RnsResourceStatus.COMPLETE || resReceiver?.status != RnsResourceStatus.COMPLETE)
-    ) {
+    var badLinkClosedAfterProof = false
+    val badDeadline = System.currentTimeMillis() + 10_000
+    while (System.currentTimeMillis() < badDeadline && !badLinkClosedAfterProof) {
         val pkt = pollPacket(200) ?: continue
         val flags = pkt[0].toInt() and 0xFF
         val pt = flags and 0x03
@@ -317,47 +352,161 @@ fun main(args: Array<String>) {
         val ctxOff = if (h2) 34 else 18
         val payOff = if (h2) 35 else 19
         if (pkt.size <= payOff) continue
-        if (RnsCrypto.bytesToHex(pkt.copyOfRange(destOff, destOff + 16)) != bobLink.linkIdHex) continue
-
+        if (RnsCrypto.bytesToHex(pkt.copyOfRange(destOff, destOff + 16)) != link.linkIdHex) continue
         val ctx = pkt[ctxOff]
         val body = pkt.copyOfRange(payOff, pkt.size)
-        when (ctx) {
-            RnsContext.RESOURCE_REQ -> {
-                val dec = bobLink.decryptLinkPayload(body) ?: continue
-                resSender.handleRequest(dec).forEach { sendPkt(it) }
+        when {
+            ctx == RnsContext.RESOURCE_REQ -> {
+                val dec = link.decryptLinkPayload(body) ?: continue
+                badSender.handleRequest(dec).forEach { sendPkt(it) }
             }
-            RnsContext.RESOURCE_PRF -> {
-                if (pt == RnsPacketType.PROOF) {
-                    resSender.handleProof(body)
+            pt == RnsPacketType.PROOF && ctx == RnsContext.RESOURCE_PRF -> {
+                badSender.handleProof(body)
+            }
+            ctx == RnsContext.LINKCLOSE -> {
+                if (link.verifyAndHandleLinkClose(body)) {
+                    badLinkClosedAfterProof = true
                 }
-            }
-            RnsContext.RESOURCE_ADV -> {
-                val dec = bobLink.decryptLinkPayload(body) ?: continue
-                val accepted = RnsResourceReceiver.accept(bobLink, dec)
-                if (accepted != null) {
-                    resReceiver = accepted.first
-                    sendPkt(accepted.second)
-                }
-            }
-            RnsContext.RESOURCE_HMU -> {
-                val dec = bobLink.decryptLinkPayload(body) ?: continue
-                resReceiver?.handleHashmapUpdate(dec)?.forEach { sendPkt(it) }
-            }
-            RnsContext.RESOURCE -> {
-                resReceiver?.handlePart(body)?.forEach { sendPkt(it) }
             }
         }
     }
-    check(resSender.status == RnsResourceStatus.COMPLETE) { "Kotlin -> Python 16KB Resource did not complete (status=${resSender.status})" }
-    check(resReceiver?.status == RnsResourceStatus.COMPLETE) { "Python -> Kotlin 16KB Resource did not complete (status=${resReceiver?.status})" }
-    val py16kWire = resReceiver.assembledData!!
-    val py16kMsg = LxmfCodec.unpack(py16kWire, bobEdPub)
-    checkNotNull(py16kMsg) { "Failed to unpack Python 16KB LXMF message" }
-    check(py16kMsg.signatureValid) { "Invalid Ed25519 signature on Python 16KB LXMF message" }
-    check(py16kMsg.content.size == 16384 && py16kMsg.title == "py-16k-resource") {
-        "Unexpected Python 16KB LXMF content: title=${py16kMsg.title} len=${py16kMsg.content.size}"
+    check(badSender.status == RnsResourceStatus.COMPLETE && badLinkClosedAfterProof) {
+        "Expected RESOURCE_PRF followed by LINKCLOSE for invalid stamp Resource deposit (status=${badSender.status}, closed=$badLinkClosedAfterProof)"
     }
-    println("[5b] PASS: Python -> Kotlin 16KB LXMF via RNS.Resource verified (len=${py16kMsg.content.size}, sigValid=true)")
+    println("[4b] PASS: Invalid-stamp Resource deposit triggered RESOURCE_PRF followed by LINKCLOSE from lxmd (N-12)")
+
+    // 5. >MDU 16KB + >1MB (1.2MB) multi-segment LXMF message end-to-end via RNS Resource on lxmf.delivery
+    val bobPub = RnsCrypto.hexToBytes(bobPubHex)
+    val bobEdPub = bobPub.copyOfRange(32, 64)
+    val (_, bobTid) = awaitAnnounce(bobDestHex, timeoutMs = 5000)
+    val bobLink = establishLink(bobDestHex, bobPub, bobTid)
+    sendPkt(bobLink.buildIdentifyPacket(pub64, edPriv)!!)
+
+    fun driveBidirectionalResource(senderInit: RnsResourceSender, expectedPyTitle: String, expectedPyLen: Int): ByteArray {
+        var curSender = senderInit
+        sendPkt(curSender.buildAdvertisementPacket()!!)
+        var curReceiver: RnsResourceReceiver? = null
+        var priorData: ByteArray? = null
+        var priorMeta: Any? = null
+        var finalBytes: ByteArray? = null
+        val dl = System.currentTimeMillis() + 60_000
+        while (System.currentTimeMillis() < dl &&
+            !(curSender.status == RnsResourceStatus.COMPLETE && curSender.segmentIndex == curSender.totalSegments && finalBytes != null)
+        ) {
+            val pkt = pollPacket(200) ?: continue
+            val flags = pkt[0].toInt() and 0xFF
+            val pt = flags and 0x03
+            val h2 = ((flags and 0x40) shr 6) == RnsHeaderType.HEADER_2
+            val destOff = if (h2) 18 else 2
+            val ctxOff = if (h2) 34 else 18
+            val payOff = if (h2) 35 else 19
+            if (pkt.size <= payOff) continue
+            if (RnsCrypto.bytesToHex(pkt.copyOfRange(destOff, destOff + 16)) != bobLink.linkIdHex) continue
+            val ctx = pkt[ctxOff]
+            val body = pkt.copyOfRange(payOff, pkt.size)
+            when (ctx) {
+                RnsContext.RESOURCE_REQ -> {
+                    val dec = bobLink.decryptLinkPayload(body) ?: continue
+                    curSender.handleRequest(dec, RnsCrypto.packetHash(pkt)).forEach { sendPkt(it) }
+                }
+                RnsContext.RESOURCE_PRF -> {
+                    if (pt == RnsPacketType.PROOF && curSender.handleProof(body)) {
+                        if (curSender.segmentIndex < curSender.totalSegments) {
+                            curSender = curSender.nextSegment()!!
+                            sendPkt(curSender.buildAdvertisementPacket()!!)
+                        }
+                    }
+                }
+                RnsContext.RESOURCE_ADV -> {
+                    val dec = bobLink.decryptLinkPayload(body) ?: continue
+                    val accepted = RnsResourceReceiver.accept(
+                        link = bobLink,
+                        advPlaintext = dec,
+                        maxDecompressedSize = RnsResourceConstants.DEFAULT_MAX_DECOMPRESSED_SIZE,
+                        priorSegmentsData = priorData,
+                        priorMetadata = priorMeta,
+                    )
+                    if (accepted != null) {
+                        curReceiver = accepted.first
+                        sendPkt(accepted.second)
+                    }
+                }
+                RnsContext.RESOURCE_HMU -> {
+                    val dec = bobLink.decryptLinkPayload(body) ?: continue
+                    curReceiver?.handleHashmapUpdate(dec)?.forEach { sendPkt(it) }
+                }
+                RnsContext.RESOURCE -> {
+                    val r = curReceiver ?: continue
+                    r.handlePart(body).forEach { sendPkt(it) }
+                    if (r.status == RnsResourceStatus.COMPLETE) {
+                        if (r.isFinalSegment) {
+                            finalBytes = r.assembledData
+                        } else {
+                            priorData = r.assembledData
+                            priorMeta = r.assembledMetadata
+                            curReceiver = null
+                        }
+                    }
+                }
+            }
+        }
+        check(curSender.status == RnsResourceStatus.COMPLETE && curSender.segmentIndex == curSender.totalSegments) {
+            "Kotlin -> Python Resource ($expectedPyTitle) did not complete (seg=${curSender.segmentIndex}/${curSender.totalSegments}, status=${curSender.status})"
+        }
+        val bytes = checkNotNull(finalBytes) { "Python -> Kotlin Resource ($expectedPyTitle) did not complete" }
+        val pyMsg = checkNotNull(LxmfCodec.unpack(bytes, bobEdPub)) { "Failed to unpack $expectedPyTitle" }
+        check(pyMsg.signatureValid && pyMsg.title == expectedPyTitle && pyMsg.content.size == expectedPyLen) {
+            "Unexpected $expectedPyTitle: title=${pyMsg.title} len=${pyMsg.content.size} sig=${pyMsg.signatureValid}"
+        }
+        return bytes
+    }
+
+    // 5a/5b: 16KB bidirectional Resource
+    val kt16kWire = LxmfCodec.pack(
+        destinationHash = bobDestHex,
+        sourceHash = selfDestHex,
+        edPriv = edPriv,
+        content = kotlin.random.Random(12345).nextBytes(16384),
+        title = "kt-16k-resource",
+    )
+    driveBidirectionalResource(RnsResourceSender(bobLink, kt16kWire, autoCompress = true), "py-16k-resource", 16384)
+    println("[5b] PASS: Python <-> Kotlin 16KB LXMF via RNS.Resource verified")
+
+    // 5c: 1.25 MB multi-segment (> 1 MB) bidirectional Resource
+    val kt1m2Wire = LxmfCodec.pack(
+        destinationHash = bobDestHex,
+        sourceHash = selfDestHex,
+        edPriv = edPriv,
+        content = kotlin.random.Random(54321).nextBytes(1_250_000),
+        title = "kt-1m2-resource",
+    )
+    val sender1m2 = RnsResourceSender(bobLink, kt1m2Wire, autoCompress = false)
+    check(sender1m2.split && sender1m2.totalSegments == 2) { "Expected 2 segments for 1.25MB payload" }
+    driveBidirectionalResource(sender1m2, "py-1m2-resource", 1_250_000)
+    println("[5c] PASS: Python <-> Kotlin 1.25MB multi-segment RNS.Resource verified both ways")
+
+    // 5d: Malformed ADV (n = 0x7fffffff, n = -1) survived without crash
+    val fakeHash = ByteArray(32) { 0x11 }
+    val fakeRand = ByteArray(4) { 0x22 }
+    for (badN in listOf(0x7fffffffL, -1L)) {
+        val badAdv = MsgPack.encode(
+            linkedMapOf(
+                "t" to 1024L,
+                "d" to 1024L,
+                "n" to badN,
+                "h" to fakeHash,
+                "r" to fakeRand,
+                "o" to fakeHash,
+                "i" to 1,
+                "l" to 1,
+                "q" to null,
+                "f" to 0x01,
+                "m" to ByteArray(4),
+            ),
+        )
+        check(RnsResourceReceiver.accept(bobLink, badAdv) == null) { "Malformed ADV n=$badN must be rejected" }
+    }
+    println("[5d] PASS: Malformed ADV (n=0x7fffffff, n=-1) rejected without crash")
 
     sendPkt(bobLink.buildLinkClosePacket()!!)
     sock.close()

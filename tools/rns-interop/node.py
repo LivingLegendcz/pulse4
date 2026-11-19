@@ -41,9 +41,17 @@ r = RNS.Reticulum(configdir=cfg, loglevel=7, logdest=RNS.LOG_FILE)
 RNS.logfile = os.path.join(work, "rns.log")
 
 node_id = RNS.Identity()
-router = LXMF.LXMRouter(identity=node_id, storagepath=os.path.join(work, "lxmf"))
+router = LXMF.LXMRouter(identity=node_id, storagepath=os.path.join(work, "lxmf"), delivery_limit=2048)
 router.enable_propagation()
 prop_dest = router.propagation_destination
+
+# Restricted PN (auth_required=True, empty allowed_list) for testing ERROR_NO_ACCESS (0xF1)
+restricted_id = RNS.Identity()
+restricted_router = LXMF.LXMRouter(identity=restricted_id, storagepath=os.path.join(work, "lxmf_restricted"))
+restricted_router.enable_propagation()
+restricted_router.auth_required = True
+restricted_router.allowed_list = []
+restricted_prop_dest = restricted_router.propagation_destination
 
 seed = bytes.fromhex(seed_hex)
 kid = RNS.Identity.from_bytes(hashlib.sha256(seed).digest() + seed)
@@ -70,22 +78,33 @@ def _on_direct_delivery(message):
         "sig_valid": bool(message.signature_validated),
     })
     RNS.log(f"[NODE] direct delivery received title={message.title!r} len={len(message.content)} sig={message.signature_validated}", RNS.LOG_CRITICAL)
-    if delivery_links and message.signature_validated and len(message.content) >= 16384:
+    if delivery_links and message.signature_validated:
         link = delivery_links[-1]
         if link.status == RNS.Link.ACTIVE:
-            py_16k = LXMessage(kd, bob_in, os.urandom(16384), title="py-16k-resource", desired_method=LXMessage.DIRECT)
-            py_16k.pack()
-            RNS.Resource(py_16k.packed, link)
+            if len(message.content) >= 1_200_000:
+                py_1m2 = LXMessage(kd, bob_in, os.urandom(1_250_000), title="py-1m2-resource", desired_method=LXMessage.DIRECT)
+                py_1m2.pack()
+                RNS.Resource(py_1m2.packed, link)
+            elif len(message.content) >= 16384:
+                py_16k = LXMessage(kd, bob_in, os.urandom(16384), title="py-16k-resource", desired_method=LXMessage.DIRECT)
+                py_16k.pack()
+                RNS.Resource(py_16k.packed, link)
 
 router.register_delivery_callback(_on_direct_delivery)
 
-# Inject a Python -> Kotlin message into the PN via lxmf.delivery
+# Inject small + large (> link.mdu) Python -> Kotlin messages into the PN via lxmf.delivery
 kd = RNS.Destination(kid, RNS.Destination.OUT, RNS.Destination.SINGLE, "lxmf", "delivery")
 m = LXMessage(kd, src_in, "hello from python lxmf 1.3.0", title="py-title", desired_method=LXMessage.PROPAGATED)
 m.pack()
 lxmf_data = m.packed[:16] + kd.encrypt(m.packed[16:])
 router.lxmf_propagation(lxmf_data, stamp_value=20, stamp_data=os.urandom(32))
 py_to_kt_tid = RNS.Identity.full_hash(lxmf_data).hex()
+
+m_large = LXMessage(kd, src_in, os.urandom(100_000), title="py-large-get", desired_method=LXMessage.PROPAGATED)
+m_large.pack()
+lxmf_large_data = m_large.packed[:16] + kd.encrypt(m_large.packed[16:])
+router.lxmf_propagation(lxmf_large_data, stamp_value=20, stamp_data=os.urandom(32))
+py_large_kt_tid = RNS.Identity.full_hash(lxmf_large_data).hex()
 
 announces_seen = []
 
@@ -101,6 +120,7 @@ info = {
     "rns": RNS._version.__version__,
     "lxmf": LXMF._version.__version__,
     "prop_dest": prop_dest.hash.hex(),
+    "restricted_prop_dest": restricted_prop_dest.hash.hex(),
     "node_transport_id": RNS.Transport.identity.hash.hex(),
     "alice_pub": alice.get_public_key().hex(),
     "alice_lxmf_dest": src_in.hash.hex(),
@@ -109,12 +129,14 @@ info = {
     "kotlin_identity_hash": kid.hash.hex(),
     "kotlin_lxmf_dest": kd.hash.hex(),
     "py_to_kt_tid": py_to_kt_tid,
+    "py_large_kt_tid": py_large_kt_tid,
     "stamp_cost": router.propagation_stamp_cost,
     "stamp_flex": router.propagation_stamp_cost_flexibility,
 }
 with open(os.path.join(work, "info.json"), "w") as f:
     json.dump(info, f)
 router.announce_propagation_node()
+restricted_router.announce_propagation_node()
 bob_in.announce()
 print("READY", json.dumps(info), flush=True)
 

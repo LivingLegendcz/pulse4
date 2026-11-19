@@ -23,6 +23,18 @@ object RnsResourceConstants {
     const val MAX_EFFICIENT_SIZE = 1 * 1024 * 1024 - 1
     const val METADATA_MAX_SIZE = 16 * 1024 * 1024 - 1
     const val AUTO_COMPRESS_MAX_SIZE = 64 * 1024 * 1024
+    const val DEFAULT_MAX_DECOMPRESSED_SIZE = 4 * 1024 * 1024
+
+    const val PART_TIMEOUT_FACTOR = 4
+    const val PART_TIMEOUT_FACTOR_AFTER_RTT = 2
+    const val PROOF_TIMEOUT_FACTOR = 3
+    const val MAX_RETRIES = 16
+    const val MAX_ADV_RETRIES = 4
+    const val MAX_PROOF_RETRIES = 3
+    const val SENDER_GRACE_TIME_MS = 10_000L
+    const val PROCESSING_GRACE_MS = 1_000L
+    const val RETRY_GRACE_TIME_MS = 250L
+    const val PER_RETRY_DELAY_MS = 500L
 
     const val HASHMAP_IS_NOT_EXHAUSTED = 0x00
     const val HASHMAP_IS_EXHAUSTED = 0xFF
@@ -145,7 +157,7 @@ data class RnsResourceAdvertisement(
             val map = MsgPack.decode(data).first as? Map<*, *> ?: return null
             val t = (map["t"] as? Number)?.toLong() ?: return null
             val d = (map["d"] as? Number)?.toLong() ?: return null
-            val n = (map["n"] as? Number)?.toInt() ?: return null
+            val nLong = (map["n"] as? Number)?.toLong() ?: return null
             val h = map["h"] as? ByteArray ?: return null
             val r = map["r"] as? ByteArray ?: return null
             val o = map["o"] as? ByteArray ?: return null
@@ -155,7 +167,11 @@ data class RnsResourceAdvertisement(
             val f = (map["f"] as? Number)?.toInt() ?: return null
             val m = map["m"] as? ByteArray ?: return null
 
-            if (t < 0 || t > RnsResourceConstants.MAX_EFFICIENT_SIZE * 3L) return null
+            if (t <= 0L || t > RnsResourceConstants.MAX_EFFICIENT_SIZE * 3L) return null
+            if (d < 0L) return null
+            if (nLong <= 0L || nLong > t || nLong > Int.MAX_VALUE.toLong()) return null
+            val n = nLong.toInt()
+            if (i < 1 || l < 1 || i > l) return null
             if (h.size != 32 || o.size != 32 || r.size != RnsResourceConstants.RANDOM_HASH_SIZE) return null
 
             RnsResourceAdvertisement(
@@ -172,6 +188,12 @@ data class RnsResourceAdvertisement(
                 hashmap = m,
             )
         }.getOrNull()
+
+        internal fun extractHash(data: ByteArray): ByteArray? = runCatching {
+            val map = MsgPack.decode(data).first as? Map<*, *> ?: return null
+            val h = map["h"] as? ByteArray ?: return null
+            h.takeIf { it.size == 32 }
+        }.getOrNull()
     }
 }
 
@@ -183,30 +205,75 @@ internal fun rnsResourceMapHash(partData: ByteArray, randomHash: ByteArray): Byt
 }
 
 /**
- * Outgoing RNS 1.6.0 Resource state machine (single-segment <= MAX_EFFICIENT_SIZE).
+ * Outgoing RNS 1.6.0 Resource state machine (supports single-segment and multi-segment > MAX_EFFICIENT_SIZE).
  * Produces encrypted RESOURCE_ADV / RESOURCE_HMU / RESOURCE_ICL packets and
  * unencrypted-at-packet-layer DATA(RESOURCE) part packets for RnsLinkSession.
  */
-class RnsResourceSender(
+class RnsResourceSender private constructor(
     private val link: RnsLinkSession,
-    data: ByteArray,
-    metadata: Any? = null,
-    autoCompress: Boolean = true,
-    private val autoCompressLimit: Int = RnsResourceConstants.AUTO_COMPRESS_MAX_SIZE,
-    val requestId: ByteArray? = null,
-    val isResponse: Boolean = false,
-    val appFlag: Boolean = false,
+    private val fullUncompressedData: ByteArray,
+    private val rawDataSize: Int,
+    val hasMetadata: Boolean,
+    private val autoCompress: Boolean,
+    private val autoCompressLimit: Int,
+    val requestId: ByteArray?,
+    val isResponse: Boolean,
+    val appFlag: Boolean,
+    val segmentIndex: Int,
+    val totalSegments: Int,
+    initialOriginalHash: ByteArray?,
 ) {
+    constructor(
+        link: RnsLinkSession,
+        data: ByteArray,
+        metadata: Any? = null,
+        autoCompress: Boolean = true,
+        autoCompressLimit: Int = RnsResourceConstants.AUTO_COMPRESS_MAX_SIZE,
+        requestId: ByteArray? = null,
+        isResponse: Boolean = false,
+        appFlag: Boolean = false,
+    ) : this(
+        link = link,
+        fullUncompressedData = buildFullUncompressed(data, metadata),
+        rawDataSize = data.size,
+        hasMetadata = metadata != null,
+        autoCompress = autoCompress,
+        autoCompressLimit = autoCompressLimit,
+        requestId = requestId,
+        isResponse = isResponse,
+        appFlag = appFlag,
+        segmentIndex = 1,
+        totalSegments = computeTotalSegments(buildFullUncompressed(data, metadata).size),
+        initialOriginalHash = null,
+    )
+
+    companion object {
+        private fun buildFullUncompressed(data: ByteArray, metadata: Any?): ByteArray {
+            if (metadata == null) return data
+            val packedMeta = MsgPack.encode(metadata)
+            require(packedMeta.size <= RnsResourceConstants.METADATA_MAX_SIZE) { "Resource metadata size exceeded" }
+            val sz = packedMeta.size
+            val prefix = byteArrayOf(
+                ((sz ushr 16) and 0xFF).toByte(),
+                ((sz ushr 8) and 0xFF).toByte(),
+                (sz and 0xFF).toByte(),
+            )
+            return prefix + packedMeta + data
+        }
+
+        private fun computeTotalSegments(totalBytes: Int): Int {
+            if (totalBytes <= RnsResourceConstants.MAX_EFFICIENT_SIZE) return 1
+            return ((totalBytes - 1) / RnsResourceConstants.MAX_EFFICIENT_SIZE) + 1
+        }
+    }
+
     val sdu: Int = link.sdu
-    val hasMetadata: Boolean = metadata != null
     val compressed: Boolean
     val encrypted: Boolean = true
-    val totalSize: Long
+    val totalSize: Long = fullUncompressedData.size.toLong()
     val transferSize: Int
     val totalParts: Int
-    val segmentIndex: Int = 1
-    val totalSegments: Int = 1
-    val split: Boolean = false
+    val split: Boolean = totalSegments > 1
 
     lateinit var randomHash: ByteArray
         private set
@@ -218,34 +285,45 @@ class RnsResourceSender(
         private set
 
     val hashHex: String get() = RnsCrypto.bytesToHex(hash)
+    val originalHashHex: String get() = RnsCrypto.bytesToHex(originalHash)
 
     var status: RnsResourceStatus = RnsResourceStatus.NONE
         private set
     var sentParts: Int = 0
         private set
+    var retriesLeft: Int = RnsResourceConstants.MAX_ADV_RETRIES
+        private set
+    var advSentMs: Long = 0L
+        private set
+    var lastActivityMs: Long = 0L
+        private set
+    var lastPartSentMs: Long = 0L
+        private set
+
     val progress: Float
-        get() = if (status == RnsResourceStatus.COMPLETE) 1.0f else minOf(1.0f, sentParts.toFloat() / totalParts.coerceAtLeast(1))
+        get() {
+            if (status == RnsResourceStatus.COMPLETE && segmentIndex == totalSegments) return 1.0f
+            val segFrac = sentParts.toFloat() / totalParts.coerceAtLeast(1)
+            return if (!split) {
+                minOf(1.0f, segFrac)
+            } else {
+                minOf(1.0f, ((segmentIndex - 1).toFloat() + segFrac) / totalSegments.toFloat())
+            }
+        }
 
     private val parts: MutableList<ByteArray> = mutableListOf()
     private val partHashes: MutableList<ByteArray> = mutableListOf()
     private val partSent: BooleanArray
     private var hashmapBytes: ByteArray = ByteArray(0)
     private var receiverMinConsecutiveHeight: Int = 0
+    private val seenRequestHashes = HashSet<String>()
 
     init {
-        val metaPrefix = if (metadata != null) {
-            val packedMeta = MsgPack.encode(metadata)
-            require(packedMeta.size <= RnsResourceConstants.METADATA_MAX_SIZE) { "Resource metadata size exceeded" }
-            val sz = packedMeta.size
-            byteArrayOf(((sz ushr 16) and 0xFF).toByte(), ((sz ushr 8) and 0xFF).toByte(), (sz and 0xFF).toByte()) + packedMeta
-        } else {
-            ByteArray(0)
-        }
+        val segStart = ((segmentIndex - 1) * RnsResourceConstants.MAX_EFFICIENT_SIZE).coerceAtMost(fullUncompressedData.size)
+        val segEnd = minOf(segmentIndex * RnsResourceConstants.MAX_EFFICIENT_SIZE, fullUncompressedData.size)
+        val uncompressedData = fullUncompressedData.copyOfRange(segStart, segEnd)
 
-        val uncompressedData = metaPrefix + data
-        totalSize = uncompressedData.size.toLong()
-
-        val innerPayload = if (autoCompress && data.size <= autoCompressLimit) {
+        val innerPayload = if (autoCompress && rawDataSize <= autoCompressLimit) {
             val comp = runCatching { RnsResourceBz2.compress(uncompressedData) }.getOrNull()
             if (comp != null && comp.size < uncompressedData.size) {
                 compressed = true
@@ -273,7 +351,7 @@ class RnsResourceSender(
             sha.update(uncompressedData)
             sha.update(randomHash)
             hash = sha.digest()
-            originalHash = hash
+            originalHash = initialOriginalHash ?: hash
 
             val proofSha = MessageDigest.getInstance("SHA-256")
             proofSha.update(uncompressedData)
@@ -310,6 +388,28 @@ class RnsResourceSender(
         partSent = BooleanArray(totalParts)
     }
 
+    /**
+     * Creates the next segment sender (`segmentIndex + 1` of `totalSegments`) sharing `originalHash`,
+     * or returns `null` when this segment is already the final segment (`segmentIndex >= totalSegments`).
+     */
+    fun nextSegment(): RnsResourceSender? {
+        if (segmentIndex >= totalSegments) return null
+        return RnsResourceSender(
+            link = link,
+            fullUncompressedData = fullUncompressedData,
+            rawDataSize = rawDataSize,
+            hasMetadata = hasMetadata,
+            autoCompress = autoCompress,
+            autoCompressLimit = autoCompressLimit,
+            requestId = requestId,
+            isResponse = isResponse,
+            appFlag = appFlag,
+            segmentIndex = segmentIndex + 1,
+            totalSegments = totalSegments,
+            initialOriginalHash = originalHash,
+        )
+    }
+
     fun buildAdvertisement(): RnsResourceAdvertisement {
         val flags = RnsResourceAdvertisement.encodeFlags(
             encrypted = encrypted,
@@ -335,24 +435,33 @@ class RnsResourceSender(
         )
     }
 
-    fun buildAdvertisementPacket(): ByteArray? {
+    fun buildAdvertisementPacket(nowMs: Long = System.currentTimeMillis()): ByteArray? {
         val advBytes = buildAdvertisement().pack(segment = 0, linkMdu = link.mdu)
         val pkt = link.buildEncryptedLinkPacket(RnsContext.RESOURCE_ADV, advBytes) ?: return null
+        if (status == RnsResourceStatus.NONE || status == RnsResourceStatus.QUEUED) {
+            retriesLeft = RnsResourceConstants.MAX_ADV_RETRIES
+        }
         status = RnsResourceStatus.ADVERTISED
+        advSentMs = nowMs
+        lastActivityMs = nowMs
         return pkt
     }
 
     /**
      * Processes a decrypted RESOURCE_REQ payload and returns outbound packets
      * (DATA(RESOURCE) parts + optional DATA(RESOURCE_HMU)).
+     * Updates state only after validating resource hash and checking for duplicate requests (N-13).
      */
-    fun handleRequest(decryptedReqPayload: ByteArray): List<ByteArray> {
+    fun handleRequest(
+        decryptedReqPayload: ByteArray,
+        requestPacketHash: ByteArray? = null,
+        nowMs: Long = System.currentTimeMillis(),
+    ): List<ByteArray> {
         if (status == RnsResourceStatus.FAILED || status == RnsResourceStatus.REJECTED || status == RnsResourceStatus.COMPLETE) {
             return emptyList()
         }
         if (decryptedReqPayload.size < 1 + 32) return emptyList()
 
-        status = RnsResourceStatus.TRANSFERRING
         val flag = decryptedReqPayload[0].toInt() and 0xFF
         val hashmapIsEmpty = flag == RnsResourceConstants.HASHMAP_IS_EMPTY
         val wantsMoreHashmap = hashmapIsEmpty || flag == RnsResourceConstants.HASHMAP_IS_EXHAUSTED
@@ -361,6 +470,16 @@ class RnsResourceSender(
 
         val reqHash = decryptedReqPayload.copyOfRange(pad, pad + 32)
         if (!reqHash.contentEquals(hash)) return emptyList()
+
+        // N-13 / Link.py:1181: ignore duplicate RESOURCE_REQ packets to prevent sequencing errors
+        val dedupHash = requestPacketHash ?: MessageDigest.getInstance("SHA-256").digest(decryptedReqPayload)
+        if (!seenRequestHashes.add(RnsCrypto.bytesToHex(dedupHash))) {
+            return emptyList()
+        }
+
+        status = RnsResourceStatus.TRANSFERRING
+        lastActivityMs = nowMs
+        retriesLeft = RnsResourceConstants.MAX_RETRIES
 
         val requestedBytes = decryptedReqPayload.copyOfRange(pad + 32, decryptedReqPayload.size)
         val requestedHashes = ArrayList<ByteArray>(requestedBytes.size / RnsResourceConstants.MAPHASH_LEN)
@@ -383,6 +502,8 @@ class RnsResourceSender(
                     partSent[idx] = true
                     sentParts++
                 }
+                lastActivityMs = nowMs
+                lastPartSentMs = nowMs
             }
         }
 
@@ -417,12 +538,66 @@ class RnsResourceSender(
             )
             val hmuPayload = hash + MsgPack.encode(listOf(segment, hmSlice))
             link.buildEncryptedLinkPacket(RnsContext.RESOURCE_HMU, hmuPayload)?.let { outPackets.add(it) }
+            lastActivityMs = nowMs
         }
 
         if (sentParts == totalParts) {
             status = RnsResourceStatus.AWAITING_PROOF
+            retriesLeft = RnsResourceConstants.MAX_PROOF_RETRIES
+            if (lastPartSentMs == 0L) lastPartSentMs = nowMs
         }
         return outPackets
+    }
+
+    /**
+     * Watchdog step for outgoing Resource (`Resource.py:590-676`):
+     * - `ADVERTISED`: retries `RESOURCE_ADV` up to `MAX_ADV_RETRIES` (4), then cancels (`FAILED`).
+     * - `TRANSFERRING`: cancels if receiver stops requesting parts beyond max wait window.
+     * - `AWAITING_PROOF`: waits for `RESOURCE_PRF` across `MAX_PROOF_RETRIES` rounds, then cancels (`FAILED`).
+     */
+    fun checkTimeout(nowMs: Long = System.currentTimeMillis()): List<ByteArray> {
+        val baseTimeoutMs = (link.rttSec * 6.0 * 1000.0).toLong().coerceIn(1_500L, 10_000L)
+        return when (status) {
+            RnsResourceStatus.ADVERTISED -> {
+                val deadline = advSentMs + baseTimeoutMs + RnsResourceConstants.PROCESSING_GRACE_MS
+                if (nowMs >= deadline) {
+                    if (retriesLeft > 0) {
+                        retriesLeft--
+                        val pkt = buildAdvertisementPacket(nowMs)
+                        if (pkt != null) listOf(pkt) else listOfNotNull(buildCancelPacket())
+                    } else {
+                        listOfNotNull(buildCancelPacket())
+                    }
+                } else {
+                    emptyList()
+                }
+            }
+            RnsResourceStatus.TRANSFERRING -> {
+                val maxWaitMs = baseTimeoutMs * RnsResourceConstants.MAX_RETRIES + RnsResourceConstants.SENDER_GRACE_TIME_MS
+                if (nowMs >= lastActivityMs + maxWaitMs) {
+                    listOfNotNull(buildCancelPacket())
+                } else {
+                    emptyList()
+                }
+            }
+            RnsResourceStatus.AWAITING_PROOF -> {
+                val proofWaitMs = (link.rttSec * RnsResourceConstants.PROOF_TIMEOUT_FACTOR * 1000.0).toLong().coerceAtLeast(1_500L) +
+                    RnsResourceConstants.SENDER_GRACE_TIME_MS / 2
+                val refTime = if (lastPartSentMs > 0L) lastPartSentMs else lastActivityMs
+                if (nowMs >= refTime + proofWaitMs) {
+                    if (retriesLeft > 0) {
+                        retriesLeft--
+                        lastPartSentMs = nowMs
+                        emptyList()
+                    } else {
+                        listOfNotNull(buildCancelPacket())
+                    }
+                } else {
+                    emptyList()
+                }
+            }
+            else -> emptyList()
+        }
     }
 
     fun handleProof(proofPayload: ByteArray): Boolean {
@@ -458,7 +633,7 @@ class RnsResourceSender(
 }
 
 /**
- * Incoming RNS 1.6.0 Resource state machine (single-segment <= MAX_EFFICIENT_SIZE).
+ * Incoming RNS 1.6.0 Resource state machine (supports single-segment and multi-segment > MAX_EFFICIENT_SIZE).
  * Consumes RESOURCE_ADV / RESOURCE_HMU / DATA(RESOURCE) parts and produces
  * RESOURCE_REQ / RESOURCE_PRF / RESOURCE_RCL packets for RnsLinkSession.
  */
@@ -466,24 +641,45 @@ class RnsResourceReceiver private constructor(
     private val link: RnsLinkSession,
     val adv: RnsResourceAdvertisement,
     private val maxDecompressedSize: Int,
+    private val priorSegmentsData: ByteArray?,
+    private val priorMetadata: Any?,
 ) {
     val hash: ByteArray = adv.hash
     val hashHex: String = RnsCrypto.bytesToHex(hash)
+    val originalHash: ByteArray = adv.originalHash
+    val originalHashHex: String = RnsCrypto.bytesToHex(originalHash)
     val randomHash: ByteArray = adv.randomHash
     val totalParts: Int = adv.totalParts
     val transferSize: Long = adv.transferSize
     val totalSize: Long = adv.dataSize
+    val segmentIndex: Int = adv.segmentIndex
+    val totalSegments: Int = adv.totalSegments
+    val isFinalSegment: Boolean = adv.segmentIndex == adv.totalSegments
 
     var status: RnsResourceStatus = RnsResourceStatus.TRANSFERRING
         private set
     var receivedCount: Int = 0
         private set
+    var retriesLeft: Int = RnsResourceConstants.MAX_RETRIES
+        private set
+    var lastActivityMs: Long = System.currentTimeMillis()
+        private set
+    private var partTimeoutFactor: Int = RnsResourceConstants.PART_TIMEOUT_FACTOR
+
     val progress: Float
-        get() = if (status == RnsResourceStatus.COMPLETE) 1.0f else minOf(1.0f, receivedCount.toFloat() / totalParts.coerceAtLeast(1))
+        get() {
+            if (status == RnsResourceStatus.COMPLETE && isFinalSegment) return 1.0f
+            val segFrac = receivedCount.toFloat() / totalParts.coerceAtLeast(1)
+            return if (totalSegments <= 1) {
+                minOf(1.0f, segFrac)
+            } else {
+                minOf(1.0f, ((segmentIndex - 1).toFloat() + segFrac) / totalSegments.toFloat())
+            }
+        }
 
     var assembledData: ByteArray? = null
         private set
-    var assembledMetadata: Any? = null
+    var assembledMetadata: Any? = priorMetadata
         private set
 
     private var window: Int = RnsResourceConstants.WINDOW
@@ -498,27 +694,42 @@ class RnsResourceReceiver private constructor(
     private var outstandingParts: Int = 0
     private var waitingForHmu: Boolean = false
 
-    private fun applyHashmapUpdate(segment: Int, hmBytes: ByteArray): ByteArray? {
+    private fun applyHashmapUpdate(
+        segment: Int,
+        hmBytes: ByteArray,
+        nowMs: Long = System.currentTimeMillis(),
+    ): ByteArray? {
         if (status == RnsResourceStatus.FAILED || status == RnsResourceStatus.CORRUPT) return null
-        status = RnsResourceStatus.TRANSFERRING
-        val segLen = RnsResourceConstants.HASHMAP_MAX_LEN
-        val hashes = hmBytes.size / RnsResourceConstants.MAPHASH_LEN
-        for (i in 0 until hashes) {
-            val idx = i + segment * segLen
-            if (idx < totalParts) {
-                if (hashmap[idx] == null) hashmapHeight++
-                hashmap[idx] = hmBytes.copyOfRange(i * RnsResourceConstants.MAPHASH_LEN, (i + 1) * RnsResourceConstants.MAPHASH_LEN)
-            }
+        if (segment < 0 || hmBytes.size % RnsResourceConstants.MAPHASH_LEN != 0) {
+            status = RnsResourceStatus.FAILED
+            return null
         }
+        val segLen = RnsResourceConstants.HASHMAP_MAX_LEN
+        val baseIdx = segment.toLong() * segLen.toLong()
+        if (baseIdx >= totalParts.toLong() && totalParts > 0) {
+            status = RnsResourceStatus.FAILED
+            return null
+        }
+        val hashes = hmBytes.size / RnsResourceConstants.MAPHASH_LEN
         if (hashes < 1 && segment != 0) {
             status = RnsResourceStatus.FAILED
             return null
         }
+        status = RnsResourceStatus.TRANSFERRING
+        lastActivityMs = nowMs
+        retriesLeft = RnsResourceConstants.MAX_RETRIES
+        for (i in 0 until hashes) {
+            val idx = (baseIdx + i).toInt()
+            if (idx in 0 until totalParts) {
+                if (hashmap[idx] == null) hashmapHeight++
+                hashmap[idx] = hmBytes.copyOfRange(i * RnsResourceConstants.MAPHASH_LEN, (i + 1) * RnsResourceConstants.MAPHASH_LEN)
+            }
+        }
         waitingForHmu = false
-        return buildRequestNextPacket()
+        return buildRequestNextPacket(nowMs)
     }
 
-    private fun buildRequestNextPacket(): ByteArray? {
+    private fun buildRequestNextPacket(nowMs: Long = System.currentTimeMillis()): ByteArray? {
         if (status == RnsResourceStatus.FAILED || status == RnsResourceStatus.CORRUPT || waitingForHmu) return null
 
         outstandingParts = 0
@@ -551,16 +762,21 @@ class RnsResourceReceiver private constructor(
         val hmuPart = ByteArrayOutputStream()
         hmuPart.write(hashmapExhausted)
         if (hashmapExhausted == RnsResourceConstants.HASHMAP_IS_EXHAUSTED) {
+            if (hashmapHeight <= 0 || hashmapHeight - 1 >= hashmap.size) return null
             val lastHash = hashmap[hashmapHeight - 1] ?: return null
             hmuPart.write(lastHash)
             waitingForHmu = true
         }
         val reqData = hmuPart.toByteArray() + hash + reqHashes.toByteArray()
+        lastActivityMs = nowMs
         return link.buildEncryptedLinkPacket(RnsContext.RESOURCE_REQ, reqData)
     }
 
-    fun handleHashmapUpdate(decryptedHmuPayload: ByteArray): List<ByteArray> {
-        if (status == RnsResourceStatus.FAILED || !waitingForHmu) return emptyList()
+    fun handleHashmapUpdate(
+        decryptedHmuPayload: ByteArray,
+        nowMs: Long = System.currentTimeMillis(),
+    ): List<ByteArray> {
+        if (status == RnsResourceStatus.FAILED || status == RnsResourceStatus.CORRUPT || !waitingForHmu) return emptyList()
         if (decryptedHmuPayload.size < 33) return emptyList()
         val resHash = decryptedHmuPayload.copyOfRange(0, 32)
         if (!resHash.contentEquals(hash)) return emptyList()
@@ -572,17 +788,21 @@ class RnsResourceReceiver private constructor(
         val segment = (update[0] as? Number)?.toInt() ?: return emptyList()
         val hmBytes = update[1] as? ByteArray ?: return emptyList()
 
-        val req = applyHashmapUpdate(segment, hmBytes)
+        val req = applyHashmapUpdate(segment, hmBytes, nowMs)
         return if (req != null) listOf(req) else emptyList()
     }
 
-    fun handlePart(partData: ByteArray): List<ByteArray> {
+    fun handlePart(
+        partData: ByteArray,
+        nowMs: Long = System.currentTimeMillis(),
+    ): List<ByteArray> {
         if (status == RnsResourceStatus.FAILED || status == RnsResourceStatus.CORRUPT || status == RnsResourceStatus.COMPLETE) {
             return emptyList()
         }
         val partHash = rnsResourceMapHash(partData, randomHash)
         val searchStart = consecutiveCompletedHeight + 1
         val searchEnd = minOf(totalParts, searchStart + window)
+        var matched = false
 
         for (i in searchStart until searchEnd) {
             val expected = hashmap[i]
@@ -590,6 +810,7 @@ class RnsResourceReceiver private constructor(
                 parts[i] = partData
                 receivedCount++
                 outstandingParts = maxOf(0, outstandingParts - 1)
+                matched = true
 
                 var cp = consecutiveCompletedHeight + 1
                 while (cp < totalParts && parts[cp] != null) {
@@ -599,6 +820,12 @@ class RnsResourceReceiver private constructor(
                 break
             }
         }
+
+        if (!matched) return emptyList()
+
+        lastActivityMs = nowMs
+        retriesLeft = RnsResourceConstants.MAX_RETRIES
+        partTimeoutFactor = RnsResourceConstants.PART_TIMEOUT_FACTOR_AFTER_RTT
 
         if (receivedCount == totalParts) {
             return listOfNotNull(assembleAndProve())
@@ -611,7 +838,7 @@ class RnsResourceReceiver private constructor(
                     windowMin++
                 }
             }
-            return listOfNotNull(buildRequestNextPacket())
+            return listOfNotNull(buildRequestNextPacket(nowMs))
         }
 
         return emptyList()
@@ -644,10 +871,15 @@ class RnsResourceReceiver private constructor(
         }
         val payloadAfterRand = decrypted.copyOfRange(RnsResourceConstants.RANDOM_HASH_SIZE, decrypted.size)
 
+        val maxSegmentSize = minOf(maxDecompressedSize, RnsResourceConstants.MAX_EFFICIENT_SIZE)
         val uncompressed = if (!adv.compressed) {
+            if (payloadAfterRand.size > maxSegmentSize) {
+                status = RnsResourceStatus.CORRUPT
+                return buildCancelPacket()
+            }
             payloadAfterRand
         } else {
-            RnsResourceBz2.decompress(payloadAfterRand, maxDecompressedSize) ?: run {
+            RnsResourceBz2.decompress(payloadAfterRand, maxSegmentSize) ?: run {
                 status = RnsResourceStatus.CORRUPT
                 return buildCancelPacket()
             }
@@ -662,23 +894,37 @@ class RnsResourceReceiver private constructor(
             return buildCancelPacket()
         }
 
-        val finalData = if (adv.hasMetadata && adv.segmentIndex == 1 && uncompressed.size >= 3) {
+        val segmentPayload = if (adv.hasMetadata && adv.segmentIndex == 1) {
+            if (uncompressed.size < 3) {
+                status = RnsResourceStatus.CORRUPT
+                return buildCancelPacket()
+            }
             val metaSize = ((uncompressed[0].toInt() and 0xFF) shl 16) or
                 ((uncompressed[1].toInt() and 0xFF) shl 8) or
                 (uncompressed[2].toInt() and 0xFF)
-            if (3 + metaSize <= uncompressed.size) {
-                assembledMetadata = runCatching {
-                    MsgPack.decode(uncompressed.copyOfRange(3, 3 + metaSize)).first
-                }.getOrNull()
-                uncompressed.copyOfRange(3 + metaSize, uncompressed.size)
-            } else {
-                uncompressed
+            if (metaSize < 0 || 3 + metaSize > uncompressed.size) {
+                status = RnsResourceStatus.CORRUPT
+                return buildCancelPacket()
             }
+            assembledMetadata = runCatching {
+                MsgPack.decode(uncompressed.copyOfRange(3, 3 + metaSize)).first
+            }.getOrNull()
+            uncompressed.copyOfRange(3 + metaSize, uncompressed.size)
         } else {
             uncompressed
         }
 
-        assembledData = finalData
+        val priorLen = priorSegmentsData?.size ?: 0
+        if (priorLen.toLong() + segmentPayload.size.toLong() > maxDecompressedSize.toLong()) {
+            status = RnsResourceStatus.CORRUPT
+            return buildCancelPacket()
+        }
+
+        assembledData = if (priorSegmentsData != null && priorSegmentsData.isNotEmpty()) {
+            priorSegmentsData + segmentPayload
+        } else {
+            segmentPayload
+        }
         status = RnsResourceStatus.COMPLETE
 
         val proofSha = MessageDigest.getInstance("SHA-256")
@@ -688,7 +934,7 @@ class RnsResourceReceiver private constructor(
         return link.buildUnencryptedLinkPacket(RnsPacketType.PROOF, RnsContext.RESOURCE_PRF, hash + proof)
     }
 
-    fun buildRetryRequest(): ByteArray? {
+    fun buildRetryRequest(nowMs: Long = System.currentTimeMillis()): ByteArray? {
         if (status != RnsResourceStatus.TRANSFERRING) return null
         if (window > windowMin) {
             window--
@@ -700,7 +946,29 @@ class RnsResourceReceiver private constructor(
             }
         }
         waitingForHmu = false
-        return buildRequestNextPacket()
+        return buildRequestNextPacket(nowMs)
+    }
+
+    /**
+     * Watchdog step for incoming Resource (`Resource.py:611-646`):
+     * When waiting for parts or HMU exceeds the part timeout, shrinks window and sends a retry
+     * `RESOURCE_REQ` up to `MAX_RETRIES` (16), then cancels with `RESOURCE_RCL` (`FAILED`).
+     */
+    fun checkTimeout(nowMs: Long = System.currentTimeMillis()): List<ByteArray> {
+        if (status != RnsResourceStatus.TRANSFERRING) return emptyList()
+        val retriesUsed = (RnsResourceConstants.MAX_RETRIES - retriesLeft).coerceAtLeast(0)
+        val extraWaitMs = retriesUsed * RnsResourceConstants.PER_RETRY_DELAY_MS
+        val baseRttWaitMs = (link.rttSec * 6.0 * 1000.0).toLong().coerceIn(1_000L, 10_000L)
+        val partTimeoutMs = (baseRttWaitMs * partTimeoutFactor) / 2 + RnsResourceConstants.RETRY_GRACE_TIME_MS + extraWaitMs
+        if (nowMs < lastActivityMs + partTimeoutMs) return emptyList()
+
+        return if (retriesLeft > 0) {
+            retriesLeft--
+            lastActivityMs = nowMs
+            listOfNotNull(buildRetryRequest(nowMs))
+        } else {
+            listOfNotNull(buildCancelPacket())
+        }
     }
 
     fun handleCancel() {
@@ -720,17 +988,29 @@ class RnsResourceReceiver private constructor(
         fun accept(
             link: RnsLinkSession,
             advPlaintext: ByteArray,
-            maxDecompressedSize: Int = RnsResourceConstants.AUTO_COMPRESS_MAX_SIZE,
+            maxDecompressedSize: Int = RnsResourceConstants.DEFAULT_MAX_DECOMPRESSED_SIZE,
+            priorSegmentsData: ByteArray? = null,
+            priorMetadata: Any? = null,
+            nowMs: Long = System.currentTimeMillis(),
         ): Pair<RnsResourceReceiver, ByteArray>? {
             val adv = RnsResourceAdvertisement.unpack(advPlaintext) ?: return null
-            val receiver = RnsResourceReceiver(link, adv, maxDecompressedSize)
-            val initialReq = receiver.applyHashmapUpdate(0, adv.hashmap) ?: return null
+            if (adv.transferSize <= 0L || adv.transferSize > RnsResourceConstants.MAX_EFFICIENT_SIZE * 3L) return null
+            if (adv.dataSize < 0L || adv.dataSize > maxDecompressedSize.toLong()) return null
+            val expectedParts = ceil(adv.transferSize.toDouble() / link.sdu.toDouble()).toInt()
+            if (expectedParts <= 0 || adv.totalParts != expectedParts) return null
+            if (adv.segmentIndex < 1 || adv.totalSegments < 1 || adv.segmentIndex > adv.totalSegments) return null
+            if (adv.segmentIndex == 1 && !adv.originalHash.contentEquals(adv.hash)) return null
+            if (adv.segmentIndex > 1 && priorSegmentsData == null) return null
+            if (priorSegmentsData != null && priorSegmentsData.size > maxDecompressedSize) return null
+
+            val receiver = RnsResourceReceiver(link, adv, maxDecompressedSize, priorSegmentsData, priorMetadata)
+            val initialReq = receiver.applyHashmapUpdate(0, adv.hashmap, nowMs) ?: return null
             return receiver to initialReq
         }
 
         fun buildRejectPacket(link: RnsLinkSession, advPlaintext: ByteArray): ByteArray? {
-            val adv = RnsResourceAdvertisement.unpack(advPlaintext) ?: return null
-            return link.buildEncryptedLinkPacket(RnsContext.RESOURCE_RCL, adv.hash)
+            val resHash = RnsResourceAdvertisement.extractHash(advPlaintext) ?: return null
+            return link.buildEncryptedLinkPacket(RnsContext.RESOURCE_RCL, resHash)
         }
     }
 }

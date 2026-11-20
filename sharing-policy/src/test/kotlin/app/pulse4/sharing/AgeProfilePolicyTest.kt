@@ -28,6 +28,21 @@ class AgeProfilePolicyTest {
     }
 
     @Test
+    fun `self declared minor may undo only while no guardian link was ever verified`() {
+        val declared = AgeProfileRecord(AgeState.MINOR, AgeSource.DECLARED, 5)
+        assertEquals(AgeState.ADULT, AgeProfilePolicy.declare(declared, AgeState.ADULT, 9, guardianLinkEverVerified = false)?.state)
+        assertEquals(AgeProfileRecord(), AgeProfilePolicy.declare(declared, AgeState.UNKNOWN, 9, guardianLinkEverVerified = false))
+        // default is the safe value, and a verified link (even a removed one) closes the door
+        assertNull(AgeProfilePolicy.declare(declared, AgeState.ADULT, 9))
+        assertNull(AgeProfilePolicy.declare(declared, AgeState.ADULT, 9, guardianLinkEverVerified = true))
+        // link-locked / migrated minors never undo
+        assertNull(AgeProfilePolicy.declare(minor, AgeState.ADULT, 9, guardianLinkEverVerified = false))
+        assertNull(AgeProfilePolicy.declare(AgeProfileRecord(AgeState.MINOR, AgeSource.MIGRATION, 1), AgeState.ADULT, 9, guardianLinkEverVerified = false))
+        // ADULT can never go to UNKNOWN
+        assertNull(AgeProfilePolicy.declare(adult, AgeState.UNKNOWN, 9, guardianLinkEverVerified = false))
+    }
+
+    @Test
     fun `accepted minor link ratchets to minor from any state`() {
         for (cur in listOf(unknown, adult)) {
             val r = AgeProfilePolicy.onLinkAccepted(cur, link, Fx.CHILD, 9)

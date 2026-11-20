@@ -49,13 +49,35 @@ object AgeProfilePolicy {
     private const val NONCE_HEX_LEN = 32
     private val HEX = Regex("^[0-9a-f]+$")
 
-    /** User declaration. Returns the new record, or `null` when the transition is not allowed (MINOR -> ADULT, -> UNKNOWN). */
-    fun declare(current: AgeProfileRecord, target: AgeState, nowMs: Long): AgeProfileRecord? = when {
-        target == AgeState.UNKNOWN -> null
-        current.state == target -> current
-        current.state == AgeState.UNKNOWN -> AgeProfileRecord(target, AgeSource.DECLARED, nowMs)
-        current.state == AgeState.ADULT && target == AgeState.MINOR -> AgeProfileRecord(AgeState.MINOR, AgeSource.DECLARED, nowMs)
-        else -> null // MINOR -> ADULT
+    /**
+     * User declaration. Returns the new record, or `null` when the transition is not allowed.
+     *
+     * A self-declared MINOR (source DECLARED, never locked by a guardian) may undo the declaration back to
+     * ADULT/UNKNOWN as long as no guardian link has EVER become VERIFIED ([guardianLinkEverVerified] false); this
+     * is equivalent to the first-run choice. [guardianLinkEverVerified] defaults to `true` (the safe value), so
+     * callers must pass the real fact to enable the undo. After the first verified guardian link only a signed
+     * guardian release ([applyRelease]) can lift MINOR.
+     */
+    fun declare(
+        current: AgeProfileRecord,
+        target: AgeState,
+        nowMs: Long,
+        guardianLinkEverVerified: Boolean = true,
+    ): AgeProfileRecord? {
+        if (current.state == AgeState.MINOR && target != AgeState.MINOR) {
+            val undoable = !guardianLinkEverVerified &&
+                current.source == AgeSource.DECLARED && current.lockedByGuardianId == null
+            if (!undoable) return null
+            return if (target == AgeState.UNKNOWN) AgeProfileRecord() else AgeProfileRecord(target, AgeSource.DECLARED, nowMs)
+        }
+        return when {
+            target == AgeState.UNKNOWN -> null
+            current.state == target -> current
+            current.state == AgeState.UNKNOWN -> AgeProfileRecord(target, AgeSource.DECLARED, nowMs)
+            current.state == AgeState.ADULT && target == AgeState.MINOR ->
+                AgeProfileRecord(AgeState.MINOR, AgeSource.DECLARED, nowMs)
+            else -> null
+        }
     }
 
     /**

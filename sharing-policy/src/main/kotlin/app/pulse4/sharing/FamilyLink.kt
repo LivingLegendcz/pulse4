@@ -148,9 +148,9 @@ object FamilyLinkPolicy {
             GuardianConsentPolicy.isEffective(grant, ageState, links, approvals, grandfatheredIds, now)
 
     /**
-     * Link removal. Allowed for either party of the link and, for a guardian link, also for any OTHER verified
-     * guardian of the same child ([links] / [records] are needed to establish that). Idempotent for an already
-     * REVOKED link; REJECTED links cannot be removed.
+     * Link removal. Allowed ONLY for the two parties of that link (its parent or its child); a guardian can never
+     * remove another guardian's link. [links] / [records] are kept for source compatibility and are not used.
+     * Idempotent for an already REVOKED link; REJECTED links cannot be removed.
      */
     fun removeLink(
         link: FamilyLink,
@@ -166,9 +166,9 @@ object FamilyLinkPolicy {
         return link.copy(status = FamilyLinkStatus.REVOKED, version = link.version + 1)
     }
 
+    @Suppress("UNUSED_PARAMETER")
     private fun mayRemove(link: FamilyLink, actorId: String, links: List<FamilyLink>, records: List<ConsentRecord>) =
-        actorId == link.parentId || actorId == link.childId ||
-            actorId in GuardianConsentPolicy.verifiedGuardians(link.childId, links, records)
+        actorId == link.parentId || actorId == link.childId
 
     /** An inbound `family.link.revoke` is valid only from the other party of the link; [selfId] is a party. */
     fun isValidRemoteRevoke(link: FamilyLink, envelopeAuthor: String, selfId: String): Boolean =
@@ -176,8 +176,8 @@ object FamilyLinkPolicy {
             (link.childId == selfId && link.parentId == envelopeAuthor)
 
     /**
-     * Child side of an inbound `family.link.revoke`: valid from either party of [link] or from any other verified
-     * guardian of the child (a guardian may remove another guardian, e.g. a compromised or fake one).
+     * Child side of an inbound `family.link.revoke`: valid only from one of the two parties of [link]; another
+     * guardian's removal is rejected ([links] / [records] are unused, kept for source compatibility).
      */
     fun isValidLinkRemoval(
         link: FamilyLink,

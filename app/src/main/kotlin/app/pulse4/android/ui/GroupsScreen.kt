@@ -127,6 +127,7 @@ import app.pulse4.sync.PairingPayload
 import app.pulse4.sync.PairingResult
 import app.pulse4.sync.Wire
 import app.pulse4.ui.Aggregation
+import app.pulse4.ui.ChartKey
 import app.pulse4.ui.GrantEditor
 import app.pulse4.ui.Labels
 import com.google.zxing.BarcodeFormat
@@ -1393,7 +1394,8 @@ private fun GroupMetricsComparisonSection(
         MultiSeriesLineChart(
             series = multiSeries,
             xLabels = datesAxis.map { it.takeLast(5) },
-            title = "$groupTitle · ${windowDays} dní"
+            title = "$groupTitle · ${windowDays} dní",
+            infoKey = ChartKey.GROUP_COMPARE
         )
 
         Spacer(Modifier.height(10.dp))

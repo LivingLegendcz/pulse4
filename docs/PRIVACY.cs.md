@@ -148,7 +148,7 @@ Pulse4 je navržen tak, aby ho mohly s účastí rodiče používat i děti od 6
 
 **Dospělý.** Aplikace funguje normálně.
 
-**Dítě.** Aplikace tento telefon okamžitě označí jako dětský. Prvním povinným krokem je **přidat rodiče**: dítě se spáruje s telefonem rodiče (přes QR kód) a odešle žádost o rodinnou vazbu. **Dokud rodič žádost na svém zařízení nepřijme, je aplikace zablokovaná.** V tomto stavu může dítě jen párovat, odeslat nebo znovu odeslat žádost, případně ji zrušit. Dítě se nemůže přihlásit ke Garminu ani Withings, vidět metriky ani vstupovat do okruhů.
+**Dítě.** Aplikace tento telefon okamžitě označí jako dětský. Prvním povinným krokem je **přidat rodiče**: dítě se spáruje s telefonem rodiče (přes QR kód) a odešle žádost o rodinnou vazbu. **Dokud rodič žádost na svém zařízení nepřijme, je aplikace zablokovaná.** V tomto stavu může dítě jen párovat, odeslat nebo znovu odeslat žádost, případně ji zrušit, nebo změnit odpověď zpět na dospělý (jen dokud rodič vazbu nepřijme, viz níže). Dítě se nemůže přihlásit ke Garminu ani Withings, vidět metriky ani vstupovat do okruhů.
 
 **Více rodičů nebo zákonných zástupců.** K dítěti může být připojeno více rodičů či zástupců (například oba rodiče; aplikace stanoví nevelký horní limit). Aplikace se odemkne, jakmile žádost přijme **jeden** zástupce. Přidání dalšího zástupce později vyžaduje dvě věci: nový zástupce přijme žádost dítěte **a** stávající zástupce přidání této osoby schválí podepsaným schválením. Tím se brání tomu, aby si dítě samo jmenovalo „zástupce“, který by mu věci schvaloval. Každá žádost o schválení se posílá **všem** připojeným zástupcům. **Kterýkoli jeden** z nich ji může schválit nebo zamítnout. Platí první platné rozhodnutí; ostatní zástupci pak vidí, že už bylo rozhodnuto, a kým.
 
@@ -161,7 +161,7 @@ Pulse4 je navržen tak, aby ho mohly s účastí rodiče používat i děti od 6
 
 **Jak se schválení ověřuje.** Schválení je digitálně podepsaná zpráva vytvořená v telefonu rodiče jeho soukromým klíčem. Telefon dítěte ověří podpis proti veřejnému klíči rodiče (tomu, který dostal při vzniku vazby), zkontroluje, že schválení odpovídá jeho vlastní čekající žádosti, nevypršelo, nebylo už použito a přesně odpovídá tomu, oč se žádalo. Každé schválení lze použít jednou a má dobu platnosti. Schválení putuje stejným end-to-end šifrovaným kanálem.
 
-**Rodič může kdykoli odvolat.** Kterýkoli připojený zástupce může odvolat konkrétní schválení sdílení dat, schválení okruhu (telefon dítěte pak z okruhu odejde a zruší své sdílení do něj) nebo svou vlastní rodinnou vazbu, a to včetně schválení, která dal jiný zástupce. Zástupce může také odebrat vazbu jiného zástupce (například byla-li vytvořena omylem nebo jí už nedůvěřuje). Odvolání je podepsané a telefon dítěte ho použije hned po přijetí. Schválení zůstávají platná, dokud je připojen alespoň jeden zástupce. Když je odebrána **poslední** vazba zástupce, všechna schválení se odvolají a aplikace se vrátí do zablokovaného stavu „čekání na rodiče“. Vazbu může ze své strany odebrat i dítě, se stejným účinkem. Přechod z dětského stavu na dospělý v tomto telefonu je možný jen s podepsaným uvolněním od připojeného zástupce.
+**Rodič může kdykoli odvolat.** Kterýkoli připojený zástupce může odvolat konkrétní schválení sdílení dat nebo schválení okruhu (telefon dítěte pak z okruhu odejde a zruší své sdílení do něj), a to včetně schválení, která dal jiný zástupce. Schválení, kterým byl přidán jiný zástupce, odvolat nelze. Zástupce odejde z rodiny jen odebráním vlastní rodinné vazby; žádný zástupce nemůže odebrat vazbu jiného zástupce. Schválení patří rodině: zůstávají platná, i když jeden zástupce odejde, dokud je připojen alespoň jeden další. Odvolání je podepsané a telefon dítěte ho použije hned po přijetí. Když je odebrána **poslední** vazba zástupce, všechna schválení se odvolají a aplikace se vrátí do zablokovaného stavu „čekání na rodiče“. Vazbu může ze své strany odebrat i dítě, se stejným účinkem. Dítě může změnit odpověď zpět na dospělý na tomto telefonu jen dokud rodič vazbu nepřijme. Potom je návrat z dětského stavu na dospělý možný jen s podepsaným uvolněním od připojeného zástupce.
 
 **Co se ukládá a kde.** Prohlášení o věku, rodinná vazba a schválení jsou uložené **jen v telefonu, v šifrované databázi**. **Nejsou součástí zálohy aplikace** a neposílají se poskytovateli. Ostatním stranám vazby jsou viditelné jen v rozsahu nutném k fungování (například každý zástupce vidí žádosti dítěte a rozhodnutí a schválení ostatních zástupců).
 
@@ -212,7 +212,7 @@ Podle toho, kde žijete, můžete mít k osobním údajům práva, například n
 - **Přenositelnost.** Šifrovaná záloha je vlastní kontejner aplikace, určený k přenosu mezi telefony s Pulse4. Není to univerzální exportní formát.
 - **Odvolání souhlasu.** Odpojení účtu, vypnutí zdroje dat nebo odvolání sdílení okamžitě zastaví další zpracování.
 - **Třetí strany.** U dat, která drží Garmin, Withings, poskytovatelé map, provozovatelé uzlů nebo lidé, se kterými jste sdíleli, uplatňujte práva u nich.
-- **Rodiče a děti.** Rodič může schválení kdykoli odvolat (oddíl 8).
+- **Rodiče a děti.** Rodič může kdykoli odvolat jednotlivá schválení a odejít z rodinné vazby odebráním vlastní vazby (oddíl 8).
 
 Napíšete-li na kontakt z oddílu 2, poskytovatel vám sdělí, co může a nemůže udělat. Údaje, které nemá, vyhledat nemůže.
 

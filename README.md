@@ -75,6 +75,17 @@ pulse4/
 
 ---
 
+## Knowledge Vault (`pulse4-vault/`)
+
+The project's living documentation is an Obsidian vault written in Czech: requirements, architecture, development logs per release, dead ends (rejected approaches) and audits. **Read it before changing anything non-trivial, and update it after every release.**
+
+- **Location:** `pulse4-vault` is a symlink to `../pulse4-vault`, a separate git repository (branch `master`). It is ignored by this repo's `.gitignore`, so commit vault changes inside the vault itself.
+- **Start here:** `00 - Přehled & Rozcestník/00 - INDEX (MOC).md` (map of content and maintenance rules), then `01 - Stav Projektu a Přejímací Brány.md` (current version, test results, open risks).
+- **Before you start:** read the latest log in `03 - Historie & Evoluce Změn/` and check `04 - Slepé Uličky & Zamítnutá Řešení/` so you don't repeat rejected solutions.
+- **After each release (`vX.Y.Z`):** add a log `03 - Historie & Evoluce Změn/NN - Vývojový Deník - … (Verze X.Y.Z).md`, link it from the INDEX, and refresh the current status note.
+
+---
+
 ## Prerequisites & Building
 
 - **Android Studio:** Ladybug / Meerkat or later

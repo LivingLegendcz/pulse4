@@ -75,6 +75,17 @@ pulse4/
 
 ---
 
+## Znalostní vault (`pulse4-vault/`)
+
+Živá dokumentace projektu je Obsidian vault: zadání, architektura, vývojové deníky ke každému vydání, slepé uličky (zamítnutá řešení) a audity. **Před netriviální změnou ho přečtěte a po každém vydání ho aktualizujte.**
+
+- **Umístění:** `pulse4-vault` je symlink na `../pulse4-vault`, samostatný git repozitář (větev `master`). V `.gitignore` tohoto repa je ignorovaný, změny vaultu proto commitujte přímo ve vaultu.
+- **Začněte zde:** `00 - Přehled & Rozcestník/00 - INDEX (MOC).md` (mapa obsahu a pravidla údržby), pak `01 - Stav Projektu a Přejímací Brány.md` (aktuální verze, výsledky testů, otevřená rizika).
+- **Před prací:** přečtěte poslední deník v `03 - Historie & Evoluce Změn/` a projděte `04 - Slepé Uličky & Zamítnutá Řešení/`, ať se neopakují zamítnutá řešení.
+- **Po každém vydání (`vX.Y.Z`):** přidejte deník `03 - Historie & Evoluce Změn/NN - Vývojový Deník - … (Verze X.Y.Z).md`, odkaz do INDEXu a aktualizujte poznámku se stavem projektu.
+
+---
+
 ## Požadavky a sestavení
 
 - **Android Studio:** Ladybug / Meerkat (nebo novější)

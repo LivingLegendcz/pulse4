@@ -86,6 +86,7 @@ import app.pulse4.android.di.ServiceLocator
 import app.pulse4.android.di.WithingsAuthFailureKind
 import app.pulse4.android.di.WithingsCodeKind
 import app.pulse4.android.di.WithingsLoginResult
+import app.pulse4.withings.WithingsProfiles
 import app.pulse4.withings.WithingsUserProfile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -1204,7 +1205,9 @@ fun WithingsWebLoginDialog(
                             }
                             var selectedChildId by remember {
                                 mutableStateOf<Long?>(
-                                    existingSession?.childUserId?.takeIf { id -> id != selectedPrimaryId && cur.profiles.any { it.id == id } }
+                                    WithingsProfiles.resolveChild(
+                                        cur.profiles, selectedPrimaryId, currentChildId = existingSession?.childUserId,
+                                    )?.id
                                 )
                             }
                             var saving by remember { mutableStateOf(false) }
@@ -1222,7 +1225,7 @@ fun WithingsWebLoginDialog(
                                         color = Color(0xFF10B981)
                                     )
                                     Text(
-                                        "Nalezeno ${cur.profiles.size} profilů na účtu.",
+                                        "Účet Withings je připojen.",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = Color(0xFF94A3B8)
                                     )
@@ -1240,34 +1243,22 @@ fun WithingsWebLoginDialog(
                             Spacer(Modifier.height(12.dp))
 
                             Text(
-                                "1. Váš hlavní profil (měření pro tento telefon):",
+                                "1. Hlavní profil (měření pro tento telefon):",
                                 style = MaterialTheme.typography.labelMedium,
                                 fontWeight = FontWeight.Bold,
                                 color = Color.White
                             )
                             Spacer(Modifier.height(6.dp))
 
-                            cur.profiles.forEach { p ->
-                                val isSelected = p.id == selectedPrimaryId
-                                val parent = p.findParent(cur.profiles)
-                                val roleBadge = when {
-                                    p.isAdult && p.isPrimary -> " (Hlavní účet)"
-                                    p.isAdult -> " (Dospělý)"
-                                    parent != null -> " (Dětský · pod ${parent.firstName})"
-                                    else -> " (Dětský profil)"
-                                }
+                            // Withings shares data between the adults of an account: other adult profiles are never
+                            // listed or selectable here. Only the current primary profile is shown.
+                            cur.profiles.filter { it.id == selectedPrimaryId }.forEach { p ->
+                                val isSelected = true
+                                val roleBadge = " (Hlavní účet)"
                                 Card(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .padding(vertical = 4.dp)
-                                        .clickable {
-                                            selectedPrimaryId = p.id
-                                            if (selectedChildId == p.id) selectedChildId = null
-                                            val childForAdult = p.childrenUnderThis(cur.profiles).firstOrNull()
-                                            if (childForAdult != null && selectedChildId == null) {
-                                                selectedChildId = childForAdult.id
-                                            }
-                                        },
+                                        .padding(vertical = 4.dp),
                                     shape = RoundedCornerShape(12.dp),
                                     colors = CardDefaults.cardColors(
                                         containerColor = if (isSelected) Color(0xFF0F2E3E) else app.pulse4.android.ui.theme.MineralBackgroundDark
@@ -1283,14 +1274,7 @@ fun WithingsWebLoginDialog(
                                     ) {
                                         RadioButton(
                                             selected = isSelected,
-                                            onClick = {
-                                                selectedPrimaryId = p.id
-                                                if (selectedChildId == p.id) selectedChildId = null
-                                                val childForAdult = p.childrenUnderThis(cur.profiles).firstOrNull()
-                                                if (childForAdult != null && selectedChildId == null) {
-                                                    selectedChildId = childForAdult.id
-                                                }
-                                            },
+                                            onClick = null,
                                             colors = RadioButtonDefaults.colors(selectedColor = Color(0xFF06B6D4))
                                         )
                                         Spacer(Modifier.width(8.dp))
@@ -1316,8 +1300,8 @@ fun WithingsWebLoginDialog(
                                 }
                             }
 
-                            val childProfiles = cur.profiles.filter { it.id != selectedPrimaryId && it.isChild }
-                            if (cur.profiles.size > 1) {
+                            val childProfiles = WithingsProfiles.children(cur.profiles, selectedPrimaryId)
+                            run {
                                 Spacer(Modifier.height(14.dp))
                                 Text(
                                     "2. Dětský profil pro automatické P2P přeposílání do telefonu dítěte (volitelné):",
@@ -1335,14 +1319,14 @@ fun WithingsWebLoginDialog(
                                     ) {
                                         Column(Modifier.padding(12.dp)) {
                                             Text(
-                                                "Na Withings účtu jsou nyní 2 dospělé profily (${cur.profiles.joinToString { it.displayName }}).",
+                                                "Na Withings účtu zatím není žádný dětský profil.",
                                                 style = MaterialTheme.typography.bodySmall,
                                                 fontWeight = FontWeight.SemiBold,
                                                 color = Color(0xFFE2E8F0)
                                             )
                                             Spacer(Modifier.height(4.dp))
                                             Text(
-                                                "Pokud Klárka nebo vy vytvoříte dětský profil ve Withings aplikaci, Pulse4 jej automaticky rozpozná (vedený pod daným rodičem) a nabídne pro přeposílání. Mezitím můžete využít váhové pásmo dítěte.",
+                                                "Pokud ve Withings aplikaci vytvoříte dětský profil, Pulse4 jej automaticky rozpozná a nabídne pro přeposílání. Mezitím můžete využít váhové pásmo dítěte.",
                                                 style = MaterialTheme.typography.labelSmall,
                                                 color = Color(0xFF94A3B8)
                                             )
@@ -1350,7 +1334,7 @@ fun WithingsWebLoginDialog(
                                     }
                                 } else {
                                     Text(
-                                        "Vyberte profil dítěte na váze. Druhý dospělý profil zůstává samostatně.",
+                                        "Vyberte profil dítěte na váze.",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = Color(0xFF94A3B8)
                                     )
@@ -1381,7 +1365,6 @@ fun WithingsWebLoginDialog(
 
                                     childProfiles.forEach { cp ->
                                         val isChild = selectedChildId == cp.id
-                                        val parent = cp.findParent(cur.profiles)
                                         Card(
                                             modifier = Modifier
                                                 .fillMaxWidth()
@@ -1403,7 +1386,7 @@ fun WithingsWebLoginDialog(
                                                 Column {
                                                     Text(cp.displayName, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold, color = Color.White)
                                                     Text(
-                                                        "Dětský profil${parent?.let { " · Vedený pod: ${it.displayName}" } ?: ""} · ID: ${cp.id}",
+                                                        "Dětský profil · ID: ${cp.id}",
                                                         style = MaterialTheme.typography.labelSmall,
                                                         color = Color(0xFF94A3B8)
                                                     )

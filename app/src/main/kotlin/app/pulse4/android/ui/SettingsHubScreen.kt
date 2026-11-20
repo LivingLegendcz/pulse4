@@ -1462,6 +1462,8 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
     }
 
     val webSession by io(tick) { sl.withings.loadWebSession() }
+    // Single source of truth for the child label (follows the R4-6 binding, never an adult profile).
+    val shownChild by io(tick) { sl.withings.displayedChild() }
     val wConnected = wState is app.pulse4.android.di.WithingsUiState.Connected || webSession?.isConnected() == true
     val garminOk = hasGarminKey == true || garminLoggedIn == true
     val latestBody by io(tick + states.size) { sl.withings.latestBodyComposition(730) }
@@ -2022,9 +2024,10 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                                         style = MaterialTheme.typography.bodySmall,
                                         color = Color(0xFF38BDF8)
                                     )
-                                    if (conn?.childName != null || webSession?.childUserName != null) {
+                                    val shownChildName = shownChild?.displayName ?: if (!isWeb) conn?.childName else null
+                                    if (shownChildName != null) {
                                         Text(
-                                            "Dětský profil: ${conn?.childName ?: webSession?.childUserName}",
+                                            "Dětský profil: $shownChildName",
                                             style = MaterialTheme.typography.labelSmall,
                                             color = Color(0xFFA7F3D0)
                                         )
@@ -2068,37 +2071,8 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                                 )
                             }
 
-                            val profiles = webSession?.allProfiles.orEmpty()
-                            val adultProfiles = profiles.filter { it.isAdult }.ifEmpty { profiles }
-                            if (adultProfiles.size > 1) {
-                                Text(
-                                    "Dospělé profily na účtu (přepnutí hlavního profilu):",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = Color(0xFF94A3B8)
-                                )
-                                FlowRow(
-                                    Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    adultProfiles.forEach { p ->
-                                        val isCurrent = p.id == webSession?.primaryUserId
-                                        FilterChip(
-                                            selected = isCurrent,
-                                            onClick = {
-                                                if (!isCurrent) {
-                                                    scope.launch(Dispatchers.IO) {
-                                                        sl.withings.selectProfiles(p.id, null)
-                                                        notice = "Přepnuto na profil ${p.displayName} a synchronizováno."
-                                                        tick++
-                                                    }
-                                                }
-                                            },
-                                            label = { Text(p.displayName, maxLines = 1, softWrap = false) }
-                                        )
-                                    }
-                                }
-                            }
+                            // Adult profiles are intentionally never listed or switchable here: Withings shares data
+                            // between the adults of an account, so only the (bound) child is shown (see label above).
 
                             if (!latestBody.isNullOrEmpty()) {
                                 val summaryParts = buildList {
@@ -2226,9 +2200,10 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                 val childUid = wCfg?.childWithingsUserId
                 // StrictMode (L5): čtení relace (soubor + Keystore) mimo hlavní vlákno.
                 val childSession = io(tick) { sl.withings.loadWebSession() }.value
-                val childName = childSession?.childUserName
-                val allProfiles = childSession?.allProfiles.orEmpty()
-                val childProfiles = allProfiles.filter { it.isChild }
+                val childName = shownChild?.displayName
+                val childProfiles = childSession?.let {
+                    app.pulse4.withings.WithingsProfiles.children(it.allProfiles, it.primaryUserId)
+                }.orEmpty()
                 val hasChildConfig = childUid != null || (wCfg?.childRecipientIdentity ?: "").isNotBlank()
 
                 AccountCard(
@@ -2258,20 +2233,19 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                                 ) {
                                     childProfiles.forEach { cp ->
                                         val isSelected = cp.id.toString() == childUid
-                                        val parent = cp.findParent(allProfiles)
-                                        val parentLabel = parent?.let { " (pod: ${it.firstName})" } ?: ""
                                         FilterChip(
                                             selected = isSelected,
                                             onClick = {
                                                 scope.launch(Dispatchers.IO) {
                                                     val s = sl.withings.loadWebSession() ?: return@launch
-                                                    val newChildId = if (isSelected) null else cp.id
-                                                    sl.withings.selectProfiles(s.primaryUserId, newChildId)
+                                                    // selectProfiles(null) means "keep current child", so disconnect explicitly.
+                                                    if (isSelected) sl.withings.disconnectChild()
+                                                    else sl.withings.selectProfiles(s.primaryUserId, cp.id)
                                                     notice = if (isSelected) "Dětský profil odpojen." else "Vybrán dětský profil ${cp.displayName}."
                                                     tick++
                                                 }
                                             },
-                                            label = { Text("${cp.displayName}$parentLabel", maxLines = 1, softWrap = false) }
+                                            label = { Text(cp.displayName, maxLines = 1, softWrap = false) }
                                         )
                                     }
                                 }

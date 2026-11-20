@@ -72,31 +72,9 @@ data class WithingsUserProfile(
         return if (full.isNotBlank()) full else "Profil $id"
     }
 
-    /** Zda jde o dospělý účet (má vlastní e-mail nebo věk >= 18 let). */
-    val isAdult: Boolean get() {
-        if (!email.isNullOrBlank()) return true
-        if (birthdate > 0L) {
-            val nowSec = System.currentTimeMillis() / 1000L
-            val ageYears = (nowSec - birthdate) / (365.25 * 86400.0)
-            return ageYears >= 18.0
-        }
-        return isPrimary
-    }
-
-    /** Zda jde o dětský profil (nemá vlastní e-mail a věk < 18 let, nebo je vedený pod rodičem). */
-    val isChild: Boolean get() = !isAdult
-
-    /** Nalezne dospělý rodičovský profil v seznamu profilů, pod kterým je toto dítě vedeno. */
-    fun findParent(allProfiles: List<WithingsUserProfile>): WithingsUserProfile? {
-        if (!isChild) return null
-        return allProfiles.firstOrNull { it.isAdult && ((parentAccountId != null && it.parentAccountId == parentAccountId) || it.id == parentAccountId) }
-    }
-
-    /** Nalezne všechny dětské profily vedené pod tímto dospělým účtem. */
-    fun childrenUnderThis(allProfiles: List<WithingsUserProfile>): List<WithingsUserProfile> {
-        if (!isAdult) return emptyList()
-        return allProfiles.filter { it.isChild && ((parentAccountId != null && it.parentAccountId == parentAccountId) || it.parentAccountId == id) }
-    }
+    /** Age in years derived from [birthdate] (epoch seconds), or `null` when the API did not provide it. */
+    fun ageYears(nowSec: Long = System.currentTimeMillis() / 1000L): Double? =
+        if (birthdate > 0L) (nowSec - birthdate) / (365.25 * 86400.0) else null
 }
 
 @Serializable

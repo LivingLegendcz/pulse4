@@ -174,6 +174,8 @@ enum class ConsentCheck {
     TOO_MANY_GUARDIANS,
     NO_GUARDIAN_KEY,
     BAD_SIGNATURE,
+    /** The subject of this approval cannot be revoked by a guardian (GUARDIAN_ADD: guardians are equal). */
+    REVOCATION_NOT_ALLOWED,
     ;
 
     val ok: Boolean get() = this == OK
@@ -613,7 +615,8 @@ object GuardianConsentPolicy {
 
     /**
      * Child side: verifies a revocation of an APPROVED permission. ANY verified guardian may revoke, also an
-     * approval another guardian gave. Revoking a `GUARDIAN_ADD` approval drops that guardian again.
+     * approval another guardian gave. A `GUARDIAN_ADD` approval can NOT be revoked: guardians are equal and a
+     * guardian leaves only by removing their own link ([REVOCATION_NOT_ALLOWED]).
      */
     fun verifyRevocation(
         selfId: String,
@@ -632,6 +635,7 @@ object GuardianConsentPolicy {
             return ConsentCheck.ID_MISMATCH
         }
         if (revocation.guardianId !in verifiedGuardians(selfId, links, records)) return ConsentCheck.NOT_A_GUARDIAN
+        if (req.subject == ConsentSubject.GUARDIAN_ADD) return ConsentCheck.REVOCATION_NOT_ALLOWED
         if (stored.status != ConsentStatus.APPROVED) return ConsentCheck.NOT_APPROVED
         val verifier = verifierFor(revocation.guardianId) ?: return ConsentCheck.NO_GUARDIAN_KEY
         if (!verifier(ConsentCanonical.revocation(revocation), revocation.signatureHex)) return ConsentCheck.BAD_SIGNATURE

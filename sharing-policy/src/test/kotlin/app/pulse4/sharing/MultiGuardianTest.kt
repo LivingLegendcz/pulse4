@@ -197,11 +197,17 @@ class MultiGuardianTest {
         // and its approvals are then no longer usable for decisions
         val req = Fx.request(grant, guardians = both)
         assertEquals(ConsentCheck.NOT_A_GUARDIAN, decide(req, Fx.decide(req, signer = g2), listOf(revokedAdd, Fx.pending(req))))
-        // the add approval itself can be revoked by the founder
-        val revoke = GuardianConsentPolicy.verifyRevocation(
-            Fx.CHILD, g1, Fx.revocation(Fx.guardianAdd(), signer = g1), listOf(addApproved), bothLinks, Fx.keys.resolver,
-        )
-        assertEquals(ConsentCheck.OK, revoke)
+    }
+
+    @Test
+    fun `a guardian cannot revoke the guardian add approval of another guardian`() {
+        // guardians are equal: neither the founder nor the added guardian may remove the other through a revocation
+        for (signer in listOf(g1, g2)) {
+            val revoke = GuardianConsentPolicy.verifyRevocation(
+                Fx.CHILD, signer, Fx.revocation(Fx.guardianAdd(), signer = signer), listOf(addApproved), bothLinks, Fx.keys.resolver,
+            )
+            assertEquals(ConsentCheck.REVOCATION_NOT_ALLOWED, revoke)
+        }
     }
 
     // ---- removal of guardian links ----

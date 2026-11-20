@@ -32,6 +32,7 @@ import app.pulse4.sharing.Group
 import app.pulse4.sharing.GuardianConsentPolicy
 import app.pulse4.sharing.GuardianConsentRequest
 import app.pulse4.sharing.GuardianDecision
+import app.pulse4.sharing.GuardianRevocation
 import app.pulse4.sharing.MembershipAction
 import app.pulse4.sharing.ShareGrant
 import app.pulse4.sharing.TimeScope
@@ -661,6 +662,26 @@ class GuardianConsentHandlersTest {
         assertEquals(setOf(g2.id), child.share.verifiedGuardianIds())
         assertEquals(1, child.share.effectiveGrants(now + 422).size)
         assertEquals(OnboardingState.MINOR_READY, child.share.onboardingStateNow())
+    }
+
+    @Test
+    fun `9 a guardian cannot revoke a guardian add approval, neither through the service nor by a forged message`() {
+        val (child, g1, g2) = twoGuardians()
+        val add = g1.share.consent.items(ConsentRole.GUARDIAN_IN).single { it.subject == ConsentSubject.GUARDIAN_ADD }
+        // service side: refused for both guardians, nothing is queued
+        assertTrue(g1.share.revokeConsent(add.permissionId, now + 500).isFailure)
+        assertTrue(g2.share.revokeConsent(add.permissionId, now + 501).isFailure)
+        assertEquals(ConsentStatus.APPROVED.name, g1.db.guardianConsents().get(add.requestId)!!.status)
+        assertTrue(g1.outbox.due(now + 502).none { it.kind == Kinds.GUARDIAN_CONSENT_REVOKED })
+        // child side: even a correctly signed revocation by the founder is rejected and g2 stays a guardian
+        val u = GuardianRevocation(
+            requestId = add.requestId, guardianId = g1.id, childId = child.id, permissionId = add.permissionId,
+            revokedAtMs = now + 510, signatureHex = "",
+        )
+        val rev = u.copy(signatureHex = bytesToHex(E2eeCrypto.signDetached(g1.priv, ConsentCanonical.revocation(u))))
+        val out = handle(child, g1.id, Kinds.GUARDIAN_CONSENT_REVOKED, Wire.json.encodeToString(GuardianRevocation.serializer(), rev), now + 511)
+        assertEquals(HandlerResult.Rejected(RejectReason.NOT_PERMITTED), out)
+        assertEquals(setOf(g1.id, g2.id), child.share.verifiedGuardianIds())
     }
 
     @Test

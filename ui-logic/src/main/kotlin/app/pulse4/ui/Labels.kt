@@ -6,8 +6,15 @@ import app.pulse4.provider.AreaStatus
 import app.pulse4.provider.PARTIAL_PREFIX
 import app.pulse4.provider.ProviderError
 import app.pulse4.provider.RetryAction
+import app.pulse4.sharing.Category
+import app.pulse4.sharing.ConsentStatus
+import app.pulse4.sharing.ConsentSubject
 import app.pulse4.sharing.Field
+import app.pulse4.sharing.MembershipAction
+import app.pulse4.sharing.PlanRight
 import app.pulse4.sharing.RevocationLimit
+import app.pulse4.sharing.TimeScope
+import java.time.LocalDate
 import app.pulse4.sync.DeliveryState
 import app.pulse4.training.ExportLevel
 import app.pulse4.training.ProposalStatus
@@ -76,6 +83,59 @@ object Labels {
     )
 
     fun field(f: Field) = field[f] ?: f.name
+
+    fun category(c: Category) = when (c) {
+        Category.SLEEP -> "Spánek"
+        Category.BODY_BATTERY -> "Body Battery"
+        Category.HEART_RATE -> "Tep"
+        Category.HRV -> "HRV"
+        Category.ACTIVITY -> "Aktivity"
+        Category.BODY_COMPOSITION -> "Tělesné složení"
+    }
+
+    /** Krátký název pole bez předpony kategorie ("Spánek: délka" -> "délka"). */
+    fun fieldShort(f: Field): String = field(f).substringAfter(": ").substringBefore(" (")
+
+    fun planRight(r: PlanRight) = when (r) {
+        PlanRight.VIEW -> "zobrazit"
+        PlanRight.COPY -> "kopírovat"
+        PlanRight.PROPOSE -> "navrhovat změny"
+        PlanRight.EDIT -> "upravovat"
+    }
+
+    private fun czDate(iso: String?): String =
+        iso?.let { runCatching { LocalDate.parse(it) }.getOrNull() }?.let { "${it.dayOfMonth}. ${it.monthValue}. ${it.year}" } ?: "?"
+
+    /** Časové období sdílení lidsky ("průběžně od 1. 3. 2026"). */
+    fun scope(s: TimeScope) = when (s.kind) {
+        TimeScope.Kind.ONCE -> "jednorázově ${czDate(s.from)} až ${czDate(s.to)}"
+        TimeScope.Kind.FROM -> "od ${czDate(s.from)}"
+        TimeScope.Kind.CONTINUOUS -> "průběžně od ${czDate(s.from)}"
+    }
+
+    /** Zdroje dat; `null` = všechny. */
+    fun sources(p: Set<Provider>?): String =
+        if (p == null) "všechny zdroje" else p.map(::provider).sorted().joinToString(", ").ifEmpty { "žádný zdroj" }
+
+    /** Typ žádosti dítěte o souhlas, jak ho vidí rodič. */
+    fun consentSubject(subject: ConsentSubject, action: MembershipAction? = null) = when (subject) {
+        ConsentSubject.SHARE_GRANT -> "Sdílení metrik"
+        ConsentSubject.CIRCLE_MEMBERSHIP -> if (action == MembershipAction.CREATE) "Založení kruhu" else "Vstup do kruhu"
+        ConsentSubject.GUARDIAN_ADD -> "Přidání dalšího rodiče"
+    }
+
+    /** Stav souhlasu v odznaku u sdílení / kruhu (odpovídá ConsentUiState v aplikaci). */
+    fun consentStatus(s: ConsentStatus) = when (s) {
+        ConsentStatus.PENDING -> "Čeká na rodiče"
+        ConsentStatus.APPROVED -> "Schváleno rodičem"
+        ConsentStatus.REJECTED -> "Zamítnuto"
+        ConsentStatus.EXPIRED -> "Vypršelo"
+        ConsentStatus.REVOKED -> "Odvoláno"
+        ConsentStatus.SUPERSEDED -> "Nahrazeno novější žádostí"
+    }
+
+    /** Poznámka u odvolání / zúžení: co P2P nemůže zaručit. */
+    const val DELIVERED_DATA_NOTE = "Data, která už byla doručena, nemusí jít vzít zpět."
 
     /** Omezení odvolání se popisují přesně a bez slibů navíc. */
     fun revocation(l: RevocationLimit) = when (l) {

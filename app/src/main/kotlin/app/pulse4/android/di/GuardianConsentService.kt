@@ -554,6 +554,10 @@ internal class GuardianConsentService(
         val item = items(ConsentRole.GUARDIAN_IN).filter { it.permissionId == permissionId }
             .firstOrNull { it.status in setOf(ConsentStatus.APPROVED, ConsentStatus.PENDING, ConsentStatus.REJECTED) }
             ?: return Result.failure(IllegalArgumentException("Souhlas nenalezen."))
+        if (item.subject == ConsentSubject.GUARDIAN_ADD) {
+            // Guardians are equal: nobody removes another guardian; a guardian leaves only by removing their own link.
+            return Result.failure(IllegalStateException("Přidání zástupce nelze odvolat. Zástupce odchází odebráním vlastní vazby."))
+        }
         val childId = item.request.childId
         if (links().none { it.parentId == self && GuardianConsentPolicy.isGuardianLink(it, childId) }) {
             return Result.failure(IllegalStateException("Nejste ověřený zástupce tohoto dítěte."))
@@ -695,11 +699,8 @@ internal class GuardianConsentService(
         when (item.subject) {
             ConsentSubject.SHARE_GRANT -> revokeGrantHook(item.subjectId, nowMs, RevocationReason.GUARDIAN_REVOKED)
             ConsentSubject.CIRCLE_MEMBERSHIP -> leaveCircleForced(self, item.subjectId, nowMs, RevocationReason.GUARDIAN_REVOKED)
-            ConsentSubject.GUARDIAN_ADD -> {
-                // The approval that qualified this guardian is gone: drop the guardian link as well.
-                links().firstOrNull { it.parentId == item.subjectId && it.childId == self && it.status == FamilyLinkStatus.VERIFIED }
-                    ?.let { removeLinkLocally(self, it, nowMs, notifyCounterparty = true) }
-            }
+            // Unreachable: verifyRevocation rejects GUARDIAN_ADD (a guardian is never removed by another guardian).
+            ConsentSubject.GUARDIAN_ADD -> Unit
         }
         return applied
     }

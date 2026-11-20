@@ -1295,70 +1295,8 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
             return repairedCount
         }
 
-        internal fun deduplicateBodyBatteryRows(db: AppDatabase) {
-            val rows = db.observations().ofTypesIncludingDeleted(
-                listOf(MetricType.BODY_BATTERY.name),
-                "1970-01-01",
-                "2999-12-31",
-            )
-            if (rows.isEmpty()) return
-            val excludedIds = db.exclusions().allIds().toHashSet()
-            val nowMs = System.currentTimeMillis()
-            val toDelete = ArrayList<String>()
-            val toUpsert = ArrayList<ObservationRow>()
-            val exclusionsToPut = ArrayList<ExcludedRow>()
-            val exclusionsToRemove = ArrayList<String>()
-            val grouped = rows.filter { !it.localDate.isNullOrBlank() && it.provider == Provider.GARMIN_PERSONAL.name }
-                .groupBy { Triple(it.provider, it.accountId, it.localDate!!) }
-            for ((key, group) in grouped) {
-                val (_, accountId, localDate) = key
-                val canonicalId = app.pulse4.domain.ImportKey.of(
-                    Provider.GARMIN_PERSONAL,
-                    accountId,
-                    null,
-                    listOf(MetricType.BODY_BATTERY.name, localDate),
-                )
-                val excludedInGroup = group.filter { it.id in excludedIds }
-                val canonicalRow = group.firstOrNull { it.id == canonicalId }
-                val isDayExcludedOrCanonicalDeleted = excludedInGroup.isNotEmpty() || canonicalRow?.deleted == true
-
-                for (exRow in excludedInGroup) {
-                    if (exRow.id != canonicalId) {
-                        if (canonicalId !in excludedIds) {
-                            exclusionsToPut += ExcludedRow(canonicalId, nowMs)
-                            excludedIds += canonicalId
-                        }
-                        exclusionsToRemove += exRow.id
-                    }
-                }
-
-                if (isDayExcludedOrCanonicalDeleted) {
-                    // Nikdy nevzkřísit smazaný nebo uživatelem vyloučený den.
-                    group.filter { !it.deleted }.forEach { toDelete += it.id }
-                    continue
-                }
-
-                val activeRows = group.filter { !it.deleted }
-                if (activeRows.isEmpty()) continue
-
-                val newest = activeRows.maxWithOrNull(
-                    compareBy<ObservationRow> { it.endUtcMs ?: it.startUtcMs }.thenBy { it.startUtcMs }
-                ) ?: continue
-                val nonCanonicalActiveIds = activeRows.map { it.id }.filter { it != canonicalId }
-                if (nonCanonicalActiveIds.isNotEmpty() || canonicalRow == null || newest.id != canonicalId) {
-                    toUpsert += newest.copy(id = canonicalId, deleted = false)
-                    group.filter { it.id != canonicalId && !it.deleted }.forEach { toDelete += it.id }
-                }
-            }
-            if (toUpsert.isNotEmpty() || toDelete.isNotEmpty() || exclusionsToPut.isNotEmpty() || exclusionsToRemove.isNotEmpty()) {
-                db.runInTransaction {
-                    toDelete.distinct().chunked(500).forEach { db.observations().markDeleted(it) }
-                    if (toUpsert.isNotEmpty()) db.observations().upsert(toUpsert)
-                    exclusionsToPut.forEach { db.exclusions().put(it) }
-                    exclusionsToRemove.forEach { db.exclusions().remove(it) }
-                }
-            }
-        }
+        internal fun deduplicateBodyBatteryRows(db: AppDatabase) =
+            GarminDailyMetrics.deduplicate(db, listOf(MetricType.BODY_BATTERY))
 
         internal fun syncGarminActivityElements(
             allActivityElements: List<kotlinx.serialization.json.JsonElement>,
@@ -1618,6 +1556,8 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
                 settings.put("migration.bb_dedup_v1", "true")
             }
         }
+        // Obnova RHR/kroků/stresu po 0.2.x: sloučení duplicit starých a stabilních klíčů + znovustažení historie.
+        GarminDailyMetrics.restoreOnce(sl.db, garminStates, settings::getRaw, settings::put)
         if (settings.getRaw("migration.multisport_repair_v1") != "true") {
             runCatching {
                 repairLegacyMultisportActivities(
@@ -1652,6 +1592,7 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
             },
             accountId = settings.accountId, zoneId = settings.zoneId,
             initialDays = 28,
+            latestObservationMs = { t -> sl.db.observations().latest(t.name)?.startUtcMs },
         )
         val engine = SyncEngine(fetcher, { area, batch ->
             // Celá dávka v jedné transakci; kurzor se posune až po commitu (SyncEngine).
@@ -1665,6 +1606,7 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
                     }
                 }
                 if (allowed.isNotEmpty()) {
+                    GarminDailyMetrics.supersedeNonCanonical(sl.db, allowed)
                     sl.db.observations().upsert(allowed.map { it.toRow() })
                 }
             }

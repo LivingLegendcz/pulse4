@@ -35,11 +35,8 @@ class ParentLinkStatusTest {
     }
 
     @Test
-    fun `removal warning mentions the lock only for the last parent and never promises recall`() {
-        val last = ParentLinkStatus.removeWarning(true)
-        assertTrue(last.contains("znovu zamkne"))
-        assertTrue(last.contains("nemusí jít vzít zpět"))
-        val other = ParentLinkStatus.removeWarning(false)
-        assertTrue(other.contains("jiný rodič"))
+    fun `verified link hint says only the parent can remove it`() {
+        assertTrue(ParentLinkStatus.VERIFIED_REMOVAL_HINT.contains("jen rodič"))
+        assertTrue(ParentLinkStatus.VERIFIED_REMOVAL_HINT.contains("ještě nepřijal"))
     }
 }

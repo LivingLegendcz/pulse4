@@ -248,7 +248,8 @@ class GuardianConsentHandlersTest {
         val b = Party("b", 2); val g = Party("g", 3)
         link(b, g)
         // removing the link later does not reopen the door: only a signed release does
-        b.share.revokeFamilyLink(b.share.familyLinks().single().id, now + 5)
+        assertTrue(g.share.revokeFamilyLink(g.share.familyLinks().single().id, now + 5).isSuccess)
+        deliver(g, b, now + 5)
         assertFalse(b.share.declareAge(AgeState.ADULT, now + 6))
         assertEquals(OnboardingState.MINOR_WAITING_FOR_GUARDIAN, b.share.onboardingStateNow())
     }
@@ -662,6 +663,39 @@ class GuardianConsentHandlersTest {
         assertEquals(setOf(g2.id), child.share.verifiedGuardianIds())
         assertEquals(1, child.share.effectiveGrants(now + 422).size)
         assertEquals(OnboardingState.MINOR_READY, child.share.onboardingStateNow())
+    }
+
+    @Test
+    fun `9 a child cannot remove a verified guardian link, locally or by a message, but may cancel a pending request`() {
+        val (child, g1, g2) = twoGuardians()
+        val l1 = child.share.familyLinks().single { it.parentId == g1.id }
+        // local refusal on the child device: failure, nothing changed, nothing queued
+        val res = child.share.revokeFamilyLink(l1.id, now + 601)
+        assertTrue(res.isFailure)
+        assertEquals(FamilyLinkStatus.VERIFIED, child.share.familyLinks().single { it.id == l1.id }.status)
+        assertTrue(child.outbox.due(now + 602).none { it.kind == Kinds.FAMILY_LINK_REVOKE })
+        assertEquals(setOf(g1.id, g2.id), child.share.verifiedGuardianIds())
+        // forged inbound family.link.revoke authored by the child is rejected on the parent device
+        val forged = Wire.json.encodeToString(FamilyLink.serializer(), l1.copy(status = FamilyLinkStatus.REVOKED, version = l1.version + 1))
+        val out = sendRaw(child, g1, Kinds.FAMILY_LINK_REVOKE, forged, "family_link", l1.id)
+        assertTrue(out is Outcome.Rejected && out.reason == RejectReason.NOT_PERMITTED, "$out")
+        assertEquals(FamilyLinkStatus.VERIFIED, g1.share.familyLinks().single { it.id == l1.id }.status)
+        // the parent may still remove its own link
+        assertTrue(g1.share.revokeFamilyLink(l1.id, now + 610).isSuccess)
+        assertTrue(deliver(g1, child, now + 611).all { it is Outcome.Applied })
+        assertEquals(setOf(g2.id), child.share.verifiedGuardianIds())
+    }
+
+    @Test
+    fun `9 a child may cancel its own pending request and the parent sees it withdrawn`() {
+        val child = Party("child", 1); val guardian = Party("guardian", 2)
+        child.knows(guardian); guardian.knows(child)
+        assertTrue(child.share.declareAge(AgeState.MINOR, now))
+        val l = child.share.sendChildFamilyLinkRequest(guardian.contact(), now).getOrThrow()
+        deliver(child, guardian, now)
+        assertTrue(child.share.revokeFamilyLink(l.id, now + 1).isSuccess)
+        assertTrue(deliver(child, guardian, now + 2).all { it is Outcome.Applied })
+        assertEquals(FamilyLinkStatus.REVOKED, guardian.share.familyLinks().single().status)
     }
 
     @Test

@@ -282,11 +282,12 @@ class MultiGuardianTest {
         assertFalse(FamilyLinkPolicy.isValidLinkRemoval(l2, g1, bothLinks, records))
         assertTrue(runCatching { FamilyLinkPolicy.removeLink(l1, g2, bothLinks, records) }.isFailure)
         assertTrue(runCatching { FamilyLinkPolicy.removeLink(l2, g1, bothLinks, records) }.isFailure)
-        // the two parties of a link can
-        assertTrue(FamilyLinkPolicy.isValidLinkRemoval(l1, Fx.CHILD, bothLinks, records))
+        // only the parent of a VERIFIED link can remove it; the child cannot drop either guardian
         assertTrue(FamilyLinkPolicy.isValidLinkRemoval(l1, g1, bothLinks, records))
         assertEquals(FamilyLinkStatus.REVOKED, FamilyLinkPolicy.removeLink(l2, g2, bothLinks, records).status)
-        assertEquals(FamilyLinkStatus.REVOKED, FamilyLinkPolicy.removeLink(l2, Fx.CHILD, bothLinks, records).status)
+        assertFalse(FamilyLinkPolicy.isValidLinkRemoval(l1, Fx.CHILD, bothLinks, records))
+        assertFalse(FamilyLinkPolicy.isValidLinkRemoval(l2, Fx.CHILD, bothLinks, records))
+        assertTrue(runCatching { FamilyLinkPolicy.removeLink(l2, Fx.CHILD, bothLinks, records) }.isFailure)
         // strangers cannot
         assertFalse(FamilyLinkPolicy.isValidLinkRemoval(l1, Fx.STRANGER, bothLinks, records))
         assertTrue(runCatching { FamilyLinkPolicy.removeLink(l2, Fx.STRANGER, bothLinks, records) }.isFailure)

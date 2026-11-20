@@ -922,17 +922,24 @@ internal class GuardianConsentService(
         return applied
     }
 
-    /** Removes a link (either party). Sends `family.link.revoke` to the other party and applies the consent fallout. */
+    /**
+     * Removes a link. A VERIFIED link can be removed only by its parent (a child cannot drop a guardian); a PENDING
+     * one can be cancelled by its initiator or rejected by the counterparty. Sends `family.link.revoke` to the
+     * other party and applies the consent fallout.
+     */
     fun revokeFamilyLink(linkId: String, nowMs: Long): Result<FamilyLink> {
         val self = selfIdProvider()
         val link = links().firstOrNull { it.id == linkId } ?: return Result.failure(IllegalArgumentException("Vazba nenalezena."))
         if (self != link.parentId && self != link.childId) return Result.failure(IllegalStateException("Vazbu může odebrat jen jedna ze stran."))
         if (link.status == FamilyLinkStatus.REVOKED) return Result.success(link)
         if (link.status == FamilyLinkStatus.REJECTED) return Result.failure(IllegalStateException("Odmítnutou vazbu nelze odebrat."))
+        if (!FamilyLinkPolicy.canRemove(link, self)) {
+            return Result.failure(IllegalStateException("Potvrzenou vazbu na rodiče může odebrat jen rodič. Dítě může zrušit jen žádost, kterou rodič ještě nepřijal."))
+        }
         return Result.success(data.inTransaction { removeLinkLocally(self, link, nowMs, notifyCounterparty = true) })
     }
 
-    /** Inbound `family.link.revoke`: only the other party of the link may remove it. */
+    /** Inbound `family.link.revoke`: only the other party may remove it; a child cannot remove a VERIFIED link. */
     fun onFamilyLinkRevoke(self: String, author: String, payload: String, nowMs: Long): app.pulse4.sync.HandlerResult {
         val msg = runCatching { json.decodeFromString(FamilyLink.serializer(), payload) }.getOrNull()
             ?: return app.pulse4.sync.HandlerResult.Rejected(app.pulse4.sync.RejectReason.INVALID_PAYLOAD)

@@ -46,12 +46,7 @@ object ParentLinkStatus {
         ParentLinkPhase.REMOVED -> "Odebráno"
     }
 
-    /** Varování před odebráním vlastní vazby s rodičem. */
-    fun removeWarning(isLastVerifiedParent: Boolean): String =
-        if (isLastVerifiedParent) {
-            "Je to váš poslední rodič. Po odebrání se aplikace znovu zamkne a všechna sdílení i kruhy schválené rodičem se odvolají. " +
-                Labels.DELIVERED_DATA_NOTE
-        } else {
-            "Schválená sdílení zůstanou platná, dokud je neodvolá jiný rodič. Odebrat můžete jen svou vlastní vazbu."
-        }
+    /** Potvrzenou vazbu dítě odebrat nemůže; odebrat ji může jen rodič (každý jen svou). */
+    const val VERIFIED_REMOVAL_HINT: String =
+        "Potvrzenou vazbu může odebrat jen rodič. Dítě může zrušit jen žádost, kterou rodič ještě nepřijal."
 }

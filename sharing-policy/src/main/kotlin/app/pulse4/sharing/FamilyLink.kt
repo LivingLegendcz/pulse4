@@ -148,9 +148,11 @@ object FamilyLinkPolicy {
             GuardianConsentPolicy.isEffective(grant, ageState, links, approvals, grandfatheredIds, now)
 
     /**
-     * Link removal. Allowed ONLY for the two parties of that link (its parent or its child); a guardian can never
-     * remove another guardian's link. [links] / [records] are kept for source compatibility and are not used.
-     * Idempotent for an already REVOKED link; REJECTED links cannot be removed.
+     * Link removal. Allowed ONLY for the two parties of that link, and only as follows: a VERIFIED link can be
+     * removed solely by its parent (a child can never drop a verified guardian, otherwise it could shed the
+     * stricter of two parents); a PENDING link can be cancelled by its initiator or rejected by the counterparty.
+     * A guardian can never remove another guardian's link. [links] / [records] are kept for source compatibility
+     * and are not used. Idempotent for an already REVOKED link; REJECTED links cannot be removed.
      */
     fun removeLink(
         link: FamilyLink,
@@ -166,18 +168,30 @@ object FamilyLinkPolicy {
         return link.copy(status = FamilyLinkStatus.REVOKED, version = link.version + 1)
     }
 
-    @Suppress("UNUSED_PARAMETER")
-    private fun mayRemove(link: FamilyLink, actorId: String, links: List<FamilyLink>, records: List<ConsentRecord>) =
-        actorId == link.parentId || actorId == link.childId
+    /** Whether [actorId] may remove [link] in its current status (see [removeLink]). */
+    fun canRemove(link: FamilyLink, actorId: String): Boolean = mayRemove(link, actorId, emptyList(), emptyList())
 
-    /** An inbound `family.link.revoke` is valid only from the other party of the link; [selfId] is a party. */
-    fun isValidRemoteRevoke(link: FamilyLink, envelopeAuthor: String, selfId: String): Boolean =
-        (link.parentId == selfId && link.childId == envelopeAuthor) ||
-            (link.childId == selfId && link.parentId == envelopeAuthor)
+    @Suppress("UNUSED_PARAMETER")
+    private fun mayRemove(link: FamilyLink, actorId: String, links: List<FamilyLink>, records: List<ConsentRecord>): Boolean {
+        if (actorId != link.parentId && actorId != link.childId) return false
+        // A verified link belongs to the parent: only the parent removes it. PENDING: either party (initiator
+        // cancels, counterparty rejects). REVOKED/REJECTED: parties only, the status checks live in removeLink.
+        return if (link.status == FamilyLinkStatus.VERIFIED) actorId == link.parentId else true
+    }
 
     /**
-     * Child side of an inbound `family.link.revoke`: valid only from one of the two parties of [link]; another
-     * guardian's removal is rejected ([links] / [records] are unused, kept for source compatibility).
+     * An inbound `family.link.revoke` is valid only from the other party of the link ([selfId] is a party) and
+     * only if that author may remove the link in its current status (a child's revoke of a VERIFIED link is not).
+     */
+    fun isValidRemoteRevoke(link: FamilyLink, envelopeAuthor: String, selfId: String): Boolean =
+        ((link.parentId == selfId && link.childId == envelopeAuthor) ||
+            (link.childId == selfId && link.parentId == envelopeAuthor)) &&
+            mayRemove(link, envelopeAuthor, emptyList(), emptyList())
+
+    /**
+     * Child side of an inbound `family.link.revoke`: valid only from one of the two parties of [link] who may
+     * remove it in its current status; another guardian's removal and a child's removal of a VERIFIED link are
+     * rejected ([links] / [records] are unused, kept for source compatibility).
      */
     fun isValidLinkRemoval(
         link: FamilyLink,

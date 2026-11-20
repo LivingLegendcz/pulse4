@@ -391,7 +391,6 @@ internal fun ParentLinksPanel(sl: ServiceLocator, gated: Boolean, onNotice: ((St
 
     var showPairing by remember { mutableStateOf(false) }
     var selectedContact by remember { mutableStateOf<String?>(null) }
-    var removeTarget by remember { mutableStateOf<FamilyLink?>(null) }
     var cancelTarget by remember { mutableStateOf<FamilyLink?>(null) }
     var localNotice by remember { mutableStateOf<String?>(null) }
     fun say(msg: String) { localNotice = msg; onNotice?.invoke(msg) }
@@ -408,22 +407,6 @@ internal fun ParentLinksPanel(sl: ServiceLocator, gated: Boolean, onNotice: ((St
         it.role == ConsentRole.CHILD_OUT && it.subject == ConsentSubject.GUARDIAN_ADD && it.status == ConsentStatus.PENDING
     }.map { it.subjectId }.toSet()
 
-    removeTarget?.let { link ->
-        ConfirmDialog(
-            title = "Odebrat rodiče ${nameOf(link.parentId)}?",
-            text = ParentLinkStatus.removeWarning(isLastVerifiedParent = verified.size <= 1),
-            confirmLabel = "Odebrat vazbu",
-            danger = true,
-            onConfirm = {
-                removeTarget = null
-                scope.launch {
-                    val res = withContext(Dispatchers.IO) { sl.shareService.revokeFamilyLink(link.id) }
-                    say(res.fold({ "Vazba s rodičem ${nameOf(link.parentId)} byla odebrána." }, { it.message ?: "Vazbu se nepodařilo odebrat." }))
-                }
-            },
-            onDismiss = { removeTarget = null },
-        )
-    }
     cancelTarget?.let { link ->
         ConfirmDialog(
             title = "Zrušit žádost?",
@@ -505,8 +488,13 @@ internal fun ParentLinksPanel(sl: ServiceLocator, gated: Boolean, onNotice: ((St
                         }) { Text("Odmítnout", color = Rose) }
                     }
                 }
-                ParentLinkPhase.VERIFIED ->
-                    TextButton(onClick = { removeTarget = link }) { Text("Odebrat vazbu", color = Rose) }
+                // A verified link can be removed only by the parent; the child gets no remove action.
+                ParentLinkPhase.VERIFIED -> Text(
+                    ParentLinkStatus.VERIFIED_REMOVAL_HINT,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Muted,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
                 else -> Unit
             }
         }

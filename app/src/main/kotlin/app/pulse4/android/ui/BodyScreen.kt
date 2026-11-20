@@ -156,7 +156,7 @@ fun BodyScreen(sl: ServiceLocator) {
                     scope.launch {
                         msg = withContext(Dispatchers.IO) {
                             when (val r = sl.withings.runImport(System.currentTimeMillis())) {
-                                null -> "Withings není připojen"
+                                null -> if (sl.withings.importRunning) "Synchronizace už běží" else "Withings není připojen"
                                 is AreaResult.Success -> "Withings: uloženo ${r.saved} záznamů"
                                 is AreaResult.NeedsUser -> "Vyžaduje akci: ${r.action}"
                                 is AreaResult.Deferred -> "Odloženo (rate limit)"
@@ -213,7 +213,7 @@ fun BodyScreen(sl: ServiceLocator) {
             is WithingsUiState.Failed -> "Přihlášení selhalo: ${s.message.lowercase().replace('_', ' ')} – začněte znovu (kód platí jen 30 s)"
         })
         Button(enabled = cfg?.first == true, onClick = { scope.launch { msg = withContext(Dispatchers.IO) { when (val r = sl.withings.runImport(System.currentTimeMillis())) {
-            null -> "Přímý režim není připojen"; is AreaResult.Success -> "Withings: ${r.saved} záznamů"
+            null -> if (sl.withings.importRunning) "Synchronizace už běží" else "Přímý režim není připojen"; is AreaResult.Success -> "Withings: ${r.saved} záznamů"
             is AreaResult.NeedsUser -> "Vyžaduje vaši akci: ${r.action}"; is AreaResult.Deferred -> "Limit služby, zkusí se později"
             else -> "Import se nezdařil"
         } }; tick++ } }) { Text("Importovat teď") }

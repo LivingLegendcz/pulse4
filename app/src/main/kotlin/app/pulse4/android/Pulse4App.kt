@@ -18,6 +18,7 @@ class Pulse4App : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        app.pulse4.android.work.AppProcess.markStarted()
         PLog.isDebug = BuildConfig.DEBUG
         PLog.sink = PLog.Sink { level, tag, message, throwable ->
             when (level) {
@@ -73,12 +74,17 @@ class Pulse4App : Application() {
             runCatching {
                 services.importService.backfillActivitySummaries()
             }
-            // Tichý proaktivní keepalive Garmin & Withings relací při spuštění aplikace
+            // Tichý proaktivní keepalive Garmin & Withings relací: odložen, aby nesoutěžil se startem UI o síť a zámky.
+            kotlinx.coroutines.delay(KEEPALIVE_DELAY_MS)
             runCatching { services.garminExt.ensureSession() }
             runCatching { services.withings.renewSession() }
         }
 
         // Trvalá služba na pozadí (pokud je zapnutá v Nastavení)
         PulseSyncService.syncState(this)
+    }
+
+    private companion object {
+        const val KEEPALIVE_DELAY_MS = 45_000L
     }
 }

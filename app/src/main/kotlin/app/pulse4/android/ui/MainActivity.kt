@@ -519,7 +519,15 @@ private fun Root(sl: app.pulse4.android.di.ServiceLocator, onCompletePlayUpdate:
                     }
                 }
             }
-            NavHost(nav, "today", Modifier.weight(1f).fillMaxSize()) {
+            // The default NavHost transition is a 700 ms cross-fade during which both destinations are composed;
+            // tab switches should feel instant, so every transition is disabled.
+            NavHost(
+                nav, "today", Modifier.weight(1f).fillMaxSize(),
+                enterTransition = { androidx.compose.animation.EnterTransition.None },
+                exitTransition = { androidx.compose.animation.ExitTransition.None },
+                popEnterTransition = { androidx.compose.animation.EnterTransition.None },
+                popExitTransition = { androidx.compose.animation.ExitTransition.None },
+            ) {
             composable("today") {
                 TodayScreen(
                     sl = sl,

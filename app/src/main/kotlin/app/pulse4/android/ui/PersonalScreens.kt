@@ -166,6 +166,7 @@ import app.pulse4.ui.Axis
 import app.pulse4.ui.Channel
 import app.pulse4.ui.MetricSeries
 import app.pulse4.ui.TodayCards
+import app.pulse4.ui.UnitSystem
 import java.time.LocalDate
 import java.time.ZoneId
 import kotlinx.coroutines.Dispatchers
@@ -449,9 +450,22 @@ fun getMetricUiConfig(type: MetricType): MetricUiConfig = when (type) {
     )
 }
 
+private const val DASHBOARD_REFRESH_DEBOUNCE_MS = 250L
+
+/** Observation types behind the Today series cards (WEIGHT comes from `withings.trend`). */
+private val TODAY_SERIES_TYPES = listOf(
+    MetricType.SLEEP_DURATION,
+    MetricType.BODY_BATTERY,
+    MetricType.HRV,
+    MetricType.RESTING_HEART_RATE,
+    MetricType.STRESS,
+    MetricType.STEPS,
+)
+
 object ScreenMemoryCache {
     @Volatile var todayDashboard: TodayDashboardBundle? = null
     @Volatile var activitySummaries: List<app.pulse4.android.data.ActivitySummaryRow>? = null
+    @Volatile var unifiedActivities: List<UnifiedActivityItem>? = null
 }
 
 data class TodayDashboardBundle(
@@ -648,7 +662,10 @@ fun TodayScreen(
     var selectedPillar by remember { mutableStateOf(OuraPillar.READINESS) }
     var showAllWidgets by remember { mutableStateOf(false) }
 
-    val states by sl.db.areaStates().all().collectAsState(initial = emptyList())
+    // `null` until Room delivers the first emission, so the dashboard is not recomputed once for the empty
+    // placeholder and again for the real list.
+    val statesOrNull by sl.db.areaStates().all().collectAsState(initial = null)
+    val states = statesOrNull.orEmpty()
     val units by sl.settings.unitSystemFlow.collectAsState()
     val recentActs by sl.db.activities().recentSummaries(30).collectAsState(initial = emptyList())
     val currentDateKey = LocalDate.now(ZoneId.of(sl.settings.zoneId)).toString()
@@ -682,13 +699,23 @@ fun TodayScreen(
 
     val dashboardData by produceState<TodayDashboardBundle?>(
         initialValue = ScreenMemoryCache.todayDashboard,
-        key1 = listOf(states.map { it.area to it.lastSuccessMs }, bgWindowDays, units, currentDateKey)
+        key1 = listOf(statesOrNull?.map { it.area to it.lastSuccessMs }, bgWindowDays, units, currentDateKey)
     ) {
+        // Stale-while-revalidate: with a cached bundle on screen, wait for the area-state placeholder and coalesce
+        // bursts of sync writes (each restart of this block cancels the previous delay) before recomputing.
+        if (ScreenMemoryCache.todayDashboard != null) {
+            if (statesOrNull == null) return@produceState
+            kotlinx.coroutines.delay(DASHBOARD_REFRESH_DEBOUNCE_MS)
+        }
         val result = withContext(Dispatchers.IO) {
             val today = LocalDate.now(ZoneId.of(sl.settings.zoneId))
             val obsToday = sl.db.observations().forDate(today.toString()).map { it.toDomain() }
             val maxDays = maxOf(bgWindowDays, 30)
-            val rangeObs = sl.db.observations().forRange(today.minusDays((maxDays - 1).toLong()).toString(), today.toString()).map { it.toDomain() }
+            val rangeFrom = today.minusDays((maxDays - 1).toLong()).toString()
+            // Only the types the dashboard series actually use (not every metric type in the window).
+            val rangeObs = TODAY_SERIES_TYPES
+                .flatMap { t -> sl.db.observations().forTypeInRange(t.name, rangeFrom, today.toString()) }
+                .map { it.toDomain() }
             val weightObs = runCatching { sl.withings.trend(MetricType.WEIGHT, maxOf(bgWindowDays, 90)) }.getOrDefault(emptyList())
             val success = SyncArea.entries.associateWith { sl.db.areaStates().get(it.name)?.lastSuccessMs }
 
@@ -3929,6 +3956,66 @@ private data class MultiMetricEntry(
     val latestObs: app.pulse4.domain.MetricObservation?,
 )
 
+/** Cache key of a Metrics bundle: everything the computed result depends on. */
+internal data class MetricsBundleKey(
+    val types: List<MetricType>,
+    val days: Int,
+    val units: UnitSystem,
+    val today: String,
+)
+
+private val metricsBundleCache = LastResultCache<MetricsBundleKey, MetricsScreenBundle>(maxEntries = 6)
+
+/**
+ * Metric types that must be read straight from the observation table for the Metrics bundle: the selected
+ * ones that are NOT served by `withings.trend()` (body composition / ECG) plus WEIGHT (fallback when the
+ * trend is empty). Everything else is not queried at all, instead of loading every type for the window.
+ */
+internal fun metricsRangeQueryTypes(selected: List<MetricType>): List<MetricType> =
+    (selected.filter { it !in WithingsService.BODY_COMPOSITION_TYPES } + MetricType.WEIGHT).distinct()
+
+/** Loads the Metrics bundle (runs on IO). Each Withings trend is computed at most once per bundle. */
+private fun loadMetricsBundle(sl: ServiceLocator, selectedTypes: List<MetricType>, daysCount: Int): MetricsScreenBundle {
+    val today = LocalDate.now(ZoneId.of(sl.settings.zoneId))
+    val from = today.minusDays((daysCount - 1).toLong()).toString()
+    val rangeObs = metricsRangeQueryTypes(selectedTypes)
+        .flatMap { t -> sl.db.observations().forTypeInRange(t.name, from, today.toString()) }
+        .map { it.toDomain() }
+
+    val trends = HashMap<MetricType, List<app.pulse4.domain.MetricObservation>>()
+    fun trend(t: MetricType) = trends.getOrPut(t) {
+        runCatching { sl.withings.trend(t, daysCount) }.getOrDefault(emptyList())
+    }
+
+    val weightRows = trend(MetricType.WEIGHT)
+        .ifEmpty { rangeObs.filter { it.type == MetricType.WEIGHT } }
+    val latestWeightObs = weightRows.filter { !it.deleted }.maxByOrNull { it.startUtcMs }
+        ?: sl.db.observations().latest(MetricType.WEIGHT.name)?.toDomain()
+    val refWeightKg = latestWeightKgOrNull(latestWeightObs?.value)
+    val weightsByDate = weightRows.filter { !it.deleted && it.value in 25.0..250.0 }
+        .associate { (it.localDate ?: "") to it.value }
+
+    val latestMuscleKg = trend(MetricType.MUSCLE_MASS).filter { !it.deleted }.maxByOrNull { it.startUtcMs }?.value
+    val latestFatPct = trend(MetricType.BODY_FAT).filter { !it.deleted }.maxByOrNull { it.startUtcMs }?.value
+    val latestBoneKg = trend(MetricType.BONE_MASS).filter { !it.deleted }.maxByOrNull { it.startUtcMs }?.value
+
+    val entries = selectedTypes.map { t ->
+        val rows = if (t in WithingsService.BODY_COMPOSITION_TYPES) trend(t) else rangeObs
+        val s = MetricSeries.build(t, rows, today, daysCount)
+        val latest = rows.filter { it.type == t && !it.deleted }.maxByOrNull { it.startUtcMs }
+        MultiMetricEntry(t, s, latest)
+    }
+
+    return MetricsScreenBundle(
+        entries = entries,
+        refWeightKg = refWeightKg,
+        weightsByDate = weightsByDate,
+        latestMuscleKg = latestMuscleKg,
+        latestFatPct = latestFatPct,
+        latestBoneKg = latestBoneKg
+    )
+}
+
 private data class MetricsScreenBundle(
     val entries: List<MultiMetricEntry>,
     val refWeightKg: Double?,
@@ -4119,48 +4206,20 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType? = null) {
         )
     }
 
-    val multiBundle by io(Triple(selectedTypes.toList(), daysCount, units)) {
-        val today = LocalDate.now(ZoneId.of(sl.settings.zoneId))
-        val rangeObs = sl.db.observations()
-            .forRange(today.minusDays((daysCount - 1).toLong()).toString(), today.toString())
-            .map { it.toDomain() }
-
-        val weightRows = runCatching { sl.withings.trend(MetricType.WEIGHT, daysCount) }.getOrDefault(emptyList())
-            .ifEmpty { rangeObs.filter { it.type == MetricType.WEIGHT } }
-        val latestWeightObs = weightRows.filter { !it.deleted }.maxByOrNull { it.startUtcMs }
-            ?: sl.db.observations().latest(MetricType.WEIGHT.name)?.toDomain()
-        val refWeightKg = latestWeightKgOrNull(latestWeightObs?.value)
-        val weightsByDate = weightRows.filter { !it.deleted && it.value in 25.0..250.0 }
-            .associate { (it.localDate ?: "") to it.value }
-
-        val muscleRows = runCatching { sl.withings.trend(MetricType.MUSCLE_MASS, daysCount) }.getOrDefault(emptyList())
-        val fatRows = runCatching { sl.withings.trend(MetricType.BODY_FAT, daysCount) }.getOrDefault(emptyList())
-        val boneRows = runCatching { sl.withings.trend(MetricType.BONE_MASS, daysCount) }.getOrDefault(emptyList())
-
-        val latestMuscleKg = muscleRows.filter { !it.deleted }.maxByOrNull { it.startUtcMs }?.value
-        val latestFatPct = fatRows.filter { !it.deleted }.maxByOrNull { it.startUtcMs }?.value
-        val latestBoneKg = boneRows.filter { !it.deleted }.maxByOrNull { it.startUtcMs }?.value
-
-        val entries = selectedTypes.map { t ->
-            val rows = if (t in WithingsService.BODY_COMPOSITION_TYPES) {
-                runCatching { sl.withings.trend(t, daysCount) }.getOrDefault(emptyList())
-            } else {
-                rangeObs
-            }
-            val s = MetricSeries.build(t, rows, today, daysCount)
-            val latest = rows.filter { it.type == t && !it.deleted }.maxByOrNull { it.startUtcMs }
-            MultiMetricEntry(t, s, latest)
-        }
-
-        MetricsScreenBundle(
-            entries = entries,
-            refWeightKg = refWeightKg,
-            weightsByDate = weightsByDate,
-            latestMuscleKg = latestMuscleKg,
-            latestFatPct = latestFatPct,
-            latestBoneKg = latestBoneKg
-        )
+    // Stale-while-revalidate: the last bundle for the same selection is shown instantly on tab entry and refreshed
+    // in the background; a failed load becomes a visible "retry" state instead of an endless spinner.
+    var bundleRetry by remember { mutableStateOf(0) }
+    val bundleKey = MetricsBundleKey(
+        types = selectedTypes.toList(),
+        days = daysCount,
+        units = units,
+        today = LocalDate.now(ZoneId.of(sl.settings.zoneId)).toString(),
+    )
+    val bundleState by ioCached(bundleKey, metricsBundleCache, bundleRetry) {
+        loadMetricsBundle(sl, bundleKey.types, daysCount)
     }
+    val multiBundle: MetricsScreenBundle? = bundleState.valueOrNull()
+
 
     val primarySelectedType = selectedTypes.firstOrNull() ?: MetricType.HRV
     val primaryCfg = getMetricUiConfig(primarySelectedType)
@@ -4726,7 +4785,15 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType? = null) {
                 shape = RoundedCornerShape(20.dp),
                 colors = CardDefaults.cardColors(containerColor = Color(0xFF0A101D))
             ) {
-                Text("Načítání biometrických dat…", modifier = Modifier.padding(16.dp), style = MaterialTheme.typography.bodyMedium)
+                val failed = bundleState as? LoadState.Failed
+                if (failed == null) {
+                    Text("Načítání biometrických dat…", modifier = Modifier.padding(16.dp), style = MaterialTheme.typography.bodyMedium)
+                } else {
+                    Column(Modifier.padding(16.dp)) {
+                        Text("Biometrická data se nepodařilo načíst.", style = MaterialTheme.typography.bodyMedium)
+                        TextButton(onClick = { bundleRetry++ }) { Text("Zkusit znovu") }
+                    }
+                }
             }
         } else if (bundle.entries.size >= 2) {
             val entries = bundle.entries
@@ -6044,7 +6111,7 @@ fun ActivitiesScreen(
 
     val contactsMap = remember(contacts) { contacts.associate { it.identity to it.displayName } }
     val unifiedList by produceState<List<UnifiedActivityItem>>(
-        initialValue = emptyList(),
+        initialValue = ScreenMemoryCache.unifiedActivities ?: emptyList(),
         acts,
         sharedRows,
         contactsMap
@@ -6103,7 +6170,7 @@ fun ActivitiesScreen(
                     maxHeartRate = null
                 )
             }
-            (mine + shared).sortedByDescending { it.startUtcMs ?: 0L }
+            (mine + shared).sortedByDescending { it.startUtcMs ?: 0L }.also { ScreenMemoryCache.unifiedActivities = it }
         }
     }
 

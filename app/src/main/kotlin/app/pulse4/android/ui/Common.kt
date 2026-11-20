@@ -87,6 +87,23 @@ fun <T> io(key: Any?, block: () -> T): State<T?> = produceState<T?>(null, key) {
     }
 }
 
+/**
+ * Like [io], but stale-while-revalidate with a visible failure state: the last result for [key] from [cache] is
+ * shown immediately and refreshed in the background; a failed load yields [LoadState.Failed] (or keeps the stale
+ * value) instead of staying "loading" forever. Increase [retry] to force a reload (e.g. from a retry button).
+ */
+@Composable
+fun <K : Any, V : Any> ioCached(
+    key: K,
+    cache: LastResultCache<K, V>,
+    retry: Int = 0,
+    block: () -> V,
+): State<LoadState<V>> = produceState(initialLoadState(key, cache), key, retry) {
+    cache.get(key)?.let { value = LoadState.Ready(it, stale = true) }
+    if (value is LoadState.Failed) value = LoadState.Loading
+    value = loadWithCache(key, cache, block = block)
+}
+
 /** Formátování reagující na zvolenou soustavu jednotek (Metrické / Imperiální). */
 @Volatile
 var activeFmt: Fmt = Fmt.default

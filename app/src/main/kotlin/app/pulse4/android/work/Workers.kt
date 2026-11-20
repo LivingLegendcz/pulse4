@@ -36,6 +36,18 @@ class ImportWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx
         // R4-1: poškozený nebo zamčený klíč nesmí shodit worker; zkusí se znovu podle backoffu.
         if (!sl.awaitStartupReady()) return@withContext Result.retry()
         val now = System.currentTimeMillis()
+        // Automatický (periodický) běh nesmí navázat na čerstvý import (ruční nebo ze služby); přežívá restart procesu.
+        if (!isManual) {
+            val last = runCatching { sl.settings.lastImportAtMs }.getOrNull()
+            val decision = AutoImportPolicy.decide(
+                nowMs = now,
+                lastImportAtMs = last,
+                processStartMs = null, // worker často sám startuje proces; ochranná lhůta by ho vyhladověla
+                minIntervalMs = AutoImportPolicy.WORKER_MIN_INTERVAL_MS,
+            )
+            if (!decision.runNow) return@withContext Result.success()
+        }
+        runCatching { sl.settings.lastImportAtMs = now }
         // 1. Garmin proaktivní keepalive a import
         runCatching { sl.garminExt.ensureSession() }
         runCatching { sl.importService.runAll(now) }

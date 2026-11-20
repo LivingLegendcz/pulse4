@@ -205,6 +205,13 @@ class Settings(private val dbProvider: () -> AppDatabase) {
             put("backgroundServiceEnabled", v.toString())
             _backgroundServiceEnabledFlow.value = v
         }
+    /**
+     * Time of the last (attempted or finished) import run, manual or automatic. Persisted so the automatic
+     * schedule does not restart from zero (and sync immediately) every time the process is recreated.
+     */
+    var lastImportAtMs: Long?
+        get() = getRaw("import.lastAtMs")?.toLongOrNull()
+        set(v) { if (v != null) put("import.lastAtMs", v.toString()) }
     var gatewayHost: String get() = get("gatewayHost", ""); set(v) = put("gatewayHost", v)
     var gatewayPort: Int get() = get("gatewayPort", "4242").toInt(); set(v) = put("gatewayPort", v.toString())
     /** Uložený seznam P2P uzlů (ve tvaru host:port), které lze v nastavení přepínat, přidávat i odebírat. */

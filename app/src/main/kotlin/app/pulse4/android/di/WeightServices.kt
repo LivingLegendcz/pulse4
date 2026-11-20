@@ -216,6 +216,16 @@ class WithingsService internal constructor(
      * Pořadí zámků: importLock → authGate (nikdy obráceně).
      */
     private val importLock = Any()
+
+    /**
+     * Single-flight guard in front of [importLock]: a UI- or worker-initiated import that arrives while another
+     * import is running returns immediately (null = skipped) instead of queueing a waiter thread behind it.
+     * Order: importGate -> importLock -> authGate.
+     */
+    internal val importGate = ImportGate()
+
+    /** True while a Withings import is in progress (UI shows "sync already running" instead of "not connected"). */
+    val importRunning: Boolean get() = importGate.isBusy
     internal val authGate = WithingsAuthGate()
     private val authDiagnostics by lazy {
         WithingsAuthDiagnostics(
@@ -511,7 +521,11 @@ class WithingsService internal constructor(
     }
 
     /** Přepne aktivní hlavní nebo dětský profil v rámci existující relace a spustí synchronizaci. */
-    fun selectProfiles(primaryId: Long, childId: Long?, nowMs: Long = System.currentTimeMillis()): Boolean = synchronized(importLock) {
+    fun selectProfiles(primaryId: Long, childId: Long?, nowMs: Long = System.currentTimeMillis()): Boolean =
+        // A profile switch must not be dropped, so it waits for a running import (it is always called from IO).
+        importGate.runBlocking { selectProfilesLocked(primaryId, childId, nowMs) }
+
+    private fun selectProfilesLocked(primaryId: Long, childId: Long?, nowMs: Long): Boolean = synchronized(importLock) {
         val s = loadWebSession() ?: return@synchronized false
         val profiles = s.allProfiles.ifEmpty {
             runCatching { webClient.getUsersList(s.cookies, s.sessionToken) }.getOrDefault(emptyList())
@@ -585,7 +599,15 @@ class WithingsService internal constructor(
     }
 
     /** Import dat přes webový konektor (váha, tuk, svaly, kosti, voda, beztuková hmota, viscerální tuk, cévní věk, PWV, BMR, tep, ECG). */
-    fun runWebImport(nowMs: Long, allowRetry: Boolean = true): AreaResult? = synchronized(importLock) {
+    fun runWebImport(nowMs: Long, allowRetry: Boolean = true): AreaResult? =
+        importGate.tryRun(onBusy = { skippedBusy("runWebImport") }) { runWebImportLocked(nowMs, allowRetry) }
+
+    private fun skippedBusy(what: String): AreaResult? {
+        PLog.i("Withings") { "$what skipped: another import is already running" }
+        return null
+    }
+
+    private fun runWebImportLocked(nowMs: Long, allowRetry: Boolean): AreaResult? = synchronized(importLock) {
         if (sessionCoordinator.isAutoReloginPaused()) {
             _state.value = WithingsUiState.Failed(
                 sessionCoordinator.pausedMessage() ?: "Relace Withings vyžaduje ruční přihlášení"
@@ -762,7 +784,10 @@ class WithingsService internal constructor(
     }
 
     /** Hlavní import váhy a složení těla: upřednostňuje přímé webové přihlášení, jako zálohu používá OAuth. */
-    fun runImport(nowMs: Long): AreaResult? = synchronized(importLock) {
+    fun runImport(nowMs: Long): AreaResult? =
+        importGate.tryRun(onBusy = { skippedBusy("runImport") }) { runImportLocked(nowMs) }
+
+    private fun runImportLocked(nowMs: Long): AreaResult? = synchronized(importLock) {
         if (!sl.settings.withingsDirectEnabled) return@synchronized null
         if (loadWebSession()?.isConnected() == true) {
             return@synchronized runWebImport(nowMs)

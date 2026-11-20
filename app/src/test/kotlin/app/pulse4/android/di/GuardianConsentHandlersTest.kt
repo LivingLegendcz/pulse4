@@ -707,6 +707,27 @@ class GuardianConsentHandlersTest {
     }
 
     @Test
+    fun `a child waiting for its first guardian is gated until the guardian accepts and can resend its request`() {
+        val child = Party("child", 1); val guardian = Party("guardian", 2)
+        child.knows(guardian); guardian.knows(child)
+        assertTrue(child.share.declareAge(AgeState.MINOR, now))
+        assertTrue(child.share.isAppGatedForGuardian())
+        val l = child.share.sendChildFamilyLinkRequest(guardian.contact(), now).getOrThrow()
+        assertTrue(child.share.isAppGatedForGuardian())
+        assertTrue(child.share.resendFamilyLinkRequest(l.id, now + 5))
+        assertTrue(child.outbox.due(now + 6).any { it.kind == Kinds.FAMILY_LINK_REQUEST })
+        // only the initiator can resend
+        assertFalse(guardian.share.resendFamilyLinkRequest(l.id, now + 6))
+        deliver(child, guardian, now + 7)
+        assertNotNull(guardian.share.respondFamilyLink(l.id, true, now + 8))
+        deliver(guardian, child, now + 9)
+        assertFalse(child.share.isAppGatedForGuardian())
+        assertEquals(OnboardingState.MINOR_READY, child.share.onboardingStateNow())
+        // once a link was verified the self-declared age can no longer be undone by the child
+        assertFalse(child.share.declareAge(AgeState.ADULT, now + 10))
+    }
+
+    @Test
     fun `age release by a verified guardian lifts the lock once`() {
         val child = Party("child", 1); val guardian = Party("guardian", 2); val stranger = Party("stranger", 3)
         link(child, guardian); child.knows(stranger)

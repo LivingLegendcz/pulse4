@@ -63,7 +63,7 @@ data class CircleInvite(val group: app.pulse4.sharing.Group, val fromId: String)
 
 /** The grant change was NOT applied; a guardian request is (still) pending for it. */
 class ConsentPendingException(val request: GuardianConsentRequest) :
-    IllegalStateException("Změna čeká na schválení zákonného zástupce.")
+    IllegalStateException("Žádost odeslána rodiči ke schválení. Sdílení se změní až po jeho souhlasu.")
 
 /** UNKNOWN age: new or widened sharing is blocked until the age is confirmed. */
 class AgeNotConfirmedException :

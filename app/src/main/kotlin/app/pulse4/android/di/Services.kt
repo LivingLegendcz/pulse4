@@ -2402,6 +2402,19 @@ class ShareService internal constructor(
 
     fun onboardingStateNow(): OnboardingState = consent.onboardingState(selfIdProvider())
 
+    /** MINOR without a verified guardian: the UI is gated and no provider (Garmin / Withings) work may run. */
+    fun isAppGatedForGuardian(): Boolean = onboardingStateNow() == OnboardingState.MINOR_WAITING_FOR_GUARDIAN
+
+    /** Child: sends the still PENDING link request again (a fresh message; the parent ignores duplicates). */
+    fun resendFamilyLinkRequest(linkId: String, nowMs: Long = System.currentTimeMillis()): Boolean {
+        val self = selfIdProvider()
+        val link = familyLinks().firstOrNull { it.id == linkId } ?: return false
+        if (link.status != FamilyLinkStatus.PENDING || link.initiator != self) return false
+        consent.emitFamilyLinkRequest(self, link, nowMs)
+        scheduleShare()
+        return true
+    }
+
     /** All consent rows (both roles), newest first. */
     fun consentItems(): Flow<List<ConsentItem>> =
         data.guardianConsents().all().map { rows -> rows.mapNotNull { consent.decode(it) } }.flowOn(Dispatchers.IO)

@@ -120,7 +120,8 @@ class PulseSyncService : Service() {
                 // keepalive jí vázán není.
                 var nextWakeMs: Long? = null
                 var tickRan = false
-                if (online) {
+                // MINOR without a verified guardian: the whole app is gated, no Garmin / Withings work (transport below still runs).
+                if (online && !runCatching { sl.shareService.isAppGatedForGuardian() }.getOrDefault(false)) {
                     val result = runCatching {
                         AutoSyncRunner.forServices(sl).tick(processStartMs = AppProcess.startedAtMs, toleranceMs = 0L)
                     }.onFailure { PLog.w(TAG, it) { "Auto sync tick failed" } }.getOrNull()

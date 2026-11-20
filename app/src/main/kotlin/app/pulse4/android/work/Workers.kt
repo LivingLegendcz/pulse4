@@ -35,6 +35,8 @@ class ImportWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx
         }
         // R4-1: poškozený nebo zamčený klíč nesmí shodit worker; zkusí se znovu podle backoffu.
         if (!sl.awaitStartupReady()) return@withContext Result.retry()
+        // A MINOR waiting for a guardian is gated: no provider work (the ShareWorker still pumps the transport).
+        if (runCatching { sl.shareService.isAppGatedForGuardian() }.getOrDefault(false)) return@withContext Result.success()
         val runner = AutoSyncRunner.forServices(sl)
         // Manuální běh ignoruje intervaly. Automatický běh provede jen to, co je podle plánovače splatné:
         // import každého poskytovatele podle jeho intervalu a keepalive relace Withings na vlastní frekvenci

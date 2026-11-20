@@ -165,3 +165,28 @@ data class PendingRequestRow(
     val createdAtMs: Long,
     val json: String,
 )
+
+/**
+ * Guardian consent record. `CHILD_OUT` rows are the child's own outgoing requests (authoritative for what is
+ * effective); `GUARDIAN_IN` rows are requests a guardian received. [requestJson] / [decisionJson] hold the
+ * signed canonical inputs ([app.pulse4.sharing.GuardianConsentRequest] / [app.pulse4.sharing.GuardianDecision]),
+ * [proposedGrantJson] the grant a SHARE_GRANT request was made for (activated only when approved).
+ * Deliberately NOT part of backup/restore and never rewritten by the identity remap.
+ */
+@Entity(tableName = "guardian_consent", indices = [Index("role", "status"), Index("subjectId")])
+data class GuardianConsentRow(
+    @PrimaryKey val requestId: String,
+    val role: String,
+    val peerId: String,
+    val subject: String,
+    val subjectId: String,
+    val linkId: String?,
+    val permissionVersion: Long,
+    val status: String,
+    val createdAtMs: Long,
+    val expiresAtMs: Long,
+    val decidedAtMs: Long?,
+    val requestJson: String,
+    val proposedGrantJson: String?,
+    val decisionJson: String?,
+)

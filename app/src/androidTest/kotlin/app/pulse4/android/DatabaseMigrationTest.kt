@@ -63,4 +63,60 @@ class DatabaseMigrationTest {
         db.close()
         ctx.deleteDatabase(dbName)
     }
+
+    @Test
+    fun migration3To4_createsGuardianConsentTableAndPreservesExistingData() {
+        val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+        val dbName = "migration_test_3_4.db"
+        ctx.deleteDatabase(dbName)
+
+        val v3Config = SupportSQLiteOpenHelper.Configuration.builder(ctx)
+            .name(dbName)
+            .callback(object : SupportSQLiteOpenHelper.Callback(3) {
+                override fun onCreate(db: SupportSQLiteDatabase) {
+                    db.execSQL("CREATE TABLE IF NOT EXISTS `share_grant` (`id` TEXT NOT NULL, `revoked` INTEGER NOT NULL, `json` TEXT NOT NULL, PRIMARY KEY(`id`))")
+                    db.execSQL("CREATE TABLE IF NOT EXISTS `family_link` (`id` TEXT NOT NULL, `parentId` TEXT NOT NULL, `childId` TEXT NOT NULL, `status` TEXT NOT NULL, `version` INTEGER NOT NULL, `json` TEXT NOT NULL, PRIMARY KEY(`id`))")
+                    db.execSQL("CREATE TABLE IF NOT EXISTS `setting` (`key` TEXT NOT NULL, `value` TEXT NOT NULL, PRIMARY KEY(`key`))")
+                    db.execSQL("INSERT INTO `share_grant` VALUES ('g-1', 0, '{}')")
+                    db.execSQL("INSERT INTO `family_link` VALUES ('fl-1', 'parent', 'child', 'VERIFIED', 2, '{}')")
+                    db.execSQL("INSERT INTO `setting` VALUES ('ownAgeProfile', 'MINOR')")
+                }
+
+                override fun onUpgrade(db: SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+            })
+            .build()
+
+        val helper = FrameworkSQLiteOpenHelperFactory().create(v3Config)
+        val db = helper.writableDatabase
+        AppDatabase.MIGRATION_3_4.migrate(db)
+        // Running it twice must be harmless (CREATE ... IF NOT EXISTS).
+        AppDatabase.MIGRATION_3_4.migrate(db)
+
+        db.execSQL(
+            "INSERT INTO `guardian_consent` (`requestId`, `role`, `peerId`, `subject`, `subjectId`, `linkId`, `permissionVersion`, `status`, `createdAtMs`, `expiresAtMs`, `decidedAtMs`, `requestJson`, `proposedGrantJson`, `decisionJson`) " +
+                "VALUES ('r-1', 'CHILD_OUT', 'parent', 'SHARE_GRANT', 'g-1', NULL, 1, 'PENDING', 1000, 2000, NULL, '{}', NULL, NULL)"
+        )
+        db.query("SELECT COUNT(*) FROM `guardian_consent` WHERE `status` = 'PENDING'").use { c ->
+            assertTrue(c.moveToFirst())
+            assertEquals(1, c.getInt(0))
+        }
+        db.query("SELECT `name` FROM sqlite_master WHERE type = 'index' AND tbl_name = 'guardian_consent' AND name LIKE 'index_guardian_consent_%'").use { c ->
+            assertEquals(2, c.count)
+        }
+        // Existing v3 data (grant, family link, legacy age setting) is untouched.
+        db.query("SELECT `status` FROM `family_link` WHERE `id` = 'fl-1'").use { c ->
+            assertTrue(c.moveToFirst())
+            assertEquals("VERIFIED", c.getString(0))
+        }
+        db.query("SELECT `value` FROM `setting` WHERE `key` = 'ownAgeProfile'").use { c ->
+            assertTrue(c.moveToFirst())
+            assertEquals("MINOR", c.getString(0))
+        }
+        db.query("SELECT COUNT(*) FROM `share_grant`").use { c ->
+            assertTrue(c.moveToFirst())
+            assertEquals(1, c.getInt(0))
+        }
+        db.close()
+        ctx.deleteDatabase(dbName)
+    }
 }

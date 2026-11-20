@@ -56,6 +56,8 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.pulse4.analytics.BestEffort
@@ -245,22 +247,38 @@ fun Channel.toTelemetryTopic(): TelemetryTopic? = when (this) {
     Channel.PERFORMANCE_CONDITION -> TelemetryTopic.PERFORMANCE_CONDITION
 }
 
+/**
+ * Round (i) badge. The visible badge is always 24 dp; [touchTarget] enlarges only the tappable area
+ * (charts use 48 dp, see [ChartInfoButton]).
+ */
 @Composable
-fun InfoBadgeButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
+fun InfoBadgeButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    contentDescription: String = "Informace",
+    touchTarget: Dp = 24.dp,
+) {
     Box(
         modifier = modifier
-            .size(24.dp)
+            .size(touchTarget)
             .clip(CircleShape)
-            .background(Color(0xFF1E293B))
-            .clickable(onClick = onClick),
+            .clickable(role = Role.Button, onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
-        Icon(
-            imageVector = Icons.Outlined.Info,
-            contentDescription = "Informace",
-            tint = Color(0xFF38BDF8),
-            modifier = Modifier.size(15.dp)
-        )
+        Box(
+            modifier = Modifier
+                .size(24.dp)
+                .clip(CircleShape)
+                .background(Color(0xFF1E293B)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = Icons.Outlined.Info,
+                contentDescription = contentDescription,
+                tint = Color(0xFF38BDF8),
+                modifier = Modifier.size(15.dp)
+            )
+        }
     }
 }
 

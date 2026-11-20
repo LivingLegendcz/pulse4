@@ -164,6 +164,10 @@ import app.pulse4.sync.Wire
 import app.pulse4.ui.ActivityView
 import app.pulse4.ui.Axis
 import app.pulse4.ui.Channel
+import app.pulse4.ui.ChartInfoOptions
+import app.pulse4.ui.ChartInfoSeries
+import app.pulse4.ui.ChartInfoTexts
+import app.pulse4.ui.ChartKey
 import app.pulse4.ui.MetricSeries
 import app.pulse4.ui.TodayCards
 import app.pulse4.ui.UnitSystem
@@ -954,10 +958,13 @@ fun TodayScreen(
                             fontWeight = FontWeight.Bold,
                             color = Color.White
                         )
+                        // Say WHY a human is needed (code, changed password, locked account, no stored password…).
+                        val failReason = (wState as? app.pulse4.android.di.WithingsUiState.Failed)?.message?.takeIf { it.isNotBlank() }
                         Text(
-                            "Klepněte pro přihlášení heslem / obnovení relace",
+                            failReason?.let { "$it Klepněte pro přihlášení." } ?: "Klepněte pro přihlášení heslem / obnovení relace",
                             style = MaterialTheme.typography.bodySmall,
-                            color = Color(0xFFFCA5A5)
+                            color = Color(0xFFFCA5A5),
+                            maxLines = 4
                         )
                     }
                 }
@@ -1828,6 +1835,14 @@ fun BodyCompositionStackedBar(
                             color = Color(0xFFCBD5E1)
                         )
                     }
+                    ChartInfoAction(
+                        remember { ChartInfoTexts.build(ChartKey.BODY_COMPOSITION_BAR) },
+                        seriesColors = mapOf(
+                            "muscle" to MetricPalette.Muscle,
+                            "fat" to MetricPalette.Fat,
+                            "bone" to MetricPalette.Bone,
+                        )
+                    )
                 }
 
                 // Přepínač jednotek: Kilogramy (kg) vs Procenta (%)
@@ -2021,6 +2036,7 @@ fun SegmentalBodyCompositionSection(
                             color = Color(0xFFCBD5E1)
                         )
                     }
+                    ChartInfoAction(remember { ChartInfoTexts.build(ChartKey.SEGMENTAL_TABLE) })
                 }
 
             // Přepínač Svaly vs Tuk
@@ -2278,7 +2294,8 @@ fun SegmentalBodyCompositionSection(
                     band = null,
                     color = segColor,
                     unit = chartUnitStr,
-                    xLabels = filteredPairs.map { it.first }
+                    xLabels = filteredPairs.map { it.first },
+                    info = remember { ChartInfoTexts.build(ChartKey.SEGMENTAL_SINGLE) }
                 )
             } else {
                 val xLabels = modeList.map { it.dateLabel.takeLast(5) }
@@ -2306,7 +2323,9 @@ fun SegmentalBodyCompositionSection(
                     series = multiSeries,
                     xLabels = xLabels,
                     title = if (showFatMode) "Porovnání tuku v částech těla ($chartUnitStr)"
-                    else "Porovnání svalů v částech těla ($chartUnitStr)"
+                    else "Porovnání svalů v částech těla ($chartUnitStr)",
+                    infoKey = ChartKey.SEGMENTAL_COMPARE,
+                    infoOptions = ChartInfoOptions(unit = chartUnitStr)
                 )
             }
             }
@@ -2715,7 +2734,10 @@ fun DedicatedMetricDetailScreen(
                                 Spacer(Modifier.width(6.dp))
                                 Text("Orientační EKG křivka", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = Color(0xFFE2E8F0))
                             }
-                            Text("Ilustrativní náhled", style = MaterialTheme.typography.labelSmall, color = Color(0xFF64748B))
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("Ilustrativní náhled", style = MaterialTheme.typography.labelSmall, color = Color(0xFF64748B))
+                                ChartInfoAction(remember { ChartInfoTexts.build(ChartKey.ECG_STRIP) })
+                            }
                         }
                         Spacer(Modifier.height(8.dp))
                         EcgLeadStripCanvas(
@@ -2845,7 +2867,28 @@ fun DedicatedMetricDetailScreen(
                         colors = CardDefaults.cardColors(containerColor = Color(0xFF131722))
                     ) {
                         Column(Modifier.padding(14.dp)) {
-                            Text("FÁZE SPÁNKU A PROBUZENÍ (GARMIN)", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = Color(0xFF94A3B8))
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    "FÁZE SPÁNKU A PROBUZENÍ (GARMIN)",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF94A3B8),
+                                    modifier = Modifier.weight(1f)
+                                )
+                                ChartInfoAction(
+                                    remember { ChartInfoTexts.build(ChartKey.SLEEP_STAGES_BAR) },
+                                    seriesColors = mapOf(
+                                        "deep" to Color(0xFF6366F1),
+                                        "rem" to Color(0xFFA855F7),
+                                        "light" to Color(0xFF38BDF8),
+                                        "awake" to Color(0xFFF59E0B),
+                                    )
+                                )
+                            }
                             if (totalStageS != null) {
                                 Spacer(Modifier.height(10.dp))
                                 Row(
@@ -2917,7 +2960,8 @@ fun DedicatedMetricDetailScreen(
                 LineChart(
                     values = series.values.map { it?.div(3600.0) },
                     band = series.usual?.let { (it.low / 3600.0)..(it.high / 3600.0) },
-                    color = cfg.color
+                    color = cfg.color,
+                    infoMetric = MetricType.SLEEP_DURATION
                 )
 
                 // Graf 2: Skóre spánku (pokud existuje)
@@ -2927,7 +2971,8 @@ fun DedicatedMetricDetailScreen(
                     LineChart(
                         values = scSeries.values,
                         band = scSeries.usual?.let { it.low..it.high },
-                        color = Color(0xFFA855F7)
+                        color = Color(0xFFA855F7),
+                        infoMetric = MetricType.SLEEP_SCORE
                     )
                 }
 
@@ -3048,7 +3093,8 @@ fun DedicatedMetricDetailScreen(
                 LineChart(
                     values = series.values.map { it?.let(fmt::convertWeight) },
                     band = series.usual?.let { fmt.convertWeight(it.low)..fmt.convertWeight(it.high) },
-                    color = cfg.color
+                    color = cfg.color,
+                    infoMetric = MetricType.WEIGHT
                 )
 
                 val bfSeries = b.bodyFatSeries
@@ -3057,7 +3103,8 @@ fun DedicatedMetricDetailScreen(
                     LineChart(
                         values = bfSeries.values,
                         band = bfSeries.usual?.let { it.low..it.high },
-                        color = Color(0xFF06B6D4)
+                        color = Color(0xFF06B6D4),
+                        infoMetric = MetricType.BODY_FAT
                     )
                 }
 
@@ -3367,7 +3414,8 @@ fun DedicatedMetricDetailScreen(
                     unit = chartUnit,
                     xLabels = series.dates.map { it.toString().takeLast(5) },
                     artworkRes = dedArt,
-                    motifKind = dedMotif
+                    motifKind = dedMotif,
+                    infoMetric = type
                 )
 
                 Spacer(Modifier.height(8.dp))
@@ -4898,7 +4946,8 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType? = null) {
                     "Korelační překryv (${entries.size} metriky · 0–100 %)"
                 } else {
                     "Společný korelační graf ($daysCount dní)"
-                }
+                },
+                infoKey = if (normalizeMultiChart) ChartKey.METRICS_CORRELATION_NORMALIZED else ChartKey.METRICS_CORRELATION
             )
 
             if (hasBodyComp) {
@@ -5271,7 +5320,8 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType? = null) {
                                     unit = chartUnit,
                                     xLabels = datesLabelsEntry,
                                     artworkRes = entryArt,
-                                    motifKind = entryMotif
+                                    motifKind = entryMotif,
+                                    infoMetric = entry.type
                                 )
                             }
                         }
@@ -5743,6 +5793,7 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType? = null) {
                     xLabels = series.dates.map { it.toString().takeLast(5) },
                     artworkRes = singleArt,
                     motifKind = singleMotif,
+                    infoMetric = type,
                     modifier = Modifier.padding(vertical = 4.dp)
                 )
 
@@ -8499,11 +8550,12 @@ fun ActivityDetailScreen(sl: ServiceLocator, id: String, onBack: () -> Unit = {}
                         )
                     }
                     Column(Modifier.padding(16.dp)) {
-                        // Hlavička studia křivek + přepínač Osy X (Čas / Vzdálenost)
-                        Row(
+                        // Hlavička studia křivek + (i) + přepínač Osy X (Čas / Vzdálenost); FlowRow: na 320 dp se přepínač zalomí
+                        FlowRow(
                             Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
+                            verticalArrangement = Arrangement.spacedBy(2.dp),
+                            itemVerticalAlignment = Alignment.CenterVertically
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Box(Modifier.size(8.dp).background(detailAtmo.primaryColor, CircleShape))
@@ -8515,6 +8567,18 @@ fun ActivityDetailScreen(sl: ServiceLocator, id: String, onBack: () -> Unit = {}
                                     color = detailAtmo.secondaryColor,
                                     letterSpacing = 0.8.sp
                                 )
+                                if (availableChannels.isNotEmpty()) {
+                                    val curvesInfo = remember(availableChannels) {
+                                        ChartInfoTexts.build(
+                                            ChartKey.ACTIVITY_TELEMETRY_CURVES,
+                                            availableChannels.map { ChartInfoSeries(it.name, it.label(), it.unitLabel()) }
+                                        )
+                                    }
+                                    ChartInfoAction(
+                                        curvesInfo,
+                                        seriesColors = availableChannels.associate { it.name to it.color() }
+                                    )
+                                }
                             }
                             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                 listOf(
@@ -8679,6 +8743,7 @@ fun ActivityDetailScreen(sl: ServiceLocator, id: String, onBack: () -> Unit = {}
                                                 channel = ch,
                                                 secondaryValues = secVals,
                                                 secondaryLabel = if (ch == Channel.STAMINA) "Potenciální" else "",
+                                                showInfo = false, // the channel header has its own (i) + the card-level chart (i)
                                                 onCursor = { cursor = it }
                                             )
                                         }
@@ -8780,6 +8845,7 @@ fun ActivityDetailScreen(sl: ServiceLocator, id: String, onBack: () -> Unit = {}
                                 channel = channel,
                                 secondaryValues = secValsSingle,
                                 secondaryLabel = if (channel == Channel.STAMINA) "Potenciální" else "",
+                                showInfo = false, // the channel header has its own (i) + the card-level chart (i)
                                 onCursor = { cursor = it },
                                 onRange = { range = it }
                             )
@@ -10054,18 +10120,23 @@ fun ActivityCompareScreen(
 
         MultiSeriesLineChart(
             series = compareSeries,
-            title = "Porovnání kanálu: ${channel.label()}"
+            title = "Porovnání kanálu: ${channel.label()}",
+            infoKey = ChartKey.ACTIVITY_COMPARE_CHANNEL
         )
 
         Spacer(Modifier.height(14.dp))
 
         // Překryvné GPS trasy s mapovým podkladem
-        val multiRoutes = remember(items) {
+        val routeEntries = remember(items) {
             items.mapIndexedNotNull { idx, act ->
                 val r = act.sharedProjection?.route?.map { it.lat to it.lon } ?: ActivityView(act.track).route()
-                if (r.count { it != null } >= 2) Triple(palette[idx % palette.size], paletteHex[idx % paletteHex.size], r) else null
+                if (r.count { it != null } >= 2) {
+                    Triple(palette[idx % palette.size], paletteHex[idx % paletteHex.size], r) to
+                        ChartInfoSeries(act.key, "${act.title.take(10)} (${act.localDate.takeLast(5)})")
+                } else null
             }
         }
+        val multiRoutes = routeEntries.map { it.first }
 
         if (multiRoutes.isNotEmpty()) {
             Card(
@@ -10082,7 +10153,15 @@ fun ActivityCompareScreen(
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.ExtraBold,
                             color = Color(0xFF38BDF8),
-                            letterSpacing = 0.8.sp
+                            letterSpacing = 0.8.sp,
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+                        val routesInfo = remember(routeEntries) {
+                            ChartInfoTexts.build(ChartKey.ACTIVITY_COMPARE_ROUTES, routeEntries.map { it.second })
+                        }
+                        ChartInfoAction(
+                            routesInfo,
+                            seriesColors = routeEntries.associate { (route, info) -> info.id to route.first }
                         )
                     }
                     Spacer(Modifier.height(10.dp))

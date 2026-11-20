@@ -547,6 +547,25 @@ object E2eeCrypto {
         return md.digest()
     }
 
+    /**
+     * Detached Ed25519 signature over caller-provided bytes (e.g. guardian-consent canonical bytes, which carry
+     * their own domain header). Independent from the E2EE v3 envelope signature.
+     */
+    fun signDetached(priv32: ByteArray, bytes: ByteArray): ByteArray {
+        require(priv32.size == ED25519_KEY_BYTES) { "Ed25519 private key must be 32 bytes" }
+        return signEd25519(priv32, bytes)
+    }
+
+    /** Verifies a [signDetached] signature; returns `false` (never throws) for malformed keys or signatures. */
+    fun verifyDetached(pub32: ByteArray, bytes: ByteArray, sig: ByteArray): Boolean {
+        if (pub32.size != ED25519_KEY_BYTES || sig.size != ED25519_SIG_BYTES) return false
+        return try {
+            verifyEd25519(pub32, bytes, sig)
+        } catch (_: RuntimeException) {
+            false
+        }
+    }
+
     private fun signEd25519(priv32: ByteArray, data: ByteArray): ByteArray {
         val signer = Ed25519Signer()
         signer.init(true, Ed25519PrivateKeyParameters(priv32, 0))

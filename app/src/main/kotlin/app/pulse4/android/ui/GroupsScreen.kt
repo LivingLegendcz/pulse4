@@ -105,6 +105,7 @@ import app.pulse4.android.ui.theme.JetBrainsMonoFamily
 import app.pulse4.android.data.ContactRow
 import app.pulse4.android.data.ReceivedRow
 import app.pulse4.android.data.toDomain
+import app.pulse4.android.di.ConsentUiState
 import app.pulse4.android.di.ServiceLocator
 import app.pulse4.domain.Activity
 import app.pulse4.domain.MetricType
@@ -126,6 +127,7 @@ import app.pulse4.sync.PairingPayload
 import app.pulse4.sync.PairingResult
 import app.pulse4.sync.Wire
 import app.pulse4.ui.Aggregation
+import app.pulse4.ui.ChartKey
 import app.pulse4.ui.GrantEditor
 import app.pulse4.ui.Labels
 import com.google.zxing.BarcodeFormat
@@ -241,6 +243,7 @@ fun GroupsScreen(
     if (openedGroupId == null) {
         // ÚROVEŇ 1: Kořen stromu — Seznam kruhů + Přidat kruh + Kontakty
         GroupsTreeRootView(
+            sl = sl,
             contacts = contacts,
             decodedGroups = decodedGroups,
             activeGrants = activeGrants,
@@ -282,6 +285,7 @@ fun GroupsScreen(
  */
 @Composable
 private fun GroupsTreeRootView(
+    sl: ServiceLocator,
     contacts: List<ContactRow>,
     decodedGroups: List<Group>,
     activeGrants: List<ShareGrant>,
@@ -526,6 +530,9 @@ private fun GroupsTreeRootView(
                 }
             }
         }
+
+        // Souhlas rodiče u kruhů a zaparkované pozvánky (jen účet nezletilého)
+        CircleConsentSection(sl)
 
         Spacer(Modifier.height(18.dp))
 
@@ -1387,7 +1394,8 @@ private fun GroupMetricsComparisonSection(
         MultiSeriesLineChart(
             series = multiSeries,
             xLabels = datesAxis.map { it.takeLast(5) },
-            title = "$groupTitle · ${windowDays} dní"
+            title = "$groupTitle · ${windowDays} dní",
+            infoKey = ChartKey.GROUP_COMPARE
         )
 
         Spacer(Modifier.height(10.dp))
@@ -1752,75 +1760,13 @@ private fun GroupBranchMembersAndSharingSection(
     val scope = rememberCoroutineScope()
     var notice by remember { mutableStateOf<String?>(null) }
     var selectedSourceMode by remember { mutableStateOf(0) } // 0 = Všechny zdroje, 1 = Withings, 2 = Garmin
-    var pendingMinorGrant by remember { mutableStateOf<Pair<ShareGrant, String>?>(null) }
     var showHandoverDialog by remember { mutableStateOf(false) }
     var showDissolveConfirmDialog by remember { mutableStateOf(false) }
 
     val isMinorAccount by sl.settings.isMinorFlow.collectAsState()
+    val grantStateFlow = remember(sl) { sl.shareService.consentStateByGrant() }
+    val grantStates by grantStateFlow.collectAsState(emptyMap())
     val isSelfAdmin = currentGroup != null && meId in currentGroup.effectiveAdmins
-
-    // Dialog pro potvrzení zákonného zástupce u nezletilého účtu (MINOR)
-    pendingMinorGrant?.let { (grantToSave, catTitle) ->
-        var guardianChecked by remember { mutableStateOf(false) }
-        AlertDialog(
-            onDismissRequest = { pendingMinorGrant = null },
-            containerColor = Color(0xFF0A101B),
-            titleContentColor = Color.White,
-            textContentColor = Color(0xFFCBD5E1),
-            title = {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Outlined.Security, contentDescription = null, tint = Color(0xFFF59E0B), modifier = Modifier.size(22.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text("Souhlas zákonného zástupce", fontWeight = FontWeight.ExtraBold)
-                }
-            },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        "Tento účet má profil nezletilého (MINOR). Aktivace sdílení sekce '$catTitle' vyžaduje ověřenou rodinnou vazbu a výslovný souhlas zákonného zástupce.",
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(checked = guardianChecked, onCheckedChange = { guardianChecked = it })
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            "Potvrzuji souhlas zákonného zástupce s aktivací tohoto sdílení.",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Color(0xFFFDE68A)
-                        )
-                    }
-                }
-            },
-            confirmButton = {
-                Button(
-                    enabled = guardianChecked,
-                    onClick = {
-                        pendingMinorGrant = null
-                        scope.launch {
-                            notice = withContext(Dispatchers.IO) {
-                                val now = System.currentTimeMillis()
-                                val res = sl.shareService.saveGrantWithPolicy(grantToSave, guardianCoConsentAtMs = now)
-                                res.fold(
-                                    onSuccess = {
-                                        sl.shareService.planAndEnqueue(now)
-                                        "Sdílení sekce '$catTitle' do kruhu zapnuto (se souhlasem zákonného zástupce)."
-                                    },
-                                    onFailure = { it.message ?: "Aktivace sdílení selhala." }
-                                )
-                            }
-                        }
-                    }
-                ) {
-                    Text("Potvrdit a zapnout", fontWeight = FontWeight.Bold)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { pendingMinorGrant = null }) {
-                    Text("Zrušit", color = Color(0xFF94A3B8))
-                }
-            }
-        )
-    }
 
     // Dialog pro předání správy kruhu jinému členovi (poslední správce)
     if (showHandoverDialog && currentGroup != null) {
@@ -2062,12 +2008,14 @@ private fun GroupBranchMembersAndSharingSection(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(
-                            "Účet nezletilého (MINOR): každé nové sdílení vyžaduje ověřenou rodinnou vazbu a potvrzení zákonného zástupce.",
+                            "Účet nezletilého: každé nové nebo rozšířené sdílení se odešle rodiči ke schválení a zapne se až po jeho souhlasu. " +
+                                "Zúžení a vypnutí se projeví hned. Data, která už byla doručena, nemusí jít vzít zpět.",
                             Modifier.padding(10.dp),
                             style = MaterialTheme.typography.labelSmall,
                             color = Color(0xFFFDE68A)
                         )
                     }
+                    ChildRequestsSection(sl = sl, groupId = currentGroup?.id, onNotice = { notice = it })
                 }
 
                 Spacer(Modifier.height(10.dp))
@@ -2155,22 +2103,20 @@ private fun GroupBranchMembersAndSharingSection(
                                         )
                                         (res as? GrantEditor.GroupToggleResult.Save)?.grant
                                     } ?: return@launch
-                                    if (isMinorAccount) {
-                                        pendingMinorGrant = preparedGrant to catTitle
-                                    } else {
-                                        notice = withContext(Dispatchers.IO) {
-                                            val now = System.currentTimeMillis()
-                                            sl.shareService.saveGrantWithPolicy(preparedGrant, null).fold(
-                                                onSuccess = {
-                                                    sl.shareService.planAndEnqueue(now)
-                                                    "Sdílení sekce '$catTitle' do kruhu zapnuto."
-                                                },
-                                                onFailure = { it.message ?: "Aktivace sdílení selhala." }
-                                            )
-                                        }
+                                    // Non-ADULT: the service stores a PENDING guardian request instead of the grant and fails with
+                                    // ConsentPendingException (its message tells the child the request was sent).
+                                    notice = withContext(Dispatchers.IO) {
+                                        val now = System.currentTimeMillis()
+                                        sl.shareService.saveGrantWithPolicy(preparedGrant).fold(
+                                            onSuccess = {
+                                                sl.shareService.planAndEnqueue(now)
+                                                "Sdílení sekce '$catTitle' do kruhu zapnuto."
+                                            },
+                                            onFailure = { it.message ?: "Aktivace sdílení selhala." }
+                                        )
                                     }
                                 }
-                            }) { Text("Potvrdit a zapnout") }
+                            }) { Text(if (isMinorAccount) "Odeslat rodiči ke schválení" else "Potvrdit a zapnout") }
                         },
                         dismissButton = {
                             TextButton(onClick = { pendingGroupEnableCat = null }) { Text("Zrušit") }
@@ -2212,7 +2158,7 @@ private fun GroupBranchMembersAndSharingSection(
                                             newGrantId = "",
                                         )) {
                                             is GrantEditor.GroupToggleResult.Save -> {
-                                                sl.shareService.saveGrantWithPolicy(res.grant, null).fold(
+                                                sl.shareService.saveGrantWithPolicy(res.grant).fold(
                                                     onSuccess = {
                                                         sl.shareService.planAndEnqueue(now)
                                                         "Sdílení sekce '$catTitle' bylo zúženo."
@@ -2252,7 +2198,8 @@ private fun GroupBranchMembersAndSharingSection(
                         val isEnabled = matchingGrant != null
                         val otherCoverage = GrantEditor.otherCoverageRecipients(activeGrants, currentGroup?.id, targetRecipients, cat)
                         val grantSourceText = matchingGrant?.let { g ->
-                            GrantEditor.sourceChoiceFrom(g.sources)?.let { " · ${it.label}" }.orEmpty()
+                            GrantEditor.sourceChoiceFrom(g.sources)?.let { " · ${it.label}" }.orEmpty() +
+                                (consentUiLabel(grantStates[g.id] ?: ConsentUiState.NOT_REQUIRED)?.let { " · $it" } ?: "")
                         }.orEmpty()
                         val otherInfoText = if (!isEnabled && otherCoverage.isNotEmpty()) {
                             " · ${otherCoverage.size} členů už tato data dostává jinak"
@@ -2574,7 +2521,7 @@ private fun GroupBranchMembersAndSharingSection(
  * Čistý modální dialog pro QR párování kontaktů (Můj QR kód / Přidat kontakt).
  */
 @Composable
-private fun PairingModalDialog(
+internal fun PairingModalDialog(
     sl: ServiceLocator,
     onDismiss: () -> Unit,
 ) {
@@ -2787,6 +2734,7 @@ private fun CreateGroupModalDialog(
     var name by remember { mutableStateOf("") }
     var members by remember { mutableStateOf(setOf<String>()) }
     var errorMsg by remember { mutableStateOf<String?>(null) }
+    val isMinorAccount by sl.settings.isMinorFlow.collectAsState()
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -2833,6 +2781,14 @@ private fun CreateGroupModalDialog(
                         }
                     }
                 }
+                if (isMinorAccount) {
+                    Text(
+                        "Kruh se založí až po souhlasu rodiče. Dokud ho rodič neschválí, nikdo další o kruhu nedostane zprávu.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xFFFDE68A),
+                        modifier = Modifier.padding(top = 6.dp)
+                    )
+                }
                 errorMsg?.let {
                     Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
                 }
@@ -2849,6 +2805,10 @@ private fun CreateGroupModalDialog(
                                 val self = sl.bridge.ensureStarted().deliveryHash
                                 val g = Group(UUID.randomUUID().toString(), groupName, self, self, members + self, 1)
                                 sl.shareService.saveAndBroadcastGroup(g)
+                                // A non-ADULT sends no membership message until a guardian approves the new circle.
+                                if (sl.shareService.ageState() != app.pulse4.sharing.AgeState.ADULT) {
+                                    sl.shareService.requestCircleMembership(g, app.pulse4.sharing.MembershipAction.CREATE)
+                                }
                                 g.id
                             }
                             onCreated(newId)
@@ -2858,7 +2818,7 @@ private fun CreateGroupModalDialog(
                     }
                 }
             ) {
-                Text("Vytvořit a otevřít", fontWeight = FontWeight.Bold)
+                Text(if (isMinorAccount) "Vytvořit a požádat rodiče" else "Vytvořit a otevřít", fontWeight = FontWeight.Bold)
             }
         },
         dismissButton = {

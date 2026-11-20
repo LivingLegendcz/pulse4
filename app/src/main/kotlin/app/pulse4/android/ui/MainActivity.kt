@@ -136,6 +136,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        (application as? app.pulse4.android.Pulse4App)?.onAppForeground()
         runCatching {
             appUpdateManager.appUpdateInfo.addOnSuccessListener { info ->
                 if (info.installStatus() == InstallStatus.DOWNLOADED) {
@@ -340,6 +341,16 @@ private fun Root(sl: app.pulse4.android.di.ServiceLocator, onCompletePlayUpdate:
         return
     }
 
+    // Age gate (UI only; Reticulum transport and the share pump are started in Pulse4App / the workers and keep
+    // running): first run asks child or adult, a MINOR without a verified guardian sees only the waiting screen.
+    val onboarding by rememberOnboardingState(sl)
+    when (onboarding) {
+        null -> { StartupSplash(); return }
+        app.pulse4.android.di.OnboardingState.UNKNOWN -> { FirstRunAgeScreen(sl); return }
+        app.pulse4.android.di.OnboardingState.MINOR_WAITING_FOR_GUARDIAN -> { ChildGateScreen(sl); return }
+        app.pulse4.android.di.OnboardingState.ADULT, app.pulse4.android.di.OnboardingState.MINOR_READY -> Unit
+    }
+
     val nav = rememberNavController()
     val main = listOf(
         Dest("today", "Dnes", Icons.Outlined.CalendarToday),
@@ -478,6 +489,9 @@ private fun Root(sl: app.pulse4.android.di.ServiceLocator, onCompletePlayUpdate:
                     }
                 }
             }
+            GuardianInboxBanner(sl) {
+                nav.navigate("guardian_requests") { launchSingleTop = true }
+            }
             if (showUnreachableBar) {
                 Surface(
                     color = Color(0xFF3B1A1E),
@@ -586,6 +600,9 @@ private fun Root(sl: app.pulse4.android.di.ServiceLocator, onCompletePlayUpdate:
             }
             composable("sharing_overview") {
                 SharingOverviewScreen(sl = sl, onBack = { nav.popBackStack() })
+            }
+            composable("guardian_requests") {
+                SharingOverviewScreen(sl = sl, onBack = { nav.popBackStack() }, initialTab = 2)
             }
             composable("settings") {
                 SettingsHubScreen(

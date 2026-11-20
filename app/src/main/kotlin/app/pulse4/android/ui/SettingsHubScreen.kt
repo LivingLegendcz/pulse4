@@ -105,6 +105,8 @@ import app.pulse4.ui.Fmt
 import app.pulse4.ui.GrantEditor
 import app.pulse4.ui.Labels
 import app.pulse4.ui.Status
+import app.pulse4.ui.SyncProvider
+import app.pulse4.ui.SyncSchedule
 import app.pulse4.ui.UnitSystem
 import java.time.LocalDate
 import java.time.ZoneId
@@ -133,7 +135,8 @@ fun SettingsHubScreen(
         Triple("Globální Sdílení", "P2P MATICE", 1),
         Triple("Zdroje dat", "INTEGRACE", 2),
         Triple("Reticulum P2P", "MESH UZEL", 3),
-        Triple("Soukromí & Záloha", "TREZOR", 4)
+        Triple("Soukromí & Záloha", "TREZOR", 4),
+        Triple("Rodina", "SOUHLASY", 5)
     )
 
     val heroMeta = when (selectedTab) {
@@ -157,10 +160,15 @@ fun SettingsHubScreen(
             Color(0xFFA855F7),
             "Suverénní Uzel Reticulum P2P" to "Topologie šifrované sítě, propojovací brány a odchozí fronta."
         )
-        else -> Triple(
+        4 -> Triple(
             R.drawable.img_sport_tactical_hero,
             Color(0xFFF59E0B),
             "Geofencing Soukromí & Trezor" to "Automatické ořezávání GPS u bydliště a šifrovaná záloha .p4bk."
+        )
+        else -> Triple(
+            R.drawable.img_motif_body_silhouette,
+            Color(0xFFA855F7),
+            "Rodina & souhlasy" to "Věkový profil, moji rodiče, žádosti dětí a schválená sdílení."
         )
     }
 
@@ -255,7 +263,7 @@ fun SettingsHubScreen(
                                 fontSize = 10.sp
                             )
                             Text(
-                                "SEKCE 0${selectedTab + 1}/05",
+                                "SEKCE 0${selectedTab + 1}/06",
                                 style = MaterialTheme.typography.labelSmall,
                                 fontFamily = JetBrainsMonoFamily,
                                 fontWeight = FontWeight.Bold,
@@ -332,6 +340,7 @@ fun SettingsHubScreen(
             2 -> SourcesSettingsSection(sl)
             3 -> ReticulumSettingsSection(sl)
             4 -> PrivacyAndBackupSection(sl)
+            5 -> FamilySettingsSection(sl)
         }
     }
 }
@@ -810,6 +819,8 @@ private fun GlobalSharingSection(
     val grants by sl.db.grants().all().collectAsState(emptyList())
     val contacts by sl.db.contacts().all().collectAsState(emptyList())
     val groups by sl.db.grants().groups().collectAsState(emptyList())
+    val grantStateFlow = remember(sl) { sl.shareService.consentStateByGrant() }
+    val grantConsentStates by grantStateFlow.collectAsState(emptyMap())
 
     val activeGrants = remember(grants) {
         grants.mapNotNull { runCatching { Wire.json.decodeFromString(ShareGrant.serializer(), it.json) }.getOrNull() }
@@ -1107,12 +1118,11 @@ private fun GlobalSharingSection(
 
                 if (showConfirmSaveDialog) {
                     val diff = currentDiff
-                    val isMinor = sl.settings.ownAgeProfile == app.pulse4.sharing.AgeProfile.MINOR.name
+                    val isMinor = sl.settings.ageState != app.pulse4.sharing.AgeState.ADULT
                     val isRevokingAll = selectedRecipients.isEmpty() || enabledCategories.isEmpty()
                     val needsWideningConfirm = !isRevokingAll && (diff.scopeWidened || diff.planRightsWidened)
                     val needsGuardianConsent = isMinor && !isRevokingAll &&
                         (diff.addedByRecipient.isNotEmpty() || diff.scopeWidened || diff.planRightsWidened)
-                    var guardianChecked by remember(showConfirmSaveDialog) { mutableStateOf(false) }
                     var wideningConfirmed by remember(showConfirmSaveDialog) { mutableStateOf(false) }
                     fun contactName(id: String) = contacts.firstOrNull { it.identity == id }?.displayName ?: id.take(10)
                     fun categoryLabel(cat: Category) = sectionDefs.firstOrNull { it.first == cat }?.second?.first ?: cat.name
@@ -1207,25 +1217,21 @@ private fun GlobalSharingSection(
                                     }
                                 }
                                 if (needsGuardianConsent) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Checkbox(checked = guardianChecked, onCheckedChange = { guardianChecked = it })
-                                        Spacer(Modifier.width(6.dp))
-                                        Text(
-                                            "Potvrzuji souhlas zákonného zástupce s rozšířením tohoto sdílení.",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = Color(0xFFFDE68A)
-                                        )
-                                    }
+                                    Text(
+                                        "Účet nezletilého: rozšíření se odešle rodiči ke schválení a zapne se až po jeho souhlasu. Zúžení se uloží hned. " +
+                                            app.pulse4.ui.Labels.DELIVERED_DATA_NOTE,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color(0xFFFDE68A)
+                                    )
                                 }
                             }
                         },
                         confirmButton = {
                             Button(
-                                enabled = (!needsGuardianConsent || guardianChecked) && (!needsWideningConfirm || wideningConfirmed),
+                                enabled = !needsWideningConfirm || wideningConfirmed,
                                 onClick = {
                                     showConfirmSaveDialog = false
                                     if (incompatibleDirectGrants || !diff.hasChanges) return@Button
-                                    val consentAtMs = if (needsGuardianConsent && guardianChecked) System.currentTimeMillis() else null
                                     scope.launch {
                                         val resultMsg = withContext(Dispatchers.IO) {
                                             val now = System.currentTimeMillis()
@@ -1246,7 +1252,6 @@ private fun GlobalSharingSection(
                                                 newGrant = newGrant,
                                                 existingDirectGrants = directGrants,
                                                 nowMs = now,
-                                                guardianCoConsentAtMs = consentAtMs,
                                             ).fold(
                                                 onSuccess = { saved ->
                                                     isDirty = false
@@ -1264,7 +1269,16 @@ private fun GlobalSharingSection(
                                         notice = resultMsg
                                     }
                                 }
-                            ) { Text(if (isRevokingAll) "Potvrdit odvolání" else "Potvrdit a uložit", fontWeight = FontWeight.Bold) }
+                            ) {
+                                Text(
+                                    when {
+                                        isRevokingAll -> "Potvrdit odvolání"
+                                        needsGuardianConsent -> "Odeslat rodiči ke schválení"
+                                        else -> "Potvrdit a uložit"
+                                    },
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                         },
                         dismissButton = {
                             TextButton(onClick = { showConfirmSaveDialog = false }) { Text("Zrušit", color = Color(0xFF94A3B8)) }
@@ -1319,6 +1333,10 @@ private fun GlobalSharingSection(
                         }
                     }
                     Text(g.fields.joinToString { app.pulse4.ui.Labels.field(it) }, style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8))
+                    grantConsentStates[g.id]?.let { st ->
+                        Spacer(Modifier.height(6.dp))
+                        ConsentStateChip(st)
+                    }
                 }
             }
         }
@@ -1573,6 +1591,9 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
             }
         }
 
+        Spacer(Modifier.height(12.dp))
+
+        SyncIntervalCard(if (sub == 0) SyncProvider.GARMIN else SyncProvider.WITHINGS, sl)
         Spacer(Modifier.height(12.dp))
 
         when (sub) {
@@ -3014,6 +3035,68 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
 }
 
 /** Jednotná karta účtu: nadpis, volitelný stav vpravo a volitelné tlačítko „?“ pro nápovědu. */
+/**
+ * Interval of the automatic background import of one provider. Manual "Synchronizovat" buttons are not affected.
+ * Stored per provider ([app.pulse4.android.data.Settings.setSyncIntervalMinutes]); defaults are Garmin 15 min and
+ * Withings 1 h. Android cannot run background work more often than about every 15 minutes.
+ */
+@Composable
+private fun SyncIntervalCard(provider: SyncProvider, sl: ServiceLocator) {
+    val scope = rememberCoroutineScope()
+    var minutes by remember(provider) { mutableStateOf<Int?>(null) }
+    LaunchedEffect(provider) {
+        minutes = withContext(Dispatchers.IO) { runCatching { sl.settings.syncIntervalMinutes(provider) }.getOrNull() }
+    }
+    val name = if (provider == SyncProvider.GARMIN) "Garmin" else "Withings"
+    Card(
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(1.dp, Color(0xFF1E293B)),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF111827)),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                "Automatická synchronizace: $name",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+                color = Color.White
+            )
+            val current = minutes
+            Text(
+                when {
+                    current == null -> "Načítám…"
+                    current == SyncSchedule.OFF -> "Automatické stahování dat z $name je vypnuté. Tlačítko „Synchronizovat“ funguje dál."
+                    else -> "Data z $name se na pozadí stahují zhruba každých ${SyncSchedule.label(current)} " +
+                        "(výchozí: ${SyncSchedule.label(provider.defaultMinutes)}). Android nespouští práci na pozadí přesně na čas."
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = Color(0xFF94A3B8)
+            )
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                SyncSchedule.OPTIONS.forEach { option ->
+                    FilterChip(
+                        selected = current == option,
+                        onClick = {
+                            minutes = option
+                            scope.launch(Dispatchers.IO) {
+                                runCatching { sl.settings.setSyncIntervalMinutes(provider, option) }
+                            }
+                        },
+                        label = { Text(SyncSchedule.label(option), maxLines = 1, softWrap = false) },
+                    )
+                }
+            }
+            if (provider == SyncProvider.WITHINGS) {
+                Text(
+                    "Přihlášení k Withings se udržuje samostatně každých 30 minut a při otevření aplikace, bez ohledu na tuto volbu.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFF64748B)
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun AccountCard(
     title: String,

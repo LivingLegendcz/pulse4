@@ -185,6 +185,8 @@ class DebugCommandReceiver : BroadcastReceiver() {
                     sl.shareService.saveGrantWithPolicy(g)
                 }
 
+                handleConsentCommands(sl, intent)
+
                 intent.getStringExtra("seed_inbox_projection")?.let { authorId ->
                     seedInboxProjection(sl, authorId)
                 }
@@ -244,6 +246,72 @@ class DebugCommandReceiver : BroadcastReceiver() {
             } finally {
                 pending.finish()
             }
+        }
+    }
+
+    /**
+     * Guardian-consent debug actions for the 2-device E2E. Everything goes through [app.pulse4.android.di.ShareService];
+     * there is no policy bypass (an under-age grant only ever creates a PENDING request).
+     */
+    private fun handleConsentCommands(sl: app.pulse4.android.di.ServiceLocator, intent: Intent) {
+        val share = sl.shareService
+        intent.getStringExtra("set_age")?.let { v ->
+            val target = runCatching { app.pulse4.sharing.AgeState.valueOf(v.trim().uppercase()) }.getOrNull()
+            val ok = target != null && share.declareAge(target)
+            Log.i("Pulse4Consent", "SET_AGE target=$v accepted=$ok state=${share.ageState()}")
+        }
+        intent.getStringExtra("family_link_child_request")?.let { parentId ->
+            val contact = sl.db.contacts().get(parentId.trim())
+            val res = if (contact == null) Result.failure(IllegalArgumentException("unknown contact")) else share.sendChildFamilyLinkRequest(contact)
+            Log.i("Pulse4Consent", "CHILD_LINK_REQUEST parent=$parentId ok=${res.isSuccess} link=${res.getOrNull()?.id} err=${res.exceptionOrNull()?.message}")
+        }
+        intent.getStringExtra("family_link_respond")?.let { raw ->
+            val (id, verb) = raw.split(':', limit = 2).let { it[0] to it.getOrElse(1) { "accept" } }
+            val res = share.respondFamilyLink(id, verb == "accept")
+            Log.i("Pulse4Consent", "LINK_RESPOND id=$id verb=$verb status=${res?.status}")
+        }
+        intent.getStringExtra("consent_request")?.let { raw ->
+            // "<recipient>[|FIELD,FIELD]" -> a continuous grant; for a non-adult this only creates a PENDING request
+            val parts = raw.split('|', limit = 2)
+            val fields = parts.getOrNull(1)?.split(',')?.mapNotNull { runCatching { Field.valueOf(it.trim()) }.getOrNull() }?.toSet()
+                ?.takeIf { it.isNotEmpty() } ?: setOf(Field.SLEEP_DURATION)
+            val self = sl.bridge.ensureStarted().deliveryHash
+            val g = ShareGrant(
+                id = UUID.randomUUID().toString(),
+                ownerId = self,
+                recipients = setOf(parts[0].trim()),
+                fields = fields,
+                scope = TimeScope.continuousFrom(LocalDate.now(ZoneId.of(sl.settings.zoneId)).minusDays(7)),
+                createdAtMs = System.currentTimeMillis(),
+            )
+            val res = share.saveGrantWithPolicy(g)
+            val pending = res.exceptionOrNull() as? app.pulse4.android.di.ConsentPendingException
+            Log.i("Pulse4Consent", "CONSENT_REQUEST grant=${g.id} saved=${res.isSuccess} requestId=${pending?.request?.requestId} err=${res.exceptionOrNull()?.message}")
+        }
+        intent.getStringExtra("consent_decide")?.let { raw ->
+            val (id, verb) = raw.split(':', limit = 2).let { it[0] to it.getOrElse(1) { "approve" } }
+            val res = share.decideConsent(id, verb == "approve")
+            Log.i("Pulse4Consent", "CONSENT_DECIDE id=$id verb=$verb ok=${res.isSuccess} err=${res.exceptionOrNull()?.message}")
+        }
+        intent.getStringExtra("consent_revoke")?.let { permissionId ->
+            val res = share.revokeConsent(permissionId.trim())
+            Log.i("Pulse4Consent", "CONSENT_REVOKE permission=$permissionId ok=${res.isSuccess} err=${res.exceptionOrNull()?.message}")
+        }
+        intent.getStringExtra("release_age")?.let { childId ->
+            val res = share.releaseAge(childId.trim())
+            Log.i("Pulse4Consent", "RELEASE_AGE child=$childId ok=${res.isSuccess} err=${res.exceptionOrNull()?.message}")
+        }
+        if (intent.getBooleanExtra("dump_consent", false)) {
+            val rows = sl.db.guardianConsents().allNow().map {
+                "${it.role}:${it.subject}:${it.subjectId.take(8)}#${it.permissionVersion}:${it.status}(req=${it.requestId})"
+            }
+            val links = share.familyLinks().map { "${it.id.take(8)}:${it.status}:p=${it.parentId.take(8)}:c=${it.childId.take(8)}:init=${it.initiator.take(8)}" }
+            val effective = share.effectiveGrants().map { it.id.take(8) }
+            Log.i(
+                "Pulse4Consent",
+                "DUMP_CONSENT age=${share.ageState()} onboarding=${share.onboardingStateNow()} guardians=${share.verifiedGuardianIds().map { it.take(8) }} " +
+                    "links=$links rows=$rows effectiveGrants=$effective inbox=${share.pendingGuardianInboxNow().map { it.requestId }}"
+            )
         }
     }
 

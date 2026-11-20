@@ -30,6 +30,12 @@ object Kinds {
     const val FAMILY_LINK_RESPONSE = "family.link.response"
     const val ADMIN_HANDOVER_REQUEST = "admin.handover.request"
     const val ADMIN_HANDOVER_ACCEPT = "admin.handover.accept"
+    const val FAMILY_LINK_REVOKE = "family.link.revoke"
+    const val GUARDIAN_CONSENT_REQUEST = "guardian.consent.request"
+    const val GUARDIAN_CONSENT_APPROVED = "guardian.consent.approved"
+    const val GUARDIAN_CONSENT_REJECTED = "guardian.consent.rejected"
+    const val GUARDIAN_CONSENT_REVOKED = "guardian.consent.revoked"
+    const val GUARDIAN_AGE_RELEASE = "guardian.age.release"
 
     /** Novější souhrn může nahradit starší nedoručený; revize plánů a odvolání se nikdy neslučují. */
     val supersedable = setOf(PROJECTION_UPSERT)

@@ -19,11 +19,20 @@ data class FamilyLink(
     val createdAtMs: Long,
     val verifiedAtMs: Long? = null,
     val version: Long = 1L,
-)
+    /**
+     * Who sent the link request (parent or child). `null` on legacy rows == parent-initiated. A link becomes
+     * VERIFIED only when the counterparty (the party that did NOT initiate) accepts.
+     */
+    val initiatorId: String? = null,
+) {
+    val initiator: String get() = initiatorId ?: parentId
+    val counterparty: String get() = if (initiator == parentId) childId else parentId
+}
 
 /**
  * Politika rodinných vazeb: potvrzení rodinné vazby nikdy nevytváří `ShareGrant` a u nezletilých
- * vyžaduje aktivace sdílení výslovný souhlas zákonného zástupce.
+ * vyžaduje aktivace sdílení ověřený podepsaný souhlas zákonného zástupce ([GuardianConsentPolicy]).
+ * Zákonný zástupce je jen `parentId` VERIFIED vazby s `childAgeProfile == MINOR`.
  */
 object FamilyLinkPolicy {
     fun createRequest(
@@ -44,13 +53,68 @@ object FamilyLinkPolicy {
         )
     }
 
+    /**
+     * Child-initiated request (child -> parent). The child declares itself MINOR (never ADULT) and can only
+     * name itself as the child; the parent's device must accept before the link is VERIFIED.
+     */
+    fun createChildRequest(id: String, parentId: String, childId: String, nowMs: Long): FamilyLink {
+        require(parentId != childId) { "parentId and childId must differ" }
+        return FamilyLink(
+            id = id,
+            parentId = parentId,
+            childId = childId,
+            status = FamilyLinkStatus.PENDING,
+            childAgeProfile = AgeProfile.MINOR,
+            createdAtMs = nowMs,
+            initiatorId = childId,
+        )
+    }
+
+    /**
+     * Receiver side of a family link request: normalizes the wire [payload] using the authenticated
+     * [envelopeAuthor] as initiator (never a payload claim). Returns `null` when invalid: self must be the other
+     * party, the author must be parent or child, and a child-initiated link must declare the child MINOR.
+     */
+    fun acceptIncomingRequest(payload: FamilyLink, selfId: String, envelopeAuthor: String): FamilyLink? {
+        if (payload.parentId == payload.childId) return null
+        val parties = setOf(payload.parentId, payload.childId)
+        if (selfId !in parties || envelopeAuthor !in parties || selfId == envelopeAuthor) return null
+        if (envelopeAuthor == payload.childId && payload.childAgeProfile != AgeProfile.MINOR) return null
+        return payload.copy(
+            status = FamilyLinkStatus.PENDING,
+            verifiedAtMs = null,
+            guardianConsentAtMs = null,
+            initiatorId = envelopeAuthor,
+        )
+    }
+
+    /** An inbound response is valid only from the counterparty of the initiator. */
+    fun isValidRemoteResponse(link: FamilyLink, envelopeAuthor: String): Boolean =
+        link.status == FamilyLinkStatus.PENDING && envelopeAuthor == link.counterparty
+
+    /**
+     * "Onboarding complete": an ADULT always; a MINOR as soon as ONE verified guardian exists (further guardians
+     * are optional); UNKNOWN never (the age choice is still outstanding). [records] are the child's consent
+     * records (needed to qualify guardians beyond the first one).
+     */
+    fun isOnboardingComplete(
+        ageState: AgeState,
+        selfId: String,
+        links: List<FamilyLink>,
+        records: List<ConsentRecord> = emptyList(),
+    ): Boolean = when (ageState) {
+        AgeState.ADULT -> true
+        AgeState.UNKNOWN -> false
+        AgeState.MINOR -> GuardianConsentPolicy.verifiedGuardians(selfId, links, records).isNotEmpty()
+    }
+
     fun respond(
         link: FamilyLink,
         responderId: String,
         accept: Boolean,
         nowMs: Long,
     ): FamilyLink {
-        require(responderId == link.childId) { "Only the child account can respond to a family link request" }
+        require(responderId == link.counterparty) { "Only the counterparty of the initiator can respond to a family link request" }
         require(link.status == FamilyLinkStatus.PENDING) { "Family link must be PENDING" }
         return link.copy(
             status = if (accept) FamilyLinkStatus.VERIFIED else FamilyLinkStatus.REJECTED,
@@ -67,6 +131,102 @@ object FamilyLinkPolicy {
         )
     }
 
+    /**
+     * Approvals-aware activation check: may [grant] flow data for [ownerId] in the given [ageState]?
+     * Delegates to [GuardianConsentPolicy.isEffective]; a legacy checkbox timestamp is never evidence.
+     */
+    fun canActivateGrant(
+        ownerId: String,
+        ageState: AgeState,
+        grant: ShareGrant,
+        links: List<FamilyLink>,
+        approvals: List<ConsentRecord>,
+        grandfatheredIds: Set<String>,
+        now: Long,
+    ): Boolean =
+        grant.ownerId == ownerId &&
+            GuardianConsentPolicy.isEffective(grant, ageState, links, approvals, grandfatheredIds, now)
+
+    /**
+     * Link removal. Allowed ONLY for the two parties of that link, and only as follows: a VERIFIED link can be
+     * removed solely by its parent (a child can never drop a verified guardian, otherwise it could shed the
+     * stricter of two parents); a PENDING link can be cancelled by its initiator or rejected by the counterparty.
+     * A guardian can never remove another guardian's link. [links] / [records] are kept for source compatibility
+     * and are not used. Idempotent for an already REVOKED link; REJECTED links cannot be removed.
+     */
+    fun removeLink(
+        link: FamilyLink,
+        actorId: String,
+        links: List<FamilyLink> = emptyList(),
+        records: List<ConsentRecord> = emptyList(),
+    ): FamilyLink {
+        require(mayRemove(link, actorId, links, records)) { "Actor may not remove this link" }
+        if (link.status == FamilyLinkStatus.REVOKED) return link
+        require(link.status == FamilyLinkStatus.VERIFIED || link.status == FamilyLinkStatus.PENDING) {
+            "Only a PENDING or VERIFIED link can be removed"
+        }
+        return link.copy(status = FamilyLinkStatus.REVOKED, version = link.version + 1)
+    }
+
+    /** Whether [actorId] may remove [link] in its current status (see [removeLink]). */
+    fun canRemove(link: FamilyLink, actorId: String): Boolean = mayRemove(link, actorId, emptyList(), emptyList())
+
+    @Suppress("UNUSED_PARAMETER")
+    private fun mayRemove(link: FamilyLink, actorId: String, links: List<FamilyLink>, records: List<ConsentRecord>): Boolean {
+        if (actorId != link.parentId && actorId != link.childId) return false
+        // A verified link belongs to the parent: only the parent removes it. PENDING: either party (initiator
+        // cancels, counterparty rejects). REVOKED/REJECTED: parties only, the status checks live in removeLink.
+        return if (link.status == FamilyLinkStatus.VERIFIED) actorId == link.parentId else true
+    }
+
+    /**
+     * An inbound `family.link.revoke` is valid only from the other party of the link ([selfId] is a party) and
+     * only if that author may remove the link in its current status (a child's revoke of a VERIFIED link is not).
+     */
+    fun isValidRemoteRevoke(link: FamilyLink, envelopeAuthor: String, selfId: String): Boolean =
+        ((link.parentId == selfId && link.childId == envelopeAuthor) ||
+            (link.childId == selfId && link.parentId == envelopeAuthor)) &&
+            mayRemove(link, envelopeAuthor, emptyList(), emptyList())
+
+    /**
+     * Child side of an inbound `family.link.revoke`: valid only from one of the two parties of [link] who may
+     * remove it in its current status; another guardian's removal and a child's removal of a VERIFIED link are
+     * rejected ([links] / [records] are unused, kept for source compatibility).
+     */
+    fun isValidLinkRemoval(
+        link: FamilyLink,
+        envelopeAuthor: String,
+        links: List<FamilyLink>,
+        records: List<ConsentRecord>,
+    ): Boolean = mayRemove(link, envelopeAuthor, links, records)
+
+    /**
+     * Consent rows to mark withdrawn after [removed] was removed ([linksAfter] already contains it as REVOKED):
+     * the removed guardian's `GUARDIAN_ADD` rows (so it cannot come back qualified), and, only when no verified
+     * guardian is left, every PENDING/APPROVED row of the child. While another guardian remains, other approvals
+     * stay valid.
+     */
+    fun consentsAffectedByLinkRemoval(
+        removed: FamilyLink,
+        linksAfter: List<FamilyLink>,
+        records: List<ConsentRecord>,
+    ): List<ConsentRecord> {
+        val child = removed.childId
+        val noGuardianLeft = GuardianConsentPolicy.verifiedGuardians(child, linksAfter, records).isEmpty()
+        return records.filter {
+            it.request.childId == child &&
+                (it.status == ConsentStatus.PENDING || it.status == ConsentStatus.APPROVED) &&
+                (
+                    noGuardianLeft ||
+                        (it.request.subject == ConsentSubject.GUARDIAN_ADD && it.request.subjectId == removed.parentId)
+                    )
+        }
+    }
+
+    /**
+     * Legacy checkbox-based check, kept only so existing callers compile until they are rewired to
+     * [canActivateGrant]. A co-consent timestamp is NOT evidence of guardian approval.
+     */
     fun canActivateShareGrant(
         ownerId: String,
         ownerAgeProfile: AgeProfile,

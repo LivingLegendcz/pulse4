@@ -118,6 +118,8 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 2. **Zero Tracking:** No telemetry, Firebase, Crashlytics, or analytics SDKs are incorporated into the codebase.
 3. **Decentralized Networking:** Reticulum peer-to-peer communications use no phone numbers, emails, or static IP addresses.
 
+See the full [Privacy Policy](docs/PRIVACY.md) ([Czech](docs/PRIVACY.cs.md)) and the [open legal and distribution items](docs/PRIVACY_OPEN_ITEMS.md).
+
 ---
 
 ## License

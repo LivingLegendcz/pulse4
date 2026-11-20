@@ -239,6 +239,14 @@ class WithingsWebClient(
         val form = baseForm("extend", cookies, sessionToken)
         val res = try {
             post("session", form, cookies, sessionToken)
+        } catch (e: ProviderError.Unauthorized) {
+            // HTTP 401 on the keepalive means the session is dead. It used to be swallowed as "transient", so
+            // the renewal ladder (SSO, stored password) never ran and only the network backoff kicked in.
+            return WithingsExtendResult.Unauthorized
+        } catch (e: ProviderError.Forbidden) {
+            return WithingsExtendResult.Unauthorized
+        } catch (e: ProviderError.RateLimited) {
+            return WithingsExtendResult.TransientError("HTTP 429")
         } catch (e: Exception) {
             return WithingsExtendResult.TransientError(e.message ?: "Network error")
         }
@@ -247,6 +255,8 @@ class WithingsWebClient(
         }
         val env = runCatching { Wire.parse(res.body) }.getOrNull()
             ?: return WithingsExtendResult.TransientError("Invalid JSON response")
+        // 601 is Withings' own rate limit: not a sign of a dead session.
+        if (env.status == 601) return WithingsExtendResult.TransientError("status 601")
         if (env.status != 0) return WithingsExtendResult.Unauthorized
         val body = env.body ?: return WithingsExtendResult.Unauthorized
         val setCookie = res.headers.entries.firstOrNull { it.key.equals("Set-Cookie", ignoreCase = true) }?.value

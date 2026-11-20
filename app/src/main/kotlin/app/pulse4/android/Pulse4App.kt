@@ -84,7 +84,28 @@ class Pulse4App : Application() {
         PulseSyncService.syncState(this)
     }
 
+    private val startedElapsedMs = android.os.SystemClock.elapsedRealtime()
+    private val lastForegroundRenewElapsedMs = java.util.concurrent.atomic.AtomicLong(0L)
+
+    /**
+     * Called whenever the UI comes to the foreground. Silently renews the Withings session (extend, SSO, stored
+     * password) so the user never sees a login prompt for something the app can fix itself. Debounced; the very first
+     * launch is covered by the delayed startup keepalive, and the coordinator applies its own cooldowns.
+     */
+    fun onAppForeground() {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - startedElapsedMs < KEEPALIVE_DELAY_MS) return
+        val last = lastForegroundRenewElapsedMs.get()
+        if (last != 0L && now - last < FOREGROUND_RENEW_DEBOUNCE_MS) return
+        if (!lastForegroundRenewElapsedMs.compareAndSet(last, now)) return
+        appScope.launch {
+            if (!services.awaitStartupReady()) return@launch
+            runCatching { services.withings.renewSession() }
+        }
+    }
+
     private companion object {
         const val KEEPALIVE_DELAY_MS = 45_000L
+        const val FOREGROUND_RENEW_DEBOUNCE_MS = 5L * 60_000L
     }
 }

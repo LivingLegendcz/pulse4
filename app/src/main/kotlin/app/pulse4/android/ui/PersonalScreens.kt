@@ -954,10 +954,13 @@ fun TodayScreen(
                             fontWeight = FontWeight.Bold,
                             color = Color.White
                         )
+                        // Say WHY a human is needed (code, changed password, locked account, no stored password…).
+                        val failReason = (wState as? app.pulse4.android.di.WithingsUiState.Failed)?.message?.takeIf { it.isNotBlank() }
                         Text(
-                            "Klepněte pro přihlášení heslem / obnovení relace",
+                            failReason?.let { "$it Klepněte pro přihlášení." } ?: "Klepněte pro přihlášení heslem / obnovení relace",
                             style = MaterialTheme.typography.bodySmall,
-                            color = Color(0xFFFCA5A5)
+                            color = Color(0xFFFCA5A5),
+                            maxLines = 4
                         )
                     }
                 }

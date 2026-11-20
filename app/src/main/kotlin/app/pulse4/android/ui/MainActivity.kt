@@ -136,6 +136,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        (application as? app.pulse4.android.Pulse4App)?.onAppForeground()
         runCatching {
             appUpdateManager.appUpdateInfo.addOnSuccessListener { info ->
                 if (info.installStatus() == InstallStatus.DOWNLOADED) {

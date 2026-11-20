@@ -105,6 +105,8 @@ import app.pulse4.ui.Fmt
 import app.pulse4.ui.GrantEditor
 import app.pulse4.ui.Labels
 import app.pulse4.ui.Status
+import app.pulse4.ui.SyncProvider
+import app.pulse4.ui.SyncSchedule
 import app.pulse4.ui.UnitSystem
 import java.time.LocalDate
 import java.time.ZoneId
@@ -1575,6 +1577,9 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
 
         Spacer(Modifier.height(12.dp))
 
+        SyncIntervalCard(if (sub == 0) SyncProvider.GARMIN else SyncProvider.WITHINGS, sl)
+        Spacer(Modifier.height(12.dp))
+
         when (sub) {
             // ───────────────────────── GARMIN ─────────────────────────
             0 -> {
@@ -3014,6 +3019,68 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
 }
 
 /** Jednotná karta účtu: nadpis, volitelný stav vpravo a volitelné tlačítko „?“ pro nápovědu. */
+/**
+ * Interval of the automatic background import of one provider. Manual "Synchronizovat" buttons are not affected.
+ * Stored per provider ([app.pulse4.android.data.Settings.setSyncIntervalMinutes]); defaults are Garmin 15 min and
+ * Withings 1 h. Android cannot run background work more often than about every 15 minutes.
+ */
+@Composable
+private fun SyncIntervalCard(provider: SyncProvider, sl: ServiceLocator) {
+    val scope = rememberCoroutineScope()
+    var minutes by remember(provider) { mutableStateOf<Int?>(null) }
+    LaunchedEffect(provider) {
+        minutes = withContext(Dispatchers.IO) { runCatching { sl.settings.syncIntervalMinutes(provider) }.getOrNull() }
+    }
+    val name = if (provider == SyncProvider.GARMIN) "Garmin" else "Withings"
+    Card(
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(1.dp, Color(0xFF1E293B)),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF111827)),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                "Automatická synchronizace: $name",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+                color = Color.White
+            )
+            val current = minutes
+            Text(
+                when {
+                    current == null -> "Načítám…"
+                    current == SyncSchedule.OFF -> "Automatické stahování dat z $name je vypnuté. Tlačítko „Synchronizovat“ funguje dál."
+                    else -> "Data z $name se na pozadí stahují zhruba každých ${SyncSchedule.label(current)} " +
+                        "(výchozí: ${SyncSchedule.label(provider.defaultMinutes)}). Android nespouští práci na pozadí přesně na čas."
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = Color(0xFF94A3B8)
+            )
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                SyncSchedule.OPTIONS.forEach { option ->
+                    FilterChip(
+                        selected = current == option,
+                        onClick = {
+                            minutes = option
+                            scope.launch(Dispatchers.IO) {
+                                runCatching { sl.settings.setSyncIntervalMinutes(provider, option) }
+                            }
+                        },
+                        label = { Text(SyncSchedule.label(option), maxLines = 1, softWrap = false) },
+                    )
+                }
+            }
+            if (provider == SyncProvider.WITHINGS) {
+                Text(
+                    "Přihlášení k Withings se udržuje samostatně každých 30 minut a při otevření aplikace, bez ohledu na tuto volbu.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFF64748B)
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun AccountCard(
     title: String,

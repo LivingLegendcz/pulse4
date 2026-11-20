@@ -67,7 +67,13 @@ import app.pulse4.domain.PLog
 import app.pulse4.domain.Reading
 import app.pulse4.provider.AreaStatus
 import app.pulse4.sync.DeliveryState
+import app.pulse4.domain.MetricType
 import app.pulse4.ui.Channel
+import app.pulse4.ui.ChartInfo
+import app.pulse4.ui.ChartInfoOptions
+import app.pulse4.ui.ChartInfoSeries
+import app.pulse4.ui.ChartInfoTexts
+import app.pulse4.ui.ChartKey
 import app.pulse4.ui.Fmt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -324,6 +330,12 @@ fun SinglestatCard(
                     }
 
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(start = 6.dp)) {
+                        if (finite.size >= 2) {
+                            val sparkInfo = remember(windowLabel) {
+                                ChartInfoTexts.build(ChartKey.SINGLESTAT_SPARKLINE, options = ChartInfoOptions(windowLabel = windowLabel))
+                            }
+                            ChartInfoAction(sparkInfo)
+                        }
                         val badgeText = statusLabel ?: when (reading) {
                             is Reading.Value -> "Aktuální"
                             Reading.NotSyncedYet -> "Čeká"
@@ -560,6 +572,10 @@ fun MultiSeriesLineChart(
     title: String = "Srovnávací graf",
     artworkRes: Int? = null,
     motifKind: MetricMotifKind? = null,
+    infoKey: ChartKey = ChartKey.METRICS_CORRELATION,
+    infoOptions: ChartInfoOptions = ChartInfoOptions(),
+    info: ChartInfo? = null,
+    showInfo: Boolean = true,
 ) {
     var hiddenIds by remember { mutableStateOf(setOf<String>()) }
     var selectedIdx by remember { mutableStateOf<Int?>(null) }
@@ -692,27 +708,45 @@ fun MultiSeriesLineChart(
             }
 
             Column(Modifier.padding(15.dp)) {
-                Row(
+                // FlowRow: on narrow screens (320 dp) the scale toggle wraps under the title instead of squeezing it.
+                FlowRow(
                     Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                    itemVerticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            title,
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        selectedIdx?.let { idx ->
-                            val dateText = xLabels.getOrNull(idx) ?: "Bod #${idx + 1}"
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f, fill = false)) {
                             Text(
-                                "Odečet: $dateText (klepnutím zrušíte)",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = Color(0xFF38BDF8),
-                                fontWeight = FontWeight.SemiBold
+                                title,
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            selectedIdx?.let { idx ->
+                                val dateText = xLabels.getOrNull(idx) ?: "Bod #${idx + 1}"
+                                Text(
+                                    "Odečet: $dateText (klepnutím zrušíte)",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFF38BDF8),
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        }
+                        if (showInfo) {
+                            val effectiveInfo = remember(info, infoKey, infoOptions, series) {
+                                info ?: ChartInfoTexts.build(
+                                    infoKey,
+                                    series.map { ChartInfoTexts.metricSeries(it.id, it.label, it.unit) },
+                                    infoOptions
+                                )
+                            }
+                            ChartInfoAction(
+                                effectiveInfo,
+                                seriesColors = series.associate { it.id to it.color },
+                                seriesStyles = seriesStyles.mapNotNull { (k, v) -> v?.let { k to it } }.toMap()
                             )
                         }
                     }
@@ -967,7 +1001,7 @@ fun MultiSeriesLineChart(
 
 /** Legend swatch: short line in the series' color + line style with its point marker. */
 @Composable
-private fun SeriesLegendSample(style: SeriesStyle?, color: Color) {
+internal fun SeriesLegendSample(style: SeriesStyle?, color: Color) {
     Canvas(Modifier.size(width = 20.dp, height = 10.dp)) {
         val y = size.height / 2f
         drawLine(
@@ -1010,6 +1044,12 @@ fun LineChart(
     channel: Channel? = null,
     artworkRes: Int? = null,
     motifKind: MetricMotifKind? = null,
+    /** Metric drawn by the chart; lets the (i) dialog name its daily aggregation. */
+    infoMetric: MetricType? = null,
+    /** Custom explanation; when null one is derived from this chart's own parameters. */
+    info: ChartInfo? = null,
+    /** False where the surrounding card already carries its own (i) for this chart. */
+    showInfo: Boolean = true,
     onCursor: (Int) -> Unit = {},
     onRange: (IntRange?) -> Unit = {},
 ) {
@@ -1213,6 +1253,24 @@ fun LineChart(
                                 color = Color(0xFF94A3B8)
                             )
                         }
+                    }
+                    if (showInfo) {
+                        val hasBand = band != null
+                        val hasSecondary = secondaryValues != null
+                        val lineInfo = remember(info, unit, hasBand, hasSecondary, secondaryLabel, isScatter, infoMetric) {
+                            info ?: ChartInfoTexts.build(
+                                ChartKey.METRIC_HISTORY_LINE,
+                                options = ChartInfoOptions(
+                                    unit = unit,
+                                    hasBand = hasBand,
+                                    hasSecondary = hasSecondary,
+                                    secondaryLabel = secondaryLabel,
+                                    isScatter = isScatter,
+                                    metric = infoMetric,
+                                )
+                            )
+                        }
+                        ChartInfoAction(lineInfo)
                     }
                 }
 
@@ -1672,21 +1730,38 @@ fun WeightCompositionStackedAreaChart(
         colors = CardDefaults.cardColors(containerColor = MineralSurfaceDark)
     ) {
         Column(Modifier.padding(12.dp)) {
-            // 1. Horní lišta: Titulek nalevo, přepínač měřítka napravo
-            Row(
+            // 1. Horní lišta: Titulek nalevo, přepínač měřítka napravo (FlowRow: na úzkém displeji se přepínač zalomí)
+            FlowRow(
                 Modifier.fillMaxWidth().padding(bottom = 6.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+                itemVerticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = if (curDate != null) "SLOŽENÍ VÁHY ($curDate)" else "VÁHA + SKLÁDANÁ PLOCHA SVALŮ A TUKU",
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = Color(0xFF94A3B8),
-                    modifier = Modifier.weight(1f, fill = false),
-                    maxLines = 1
-                )
-                Spacer(Modifier.width(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = if (curDate != null) "SLOŽENÍ VÁHY ($curDate)" else "VÁHA + SKLÁDANÁ PLOCHA SVALŮ A TUKU",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF94A3B8),
+                        modifier = Modifier.weight(1f, fill = false),
+                        maxLines = 1
+                    )
+                    val compositionInfo = remember(unit, band) {
+                        ChartInfoTexts.build(
+                            ChartKey.WEIGHT_COMPOSITION_STACKED_AREA,
+                            options = ChartInfoOptions(unit = unit, hasBand = band != null)
+                        )
+                    }
+                    ChartInfoAction(
+                        compositionInfo,
+                        seriesColors = mapOf(
+                            "weight" to weightColor,
+                            "muscle" to muscleColor,
+                            "fat" to fatColor,
+                            "rest" to weightColor.copy(alpha = 0.45f),
+                        )
+                    )
+                }
                 Row(
                     modifier = Modifier
                         .clip(RoundedCornerShape(8.dp))

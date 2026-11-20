@@ -435,6 +435,7 @@ internal interface ActivityImportStore {
 class ImportService(private val context: Context, private val sl: ServiceLocator) {
     private val json = Wire.json
     private val syncLock = Any()
+    private val runAllGate = ImportGate()
 
     companion object {
         private val MULTISPORT_LEG_REGEX = Regex("""^(garmin|fit)-.+-s\d+$""")
@@ -1539,8 +1540,24 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
         return null
     }
 
-    /** Spustí import všech oblastí; ruční spuštění se spojí s běžícím (singleFlight). Vrací výsledek po oblastech. */
-    fun runAll(nowMs: Long): Map<SyncArea, AreaResult>? = synchronized(syncLock) {
+    /**
+     * Spustí import všech oblastí; druhé souběžné volání se nefrontuje, ale hned vrátí `null`
+     * („synchronizace již probíhá“). Vrací výsledek po oblastech.
+     */
+    fun runAll(nowMs: Long): Map<SyncArea, AreaResult>? =
+        runAllGate.tryRun(onBusy = {
+            PLog.i("ImportService") { "runAll skipped: another import is already running" }
+            null
+        }) {
+            try {
+                runAllLocked(nowMs)
+            } finally {
+                // Perzistentní čas posledního importu: automatický plán po restartu procesu nezačíná od nuly.
+                runCatching { sl.settings.lastImportAtMs = System.currentTimeMillis() }
+            }
+        }
+
+    private fun runAllLocked(nowMs: Long): Map<SyncArea, AreaResult>? = synchronized(syncLock) {
         val cfg = config()
         val settings = sl.settings
         // Pokud je v GARMIN_API_KEY_EXPIRES uložena krátkodobá expirace access tokenu (<= 48 h), vyčistíme ji:

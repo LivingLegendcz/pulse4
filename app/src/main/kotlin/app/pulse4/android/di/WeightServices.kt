@@ -40,6 +40,7 @@ import app.pulse4.withings.WithingsWebConfig
 import app.pulse4.withings.WithingsWebFetcher
 import app.pulse4.withings.WithingsWebMapper
 import app.pulse4.withings.WithingsWebSession
+import app.pulse4.withings.WithingsProfiles
 import app.pulse4.withings.WithingsUserProfile
 import java.time.Instant
 import java.time.LocalDate
@@ -117,7 +118,7 @@ class WithingsService internal constructor(
             userId = s.primaryUserId.toString(),
             userName = s.primaryUserName,
             isWeb = true,
-            childName = s.childUserName,
+            childName = WithingsProfiles.sessionChild(s)?.displayName,
             lastSyncMs = s.lastSyncMs
         )
     }
@@ -162,7 +163,7 @@ class WithingsService internal constructor(
                     userId = it.primaryUserId.toString(),
                     userName = it.primaryUserName,
                     isWeb = true,
-                    childName = it.childUserName,
+                    childName = WithingsProfiles.sessionChild(it)?.displayName,
                     lastSyncMs = it.lastSyncMs
                 )
             }
@@ -186,7 +187,23 @@ class WithingsService internal constructor(
     fun saveCredentials(clientId: String, secret: String) { sl.settings.withingsClientId = clientId; sl.secrets.putString(CLIENT_SECRET, secret.trim()) }
     fun hasCredentials() = creds() != null
     fun isConnected(): Boolean = loadWebSession()?.isConnected() == true || session.isConnected()
-    fun childUserId(): String? = loadWebSession()?.childUserId?.toString() ?: childVault.load()?.userId
+    fun childUserId(): String? = WithingsProfiles.sessionChild(loadWebSession())?.id?.toString() ?: childVault.load()?.userId
+
+    /**
+     * Single source of truth for the child shown in the Withings card. Follows the R4-6 fixed binding of the
+     * selected child recipient (the profile that is really forwarded); without a binding it falls back to the
+     * validated session child. Only provable children are ever returned (never an adult profile).
+     */
+    fun displayedChild(): WithingsUserProfile? {
+        val ws = loadWebSession()
+        val recipient = sl.settings.childRecipientIdentity
+        val boundUid = if (recipient.isNotBlank()) boundChildWebUid(recipient) else null
+        if (boundUid != null) {
+            return ws?.let { WithingsProfiles.children(it.allProfiles, it.primaryUserId) }
+                ?.firstOrNull { it.id.toString() == boundUid }
+        }
+        return WithingsProfiles.sessionChild(ws)
+    }
 
     /** Ověří cookies a načte seznam profilů účtu pro dialog výběru profilu */
     fun verifyWebCookies(cookies: String, sessionToken: String? = null): List<WithingsUserProfile> {
@@ -278,7 +295,7 @@ class WithingsService internal constructor(
             val primary = existing?.primaryUserId?.let { pid -> r.profiles.firstOrNull { it.id == pid } }
                 ?: r.profiles.firstOrNull { it.isPrimary }
                 ?: r.profiles.first()
-            val child = existing?.childUserId?.let { cid -> r.profiles.firstOrNull { it.id == cid } }
+            val child = WithingsProfiles.resolveChild(r.profiles, primary.id, currentChildId = existing?.childUserId)
             completeWebLogin(
                 cookies = r.session.cookies,
                 primary = primary,
@@ -321,7 +338,7 @@ class WithingsService internal constructor(
             val primary = existing?.primaryUserId?.let { pid -> r.profiles.firstOrNull { it.id == pid } }
                 ?: r.profiles.firstOrNull { it.isPrimary }
                 ?: r.profiles.first()
-            val child = existing?.childUserId?.let { cid -> r.profiles.firstOrNull { it.id == cid } }
+            val child = WithingsProfiles.resolveChild(r.profiles, primary.id, currentChildId = existing?.childUserId)
             passwordVault.onLoginSucceeded(pw, rememberPassword)
             completeWebLogin(
                 cookies = r.session.cookies,
@@ -353,7 +370,7 @@ class WithingsService internal constructor(
             val primary = existing?.primaryUserId?.let { pid -> r.profiles.firstOrNull { it.id == pid } }
                 ?: r.profiles.firstOrNull { it.isPrimary }
                 ?: r.profiles.first()
-            val child = existing?.childUserId?.let { cid -> r.profiles.firstOrNull { it.id == cid } }
+            val child = WithingsProfiles.resolveChild(r.profiles, primary.id, currentChildId = existing?.childUserId)
             val em = emailFallback?.trim()?.takeIf { it.isNotBlank() }
                 ?: directAuth.pendingEmail?.takeIf { it.isNotBlank() }
                 ?: existing?.email
@@ -410,7 +427,7 @@ class WithingsService internal constructor(
         val primary = existing?.primaryUserId?.let { pid -> r.profiles.firstOrNull { it.id == pid } }
             ?: r.profiles.firstOrNull { it.isPrimary }
             ?: r.profiles.first()
-        val child = existing?.childUserId?.let { cid -> r.profiles.firstOrNull { it.id == cid } }
+        val child = WithingsProfiles.resolveChild(r.profiles, primary.id, currentChildId = existing?.childUserId)
         val updated = WithingsWebSession(
             cookies = r.session.cookies,
             sessionToken = r.session.sessionToken ?: existing?.sessionToken,
@@ -465,14 +482,16 @@ class WithingsService internal constructor(
         val profiles = allProfiles.ifEmpty { existing?.allProfiles.orEmpty() }
         val effectiveEmail = email?.trim()?.takeIf { it.isNotBlank() } ?: existing?.email ?: sl.secrets.getString(KEY_EMAIL)
         effectiveEmail?.takeIf { it.isNotBlank() }?.let { sl.secrets.putString(KEY_EMAIL, it) }
+        // Only a provable child may be stored (never the second adult), even if the caller passed one.
+        val validChild = child?.takeIf { c -> WithingsProfiles.children(profiles, primary.id).any { it.id == c.id } }
         val s = WithingsWebSession(
             cookies = cookies,
             sessionToken = sessionToken ?: existing?.sessionToken,
             primaryUserId = primary.id,
             primaryUserName = primary.displayName,
             primaryUserTimezone = primary.timezone,
-            childUserId = child?.id,
-            childUserName = child?.displayName,
+            childUserId = validChild?.id,
+            childUserName = validChild?.displayName,
             allProfiles = profiles,
             lastSyncMs = existing?.lastSyncMs,
             lastExtendedMs = nowMs,
@@ -498,9 +517,11 @@ class WithingsService internal constructor(
             runCatching { webClient.getUsersList(s.cookies, s.sessionToken) }.getOrDefault(emptyList())
         }
         val primary = profiles.firstOrNull { it.id == primaryId } ?: return@synchronized false
-        // Pokud childId není explicitně specifikováno, zkontrolujeme, zda tento dospělý má pod sebou dítě:
-        val effectiveChildId = childId ?: primary.childrenUnderThis(profiles).firstOrNull()?.id
-        val child = effectiveChildId?.let { cid -> profiles.firstOrNull { it.id == cid } }
+        // childId == null means "no preference": keep the current child (if still a provable child), else auto-bind.
+        // A non-child id (e.g. the second adult) is never accepted.
+        val child = WithingsProfiles.resolveChild(
+            profiles, primary.id, requestedChildId = childId, currentChildId = s.childUserId,
+        )
         val updated = s.copy(
             primaryUserId = primary.id,
             primaryUserName = primary.displayName,
@@ -585,14 +606,15 @@ class WithingsService internal constructor(
             val freshProfiles = webClient.getUsersList(s.cookies, s.sessionToken)
             if (freshProfiles.isNotEmpty()) authGate.saveIfCurrent(startGen) {
                 val cur = loadWebSession() ?: s
-                val curPrimary = freshProfiles.firstOrNull { it.id == cur.primaryUserId }
-                val autoChild = if (cur.childUserId == null && curPrimary != null) {
-                    curPrimary.childrenUnderThis(freshProfiles).firstOrNull()
-                } else null
-                val newChildId = cur.childUserId ?: autoChild?.id
-                val newChildName = cur.childUserName ?: autoChild?.displayName
+                // Keeps a valid stored child, drops a stale non-child (e.g. second adult saved by an older
+                // version) and auto-binds a genuine child when none is bound.
+                val newChild = WithingsProfiles.resolveChild(
+                    freshProfiles, cur.primaryUserId, currentChildId = cur.childUserId,
+                )
+                val newChildId = newChild?.id
+                val newChildName = newChild?.displayName
 
-                if (cur.allProfiles != freshProfiles || cur.childUserId != newChildId) {
+                if (cur.allProfiles != freshProfiles || cur.childUserId != newChildId || cur.childUserName != newChildName) {
                     saveWebSession(cur.copy(
                         allProfiles = freshProfiles,
                         childUserId = newChildId,
@@ -691,8 +713,10 @@ class WithingsService internal constructor(
                 val latestSession = authGate.background {
                     (loadWebSession() ?: s).copy(lastSyncMs = nowMs).also { saveWebSession(it) }
                 }
-                // Pokud je v session nastavený dětský profil, stáhneme a odešleme dětská měření složení těla:
-                val childUid = latestSession.childUserId
+                // R4-6: forward only the Withings profile firmly bound to the selected child recipient
+                // (never the session's display child, and never an adult profile):
+                val childUid = sl.settings.childRecipientIdentity.takeIf { it.isNotBlank() }
+                    ?.let { childWebUidFor(it) }?.toLongOrNull()
                 if (childUid != null && sl.settings.childRecipientIdentity.isNotBlank()) {
                     runCatching {
                         val fromSec = (nowMs / 1000L) - 60L * 86_400L
@@ -1097,7 +1121,8 @@ class WithingsService internal constructor(
 
     /** Dětské Withings profily, ze kterých rodič vybírá při přidání dítěte. */
     fun childProfileCandidates(): List<WithingsUserProfile> {
-        val fromWeb = loadWebSession()?.allProfiles.orEmpty().filter { it.isChild }
+        val ws = loadWebSession()
+        val fromWeb = ws?.let { WithingsProfiles.children(it.allProfiles, it.primaryUserId) }.orEmpty()
         if (fromWeb.isNotEmpty()) return fromWeb
         val oauthUid = childVault.load()?.userId ?: return emptyList()
         return listOf(WithingsUserProfile(id = oauthUid.toLongOrNull() ?: return emptyList(), firstName = "", lastName = ""))
@@ -1145,8 +1170,11 @@ class WithingsService internal constructor(
     fun childBinding(childRecipient: String): ChildWithingsBinding {
         val uid = boundChildWebUid(childRecipient)
             ?: return ChildWithingsBinding(childRecipient, null, null, ChildBindingStatus.UNBOUND)
-        val profiles = loadWebSession()?.allProfiles.orEmpty()
-        val profile = profiles.firstOrNull { it.id.toString() == uid }
+        val ws = loadWebSession()
+        val profiles = ws?.allProfiles.orEmpty()
+        // Only a provable child may be forwarded; a bound adult profile (e.g. a stale migrated binding) counts as missing.
+        val profile = ws?.let { WithingsProfiles.children(it.allProfiles, it.primaryUserId) }
+            ?.firstOrNull { it.id.toString() == uid }
         val oauthUid = childVault.load()?.userId
         // Profil ověřujeme proti seznamu profilů účtu; bez známého seznamu (a bez OAuth) nelze posoudit → OK.
         val missing = profile == null && oauthUid != uid && profiles.isNotEmpty()

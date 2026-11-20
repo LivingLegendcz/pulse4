@@ -377,6 +377,70 @@ class PackageMSharingFamilyTest {
         assertTrue(upsert.objectVersion > removeVersion)
     }
 
+    // ---------------------------------------------------------------- Withings second adult never a child/source
+
+    private fun saveAdultsAndChildSession(env: ParentEnv, storedChildUid: Long?) {
+        val childBirth = System.currentTimeMillis() / 1000L - 9L * 365L * 86_400L
+        val s = WithingsWebSession(
+            cookies = "session_key=abc",
+            primaryUserId = 1001L,
+            primaryUserName = "Parent",
+            childUserId = storedChildUid,
+            childUserName = "stale",
+            allProfiles = listOf(
+                WithingsUserProfile(id = 1001L, firstName = "Parent", lastName = "", isPrimary = true, email = "p@x.cz"),
+                // second adult: the API omitted email, birthdate and parent link
+                WithingsUserProfile(id = 4004L, firstName = "Second", lastName = "Adult"),
+                WithingsUserProfile(id = 2002L, firstName = "Kid", lastName = "", birthdate = childBirth, parentAccountId = 1001L),
+                WithingsUserProfile(id = 3003L, firstName = "Kid2", lastName = "", birthdate = childBirth, parentAccountId = 1001L),
+            ),
+        )
+        env.sl.secrets.putString(WithingsService.WEB_SESSION_KEY, Wire.json.encodeToString(WithingsWebSession.serializer(), s))
+    }
+
+    @Test
+    fun `selectProfiles with no child preference keeps the stored child instead of wiping it`() {
+        val env = newParentEnv("pp00pp00pp00pp00pp00pp00pp00pp00", selectedChildUid = 3003L)
+        saveAdultsAndChildSession(env, storedChildUid = 3003L)
+        assertTrue(env.withings.selectProfiles(1001L, null))
+        assertEquals(3003L, env.withings.loadWebSession()?.childUserId)
+        assertEquals(3003L, env.withings.displayedChild()?.id)
+    }
+
+    @Test
+    fun `second adult stored as child by an older version is dropped and replaced by the genuine child`() {
+        val env = newParentEnv("pp00pp00pp00pp00pp00pp00pp00pp00", selectedChildUid = 3003L)
+        saveAdultsAndChildSession(env, storedChildUid = 4004L)
+        // Display is already safe before any re-sync: the adult is never the displayed child.
+        assertNull(env.withings.displayedChild())
+        assertNull(env.withings.childUserId())
+        assertTrue(env.withings.selectProfiles(1001L, null))
+        val after = env.withings.loadWebSession()
+        assertEquals(2002L, after?.childUserId) // auto-bound genuine child
+        assertTrue(env.withings.childProfileCandidates().none { it.id == 4004L || it.id == 1001L })
+        // an explicit request for the second adult is ignored too
+        assertTrue(env.withings.selectProfiles(1001L, 4004L))
+        assertTrue(env.withings.loadWebSession()?.childUserId != 4004L)
+    }
+
+    @Test
+    fun `a binding that points at an adult profile is not forwarded and not displayed`() {
+        val parent = "pp00pp00pp00pp00pp00pp00pp00pp00"
+        val child = "ca11ca11ca11ca11ca11ca11ca11ca11"
+        val env = newParentEnv(parent, selectedChildUid = 3003L)
+        saveAdultsAndChildSession(env, storedChildUid = 2002L)
+        assertTrue(env.withings.addChild(child, "4004")) // stale / migrated binding to the second adult
+        assertEquals(WithingsService.ChildBindingStatus.PROFILE_MISSING, env.withings.childBinding(child).status)
+        assertNull(env.withings.childWebUidFor(child))
+        assertNull(env.withings.displayedChild())
+        // a binding to the genuine child works and is what the card displays
+        env.withings.removeChild(child)
+        env.sl.settings.childRecipientIdentity = child
+        assertTrue(env.withings.addChild(child, "3003"))
+        assertEquals("3003", env.withings.childWebUidFor(child))
+        assertEquals(3003L, env.withings.displayedChild()?.id)
+    }
+
     // ---------------------------------------------------------------- helpers
 
     private class FakeWithingsHttp : HttpGateway {
@@ -410,7 +474,7 @@ class PackageMSharingFamilyTest {
                 primaryUserName = "Parent",
                 childUserId = selectedChildUid,
                 allProfiles = listOf(WithingsUserProfile(id = 1001L, firstName = "Parent", lastName = "", isPrimary = true)) +
-                    profileIds.map { WithingsUserProfile(id = it, firstName = "Child", lastName = it.toString()) },
+                    profileIds.map { WithingsUserProfile(id = it, firstName = "Child", lastName = it.toString(), birthdate = System.currentTimeMillis() / 1000L - 10L * 365L * 86_400L) },
             )
             sl.secrets.putString(WithingsService.WEB_SESSION_KEY, Wire.json.encodeToString(WithingsWebSession.serializer(), s))
         }

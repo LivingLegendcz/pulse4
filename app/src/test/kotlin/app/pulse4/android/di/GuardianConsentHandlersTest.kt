@@ -728,6 +728,23 @@ class GuardianConsentHandlersTest {
     }
 
     @Test
+    fun `undoing the child choice cancels the pending parent request so it cannot re-lock the adult later`() {
+        val child = Party("child", 1); val guardian = Party("guardian", 2)
+        child.knows(guardian); guardian.knows(child)
+        assertTrue(child.share.declareAge(AgeState.MINOR, now))
+        val l = child.share.sendChildFamilyLinkRequest(guardian.contact(), now).getOrThrow()
+        assertTrue(child.share.declareAge(AgeState.ADULT, now + 1))
+        assertEquals(FamilyLinkStatus.REVOKED, child.share.familyLinks().single { it.id == l.id }.status)
+        assertEquals(AgeState.ADULT, child.share.ageState())
+        // a late acceptance by the parent no longer verifies anything on the child
+        deliver(child, guardian, now + 2)
+        guardian.share.respondFamilyLink(l.id, true, now + 3)
+        deliver(guardian, child, now + 4)
+        assertEquals(AgeState.ADULT, child.share.ageState())
+        assertTrue(child.share.verifiedGuardianIds().isEmpty())
+    }
+
+    @Test
     fun `age release by a verified guardian lifts the lock once`() {
         val child = Party("child", 1); val guardian = Party("guardian", 2); val stranger = Party("stranger", 3)
         link(child, guardian); child.knows(stranger)

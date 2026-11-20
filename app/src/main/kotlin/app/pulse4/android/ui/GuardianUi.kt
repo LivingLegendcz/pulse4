@@ -285,6 +285,7 @@ internal fun FirstRunAgeScreen(sl: ServiceLocator) {
                     if (!ok) error = "Volbu se nepodařilo uložit."
                 }
             },
+            colors = ButtonDefaults.buttonColors(containerColor = Teal, contentColor = Color(0xFF04201C)),
             modifier = Modifier.fillMaxWidth(),
         ) { Text("Dospělý (18+)", fontWeight = FontWeight.Bold) }
         Spacer(Modifier.height(10.dp))
@@ -363,7 +364,7 @@ internal fun ChildGateScreen(sl: ServiceLocator) {
             color = Soft,
         )
         Spacer(Modifier.height(12.dp))
-        ParentLinksPanel(sl = sl, gated = true, onNotice = { notice = it })
+        ParentLinksPanel(sl = sl, gated = true)
         NoticeText(notice)
         if (everVerified == false) {
             Spacer(Modifier.height(18.dp))
@@ -379,7 +380,7 @@ internal fun ChildGateScreen(sl: ServiceLocator) {
 // ---------------------------------------------------------------------------------------------------------------------
 
 @Composable
-internal fun ParentLinksPanel(sl: ServiceLocator, gated: Boolean, onNotice: (String) -> Unit = {}) {
+internal fun ParentLinksPanel(sl: ServiceLocator, gated: Boolean, onNotice: ((String) -> Unit)? = null) {
     val scope = rememberCoroutineScope()
     val selfId = rememberSelfId(sl)
     val links = rememberFamilyLinks(sl)
@@ -393,7 +394,7 @@ internal fun ParentLinksPanel(sl: ServiceLocator, gated: Boolean, onNotice: (Str
     var removeTarget by remember { mutableStateOf<FamilyLink?>(null) }
     var cancelTarget by remember { mutableStateOf<FamilyLink?>(null) }
     var localNotice by remember { mutableStateOf<String?>(null) }
-    fun say(msg: String) { localNotice = msg; onNotice(msg) }
+    fun say(msg: String) { localNotice = msg; onNotice?.invoke(msg) }
 
     if (showPairing) PairingModalDialog(sl = sl, onDismiss = { showPairing = false })
 
@@ -575,7 +576,7 @@ internal fun ParentLinksPanel(sl: ServiceLocator, gated: Boolean, onNotice: (Str
             Spacer(Modifier.width(6.dp))
             Text("Spárovat zařízení rodiče (QR)", color = Teal)
         }
-        NoticeText(localNotice)
+        if (onNotice == null) NoticeText(localNotice)
     }
 }
 

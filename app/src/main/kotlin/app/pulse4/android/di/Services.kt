@@ -2391,8 +2391,19 @@ class ShareService internal constructor(
     fun ageState(): AgeState = ageProfile.state
 
     /** User declaration (first-run choice, ADULT -> MINOR, undo of a self-declared MINOR before any verified link). */
-    fun declareAge(target: AgeState, nowMs: Long = System.currentTimeMillis()): Boolean =
-        ageProfile.declare(target, nowMs) != null
+    fun declareAge(target: AgeState, nowMs: Long = System.currentTimeMillis()): Boolean {
+        val ok = ageProfile.declare(target, nowMs) != null
+        // Undoing a wrong "child" choice must not leave a request behind that could later re-lock the adult.
+        if (ok && target == AgeState.ADULT) cancelOwnPendingChildLinks(nowMs)
+        return ok
+    }
+
+    private fun cancelOwnPendingChildLinks(nowMs: Long) {
+        val pending = familyLinks().filter { it.status == FamilyLinkStatus.PENDING }
+        if (pending.isEmpty()) return
+        val self = selfIdProvider()
+        pending.filter { it.childId == self && it.initiator == self }.forEach { revokeFamilyLink(it.id, nowMs) }
+    }
 
     val onboardingState: Flow<OnboardingState>
         get() = combine(settings.ageStateFlow, data.familyLinks().all(), data.guardianConsents().all()) { _, _, _ -> }

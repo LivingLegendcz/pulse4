@@ -140,7 +140,7 @@ Když přestanete sdílet, odeberete někoho z okruhu nebo (u dítěte) rodič s
 
 ## 8. Děti a schvalování rodičem
 
-*Tento oddíl platí od verze [X.Y] (ve vývoji) a popisuje zamýšlené chování. Dokud tato verze nevyjde, aplikace se na věk ještě neptá a schválení rodičem nevynucuje.*
+*Tento oddíl platí od verze 0.2.4.*
 
 Pulse4 je navržen tak, aby ho mohly s účastí rodiče používat i děti od 6 let. Aplikace uplatňuje tato pravidla.
 
@@ -245,7 +245,7 @@ Garmin, Withings, Google, Esri, OpenStreetMap, OpenTopoMap, CyclOSM, CARTO a Ret
 ## Poznámky k nasazení (nejsou součástí zásad)
 
 - Google Play vyžaduje **veřejnou, needitovatelnou URL** zásad ochrany soukromí, dostupnou bez přihlášení, a tytéž zásady musí být odkazované i v aplikaci. Tento soubor (i anglickou verzi) zveřejněte přes **GitHub Pages**, nebo jako URL použijte zobrazení souboru v repozitáři. Stabilní vykreslená stránka je lepší než surový Markdown.
-- Před zveřejněním nahraďte zástupné texty `[JMÉNO A POŠTOVNÍ ADRESA POSKYTOVATELE]` a `[X.Y]`.
+- Před zveřejněním nahraďte zástupný text `[JMÉNO A POŠTOVNÍ ADRESA POSKYTOVATELE]`.
 - Oddíl 8 popisuje funkci ve vývoji. Nezveřejňujte ho jako současné chování, dokud nevyjde verze, která ji obsahuje, a každé tvrzení znovu ověřte proti vydanému kódu.
 - Položky, které je třeba ještě ověřit proti oficiálním zdrojům, jsou v [PRIVACY_OPEN_ITEMS.md](PRIVACY_OPEN_ITEMS.md). Nepopisujte tyto zásady jako vyhovující jakémukoli zákonu či pravidlům obchodu, dokud nejsou vyřešeny.
 - Odpovědi ve formuláři „Bezpečnost údajů“ (Data safety) v Play Console udržujte v souladu s tímto dokumentem.

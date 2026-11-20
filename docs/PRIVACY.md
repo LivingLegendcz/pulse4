@@ -140,7 +140,7 @@ When you stop sharing, remove someone from a circle, or (for a child) a parent w
 
 ## 8. Children and parental approval
 
-*This section applies from version [X.Y] (in development) and describes the intended behaviour. Until that version is released, the app does not yet ask for an age and does not enforce guardian approval.*
+*This section applies from version 0.2.4.*
 
 Pulse4 is designed so that it can also be used by children from 6 years of age with a parent's involvement. These are the rules the app applies.
 
@@ -245,7 +245,7 @@ Garmin, Withings, Google, Esri, OpenStreetMap, OpenTopoMap, CyclOSM, CARTO and R
 ## Deployment notes (not part of the policy)
 
 - Google Play requires a **public, non-editable URL** for the privacy policy, reachable without sign-in, and the same policy must also be linked inside the app. Publish this file (and the Czech version) via **GitHub Pages**, or use the repository file view as the URL. A stable, rendered page is preferable to a raw Markdown view.
-- Before publishing, replace the placeholders `[PROVIDER NAME AND POSTAL ADDRESS]` and `[X.Y]`.
+- Before publishing, replace the placeholder `[PROVIDER NAME AND POSTAL ADDRESS]`.
 - Section 8 describes a feature in development. Do not publish it as current behaviour until the release containing it ships, and re-verify every statement against the shipped code.
 - Items that still need verification against official sources are listed in [PRIVACY_OPEN_ITEMS.md](PRIVACY_OPEN_ITEMS.md). Do not describe this policy as compliant with any law or store policy until they are resolved.
 - Keep the Play Console "Data safety" answers consistent with this document.

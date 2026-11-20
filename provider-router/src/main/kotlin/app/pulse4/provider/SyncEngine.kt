@@ -37,7 +37,19 @@ data class AreaState(
 )
 
 /** [tombstones]: ID pozorování, která zdroj už nevrací (smazaná/opravená u poskytovatele); sink je označí jako smazaná. */
-data class Batch(val items: List<MetricObservation>, val nextCursorMs: Long, val tombstones: List<String> = emptyList())
+data class Batch(
+    val items: List<MetricObservation>,
+    val nextCursorMs: Long,
+    val tombstones: List<String> = emptyList(),
+    /**
+     * Diagnostika po metrikách ve tvaru `METRIKA=Kód` (např. `SPO2=Forbidden`, `STEPS=EmptyResponse`). Dávka se přesto
+     * uloží; engine kódy zapíše do [AreaState.lastError] jako [PARTIAL_PREFIX]-hodnotu, aby chyba jedné metriky byla vidět.
+     */
+    val warnings: List<String> = emptyList(),
+)
+
+/** Předpona `AreaState.lastError` pro oblast, která se uložila, ale některá metrika se nestáhla nebo přišla prázdná. */
+const val PARTIAL_PREFIX = "Partial:"
 
 interface AreaFetcher {
     /** Stáhne data od [sinceMs] (včetně překryvu). Při chybě vyhazuje [ProviderError]. */
@@ -94,7 +106,9 @@ class SyncEngine(
                 // 2) teprve potom posunout kurzor; kurzor se nikdy nevrací zpět kvůli překryvu
                 states.put(area, AreaState(
                     cursorMs = maxOf(batch.nextCursorMs, st.cursorMs ?: Long.MIN_VALUE),
-                    lastSuccessMs = nowMs, lastAttemptMs = nowMs, lastError = null, retryNotBeforeMs = null,
+                    lastSuccessMs = nowMs, lastAttemptMs = nowMs,
+                    lastError = if (batch.warnings.isEmpty()) null else PARTIAL_PREFIX + batch.warnings.joinToString(","),
+                    retryNotBeforeMs = null,
                 ))
                 return AreaResult.Success(batch.items.size)
             } catch (e: ProviderError) {

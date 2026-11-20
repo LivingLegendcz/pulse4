@@ -232,18 +232,19 @@ class ShippedConfigTest {
         assertTrue(cfg.endpoints.all { it.verified }, "Všechny dodané endpointy musí být ověřené proti vzorkům")
     }
 
-    @Test fun `RESTING_HEART_RATE, STEPS and STRESS map cleanly from real dailysummaries sample and skip sentinels`() {
+    @Test fun `RESTING_HEART_RATE, STEPS and STRESS map cleanly from the dailysummaries sample (fallback specs) and skip sentinels`() {
         val cfg = GarminEndpointsConfig.parse(file.readText())
         val sampleJson = java.io.File("../docs/samples/dailysummaries.json").readText()
-        val rhr = ResponseMapper.map(cfg.endpoints.first { it.metric == MetricType.RESTING_HEART_RATE }, sampleJson, "acc", "Europe/Prague")
+        fun fb(m: MetricType) = cfg.endpoints.first { it.metric == m && it.fallback }
+        val rhr = ResponseMapper.map(fb(MetricType.RESTING_HEART_RATE), sampleJson, "acc", "Europe/Prague")
         assertEquals(0, rhr.skipped)
         assertEquals(listOf(60.0, 60.0, 60.0, 60.0), rhr.items.map { it.value })
 
-        val steps = ResponseMapper.map(cfg.endpoints.first { it.metric == MetricType.STEPS }, sampleJson, "acc", "Europe/Prague")
+        val steps = ResponseMapper.map(fb(MetricType.STEPS), sampleJson, "acc", "Europe/Prague")
         assertEquals(0, steps.skipped)
         assertEquals(listOf(8000.0, 5000.0, 7000.0, 4500.0), steps.items.map { it.value })
 
-        val stressSpec = cfg.endpoints.first { it.metric == MetricType.STRESS }
+        val stressSpec = fb(MetricType.STRESS)
         val stress = ResponseMapper.map(stressSpec, sampleJson, "acc", "Europe/Prague")
         assertEquals(0, stress.skipped)
         assertEquals(listOf(25.0, 25.0, 25.0, 25.0), stress.items.map { it.value })
@@ -264,8 +265,8 @@ class ShippedConfigTest {
               ]
             }
         """.trimIndent()
-        assertEquals(1, ResponseMapper.map(cfg.endpoints.first { it.metric == MetricType.RESTING_HEART_RATE }, sentinelJson, "acc", "Europe/Prague").skipped)
-        assertEquals(1, ResponseMapper.map(cfg.endpoints.first { it.metric == MetricType.STEPS }, sentinelJson, "acc", "Europe/Prague").skipped)
+        assertEquals(1, ResponseMapper.map(fb(MetricType.RESTING_HEART_RATE), sentinelJson, "acc", "Europe/Prague").skipped)
+        assertEquals(1, ResponseMapper.map(fb(MetricType.STEPS), sentinelJson, "acc", "Europe/Prague").skipped)
         assertEquals(1, ResponseMapper.map(stressSpec, sentinelJson, "acc", "Europe/Prague").skipped)
     }
 
@@ -288,7 +289,7 @@ class ShippedConfigTest {
             }
         """.trimIndent()
         for (m in listOf(MetricType.RESTING_HEART_RATE, MetricType.STEPS, MetricType.STRESS)) {
-            val spec = cfg.endpoints.first { it.metric == m }
+            val spec = cfg.endpoints.first { it.metric == m && it.fallback }
             val first = ResponseMapper.map(spec, body("2026-11-18T10:15:00.0", 58, 4200, 21), "acc", "Europe/Prague").items.single()
             val second = ResponseMapper.map(spec, body("2026-11-18T18:45:00.0", 57, 8900, 26), "acc", "Europe/Prague").items.single()
             assertEquals(first.id, second.id, "${m.name} klíč nesmí záviset na posouvajícím se endTimestampGmt")
@@ -356,5 +357,66 @@ class ShippedConfigTest {
         val mapped = ResponseMapper.map(bbSpec, sampleJson, "acc", "Europe/Prague")
         assertEquals(0, mapped.items.size)
         assertEquals(1, mapped.skipped)
+    }
+    // --- obnova metrik 0.1.x: staré cesty jsou primární, dailysummaries je záloha ---
+
+    @Test fun `RHR, STEPS and STRESS use the 0_1_x paths as primary and dailysummaries as fallback`() {
+        val cfg = GarminEndpointsConfig.parse(file.readText())
+        val expectedPrimary = mapOf(
+            MetricType.RESTING_HEART_RATE to "/wellness-service/wellness/dailyHeartRate?date={from}",
+            MetricType.STEPS to "/usersummary-service/stats/steps/daily/{from}/{to}",
+            MetricType.STRESS to "/usersummary-service/stats/stress/daily/{from}/{to}",
+        )
+        for ((m, path) in expectedPrimary) {
+            val specs = cfg.endpoints.filter { it.metric == m }
+            assertEquals(2, specs.size, "$m: primární + záložní položka")
+            assertEquals(path, specs[0].path); assertTrue(!specs[0].fallback)
+            assertTrue(specs[1].fallback && specs[1].path.startsWith("/usersummary-service/v2/dailysummaries"))
+            assertEquals(specs[0].area, specs[1].area)
+        }
+        // Body Battery zůstává na dailysummaries (číselná úroveň `latestValue`); `charged` ze starého endpointu je jiná veličina.
+        assertEquals(1, cfg.endpoints.count { it.metric == MetricType.BODY_BATTERY })
+    }
+
+    @Test fun `0_1_x path samples map cleanly (synthetic fixtures derived from the official OpenAPI schema)`() {
+        val cfg = GarminEndpointsConfig.parse(file.readText())
+        fun primary(m: MetricType) = cfg.endpoints.first { it.metric == m && !it.fallback }
+        fun sample(name: String) = java.io.File("../docs/samples/$name").readText()
+
+        val rhr = ResponseMapper.map(primary(MetricType.RESTING_HEART_RATE), sample("heartrate.json"), "acc", "Europe/Prague")
+        assertEquals(0, rhr.skipped)
+        assertEquals(56.0, rhr.items.single().value)
+        assertEquals("2025-01-15", rhr.items.single().localDate)
+
+        val steps = ResponseMapper.map(primary(MetricType.STEPS), sample("steps.json"), "acc", "Europe/Prague")
+        assertEquals(0, steps.skipped)
+        assertEquals(listOf(8000.0, 5000.0, 7000.0, 4500.0), steps.items.map { it.value })
+        assertEquals(listOf("2025-01-12", "2025-01-13", "2025-01-14", "2025-01-15"), steps.items.map { it.localDate })
+
+        val stress = ResponseMapper.map(primary(MetricType.STRESS), sample("stress.json"), "acc", "Europe/Prague")
+        assertEquals(0, stress.skipped)
+        assertEquals(listOf(25.0, 31.0, 22.0), stress.items.map { it.value })
+    }
+
+    @Test fun `old path and dailysummaries produce the same canonical id for the same day so they never double count`() {
+        val cfg = GarminEndpointsConfig.parse(file.readText())
+        val ds = java.io.File("../docs/samples/dailysummaries.json").readText()
+        val steps = java.io.File("../docs/samples/steps.json").readText()
+        val a = ResponseMapper.map(cfg.endpoints.first { it.metric == MetricType.STEPS && !it.fallback }, steps, "acc", "Europe/Prague").items
+        val b = ResponseMapper.map(cfg.endpoints.first { it.metric == MetricType.STEPS && it.fallback }, ds, "acc", "Europe/Prague").items
+        assertEquals(a.map { it.id }, b.map { it.id })
+    }
+
+    @Test fun `OpenAPI object-shaped calendarDate and timestamps are accepted`() {
+        val cfg = GarminEndpointsConfig.parse(file.readText())
+        val spec = cfg.endpoints.first { it.metric == MetricType.RESTING_HEART_RATE && !it.fallback }
+        val body = """
+            {"calendarDate": {"date": "2025-01-15T00:00:00.000Z", "localDate": "2025-01-15"},
+             "startTimestampGMT": {"date": "2025-01-14T23:00:00.000Z", "localDate": "2025-01-15"},
+             "endTimestampGMT": {"date": "2025-01-15T23:00:00.000Z", "localDate": "2025-01-16"},
+             "restingHeartRate": 55}
+        """.trimIndent()
+        val item = ResponseMapper.map(spec, body, "acc", "Europe/Prague").items.single()
+        assertEquals(55.0, item.value); assertEquals("2025-01-15", item.localDate)
     }
 }

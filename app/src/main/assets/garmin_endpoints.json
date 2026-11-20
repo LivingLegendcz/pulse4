@@ -193,6 +193,22 @@
     {
       "area": "HEART_RATE",
       "metric": "RESTING_HEART_RATE",
+      "path": "/wellness-service/wellness/dailyHeartRate?date={from}",
+      "dateFormat": "yyyy-MM-dd",
+      "maxRangeDays": 1,
+      "itemsPath": "$",
+      "timePath": "startTimestampGMT",
+      "endTimePath": "endTimestampGMT",
+      "valuePath": "restingHeartRate",
+      "timeFormat": "ISO_INSTANT",
+      "scale": 1.0,
+      "localDatePath": "calendarDate",
+      "verified": true,
+      "sampleRef": "docs/samples/heartrate.json"
+    },
+    {
+      "area": "HEART_RATE",
+      "metric": "RESTING_HEART_RATE",
       "path": "/usersummary-service/v2/dailysummaries?startDate={from}&endDate={to}",
       "dateFormat": "yyyy-MM-dd",
       "maxRangeDays": 27,
@@ -204,7 +220,23 @@
       "scale": 1.0,
       "localDatePath": "calendarDate",
       "verified": true,
-      "sampleRef": "docs/samples/dailysummaries.json"
+      "sampleRef": "docs/samples/dailysummaries.json",
+      "fallback": true
+    },
+    {
+      "area": "STEPS_STRESS",
+      "metric": "STEPS",
+      "path": "/usersummary-service/stats/steps/daily/{from}/{to}",
+      "dateFormat": "yyyy-MM-dd",
+      "maxRangeDays": 27,
+      "itemsPath": "",
+      "timePath": "calendarDate",
+      "valuePath": "totalSteps",
+      "timeFormat": "ISO_INSTANT",
+      "scale": 1.0,
+      "localDatePath": "calendarDate",
+      "verified": true,
+      "sampleRef": "docs/samples/steps.json"
     },
     {
       "area": "STEPS_STRESS",
@@ -220,7 +252,23 @@
       "scale": 1.0,
       "localDatePath": "calendarDate",
       "verified": true,
-      "sampleRef": "docs/samples/dailysummaries.json"
+      "sampleRef": "docs/samples/dailysummaries.json",
+      "fallback": true
+    },
+    {
+      "area": "STEPS_STRESS",
+      "metric": "STRESS",
+      "path": "/usersummary-service/stats/stress/daily/{from}/{to}",
+      "dateFormat": "yyyy-MM-dd",
+      "maxRangeDays": 27,
+      "itemsPath": "",
+      "timePath": "calendarDate",
+      "valuePath": "values.overallStressLevel",
+      "timeFormat": "ISO_INSTANT",
+      "scale": 1.0,
+      "localDatePath": "calendarDate",
+      "verified": true,
+      "sampleRef": "docs/samples/stress.json"
     },
     {
       "area": "STEPS_STRESS",
@@ -236,7 +284,8 @@
       "scale": 1.0,
       "localDatePath": "calendarDate",
       "verified": true,
-      "sampleRef": "docs/samples/dailysummaries.json"
+      "sampleRef": "docs/samples/dailysummaries.json",
+      "fallback": true
     },
     {
       "area": "HEART_RATE",

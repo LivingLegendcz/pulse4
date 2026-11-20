@@ -3,6 +3,7 @@ package app.pulse4.ui
 import app.pulse4.domain.Provider
 import app.pulse4.provider.AreaResult
 import app.pulse4.provider.AreaStatus
+import app.pulse4.provider.PARTIAL_PREFIX
 import app.pulse4.provider.ProviderError
 import app.pulse4.provider.RetryAction
 import app.pulse4.sharing.Field
@@ -126,7 +127,30 @@ object Labels {
         "NotConfigured" -> "Chybí ověřená konfigurace."
         "Server" -> "Chyba serveru služby."
         "Timeout" -> "Spojení vypršelo."
-        else -> code
+        "EmptyResponse" -> "Služba nevrátila žádná data."
+        else -> if (code.startsWith(PARTIAL_PREFIX)) partialSyncError(code.removePrefix(PARTIAL_PREFIX)) else code
+    }
+
+    /** `RESTING_HEART_RATE=Forbidden,STEPS=EmptyResponse` → čitelný český výčet metrik, které se nestáhly nebo přišly prázdné. */
+    private fun partialSyncError(list: String): String {
+        val parts = list.split(',').filter { it.isNotBlank() }.map { item ->
+            val metric = item.substringBefore('=')
+            val code = item.substringAfter('=', "")
+            "${metricName(metric)}: ${syncError(code)}"
+        }
+        return "Část metrik se nestáhla – " + parts.joinToString("; ")
+    }
+
+    private fun metricName(name: String): String = when (name) {
+        "RESTING_HEART_RATE" -> "Klidový tep"
+        "STEPS" -> "Kroky"
+        "STRESS" -> "Stres"
+        "BODY_BATTERY" -> "Body Battery"
+        "SPO2" -> "SpO2"
+        "HRV" -> "HRV"
+        "WEIGHT" -> "Váha"
+        "BODY_FAT" -> "Tělesný tuk"
+        else -> name
     }
 
     fun action(a: RetryAction) = when (a) {

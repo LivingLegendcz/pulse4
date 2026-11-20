@@ -86,6 +86,16 @@ class FormatLabelsTest {
         assertEquals("Vlastní zpráva", Labels.syncError("Vlastní zpráva"))
     }
 
+    @Test fun `per-metric partial sync errors are readable and keep unknown codes verbatim`() {
+        assertTrue(Labels.syncError("EmptyResponse").contains("žádná data"))
+        val text = Labels.syncError("Partial:RESTING_HEART_RATE=Forbidden,STEPS=EmptyResponse,SPO2=Server")
+        assertTrue(text.startsWith("Část metrik se nestáhla"))
+        assertTrue(text.contains("Klidový tep: Služba odmítla přístup"))
+        assertTrue(text.contains("Kroky: Služba nevrátila žádná data"))
+        assertTrue(text.contains("SpO2: Chyba serveru"))
+        assertTrue(Labels.syncError("Partial:FOO=Bar").contains("FOO: Bar"))
+    }
+
     @Test fun `revocation text lists exactly the limits that apply, never promises recall`() {
         val all = Labels.revocation(RevocationLimit.entries)
         assertEquals(3, all.size); assertTrue(all[0].contains("nelze spolehlivě vzít zpět"))

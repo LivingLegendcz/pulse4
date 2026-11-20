@@ -2231,40 +2231,8 @@ class ShareService internal constructor(
 
     fun saveGroup(g: Group) = data.grants().upsertGroup(GroupRow(g.id, g.version, json.encodeToString(Group.serializer(), g)))
 
-    private fun scopeCovers(outer: app.pulse4.sharing.TimeScope, inner: app.pulse4.sharing.TimeScope): Boolean {
-        val outerFrom = outer.from?.let { runCatching { LocalDate.parse(it) }.getOrNull() } ?: return false
-        val innerFrom = inner.from?.let { runCatching { LocalDate.parse(it) }.getOrNull() } ?: return false
-        if (innerFrom.isBefore(outerFrom)) return false
-        if (outer.kind == app.pulse4.sharing.TimeScope.Kind.ONCE) {
-            if (inner.kind != app.pulse4.sharing.TimeScope.Kind.ONCE) return false
-            val outerTo = outer.to?.let { runCatching { LocalDate.parse(it) }.getOrNull() } ?: return false
-            val innerTo = inner.to?.let { runCatching { LocalDate.parse(it) }.getOrNull() } ?: return false
-            if (innerTo.isAfter(outerTo)) return false
-        }
-        return true
-    }
-
-    internal fun isGrantNarrowing(existingGrants: List<ShareGrant>, candidate: ShareGrant): Boolean {
-        if (existingGrants.isEmpty() || !candidate.active) return false
-        val activeExisting = existingGrants.filter { it.active && it.ownerId == candidate.ownerId }
-        if (activeExisting.isEmpty()) return false
-        if (candidate.recipients.isEmpty()) return true
-        return candidate.recipients.all { recipient ->
-            val grantsForRecipient = activeExisting.filter { recipient in it.recipients }
-            if (grantsForRecipient.isEmpty()) return@all false
-            val fieldsCovered = candidate.fields.all { field ->
-                grantsForRecipient.any { g ->
-                    field in g.fields &&
-                        (g.sources == null || (candidate.sources != null && candidate.sources!!.all { it in g.sources!! })) &&
-                        scopeCovers(g.scope, candidate.scope)
-                }
-            }
-            val planRightsCovered = candidate.planRights.all { (planId, right) ->
-                grantsForRecipient.any { g -> (g.planRights[planId]?.ordinal ?: -1) >= right.ordinal }
-            }
-            fieldsCovered && planRightsCovered
-        }
-    }
+    internal fun isGrantNarrowing(existingGrants: List<ShareGrant>, candidate: ShareGrant): Boolean =
+        app.pulse4.sharing.GuardianConsentPolicy.isGrantNarrowing(existingGrants, candidate)
 
     fun saveGrantWithPolicy(grant: ShareGrant, guardianCoConsentAtMs: Long? = null): Result<ShareGrant> {
         if (!grant.active) {

@@ -22,7 +22,7 @@ import kotlinx.coroutines.withContext
 private val Context.services get() = (applicationContext as Pulse4App).services
 
 /**
- * Import z Garminu. Potřebuje internet. Výsledek (včetně chyb po oblastech) se ukládá do `area_state`;
+ * Periodický import (Garmin, Withings, Health Connect) a údržba relací. Potřebuje internet. Výsledek (včetně chyb po oblastech) se ukládá do `area_state`;
  * úloha sama vždy skončí úspěšně, aby periodický plán nezanikl a stav byl čitelný v UI, ne ve frontě workeru.
  */
 class ImportWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
@@ -35,31 +35,20 @@ class ImportWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx
         }
         // R4-1: poškozený nebo zamčený klíč nesmí shodit worker; zkusí se znovu podle backoffu.
         if (!sl.awaitStartupReady()) return@withContext Result.retry()
-        val now = System.currentTimeMillis()
-        // Automatický (periodický) běh nesmí navázat na čerstvý import (ruční nebo ze služby); přežívá restart procesu.
-        if (!isManual) {
-            val last = runCatching { sl.settings.lastImportAtMs }.getOrNull()
-            val decision = AutoImportPolicy.decide(
-                nowMs = now,
-                lastImportAtMs = last,
-                processStartMs = null, // worker často sám startuje proces; ochranná lhůta by ho vyhladověla
-                minIntervalMs = AutoImportPolicy.WORKER_MIN_INTERVAL_MS,
-            )
-            if (!decision.runNow) return@withContext Result.success()
+        val runner = AutoSyncRunner.forServices(sl)
+        // Manuální běh ignoruje intervaly. Automatický běh provede jen to, co je podle plánovače splatné:
+        // import každého poskytovatele podle jeho intervalu a keepalive relace Withings na vlastní frekvenci
+        // (keepalive není vázán na AutoImportPolicy ani na single-flight import).
+        val importRan = if (isManual) {
+            runner.runManual()
+            true
+        } else {
+            // Worker často sám startuje proces, takže se neuplatňuje ochranná lhůta po startu.
+            runner.tick(processStartMs = null, toleranceMs = AutoSyncPlanner.WORKER_TOLERANCE_MS)
+                .ran.any { it != SyncTask.WITHINGS_KEEPALIVE }
         }
-        runCatching { sl.settings.lastImportAtMs = now }
-        // 1. Garmin proaktivní keepalive a import
-        runCatching { sl.garminExt.ensureSession() }
-        runCatching { sl.importService.runAll(now) }
-
-        // 2. Withings proaktivní keepalive (import běží v importService.runAll)
-        runCatching {
-            sl.withings.renewSession()
-        }
-
-        if (sl.settings.healthConnectEnabled) runCatching { sl.healthConnect.sync(now, background = true) }
         // Po úspěšném importu zkusit hned odeslat nové projekce, ať nečekají na další interval.
-        if (applicationContext.services.settings.networkMode != NetworkMode.MANUAL) Scheduler.shareNow(applicationContext)
+        if (importRan && applicationContext.services.settings.networkMode != NetworkMode.MANUAL) Scheduler.shareNow(applicationContext)
         Result.success()
     }
 }

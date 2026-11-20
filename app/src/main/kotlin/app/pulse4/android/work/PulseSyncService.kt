@@ -33,7 +33,8 @@ import kotlinx.coroutines.withTimeoutOrNull
 /**
  * Úsporná trvalá služba na pozadí (styl Threema / Meshtastic):
  * - Po startu telefonu udržuje Reticulum TCP/Wi-Fi spojení (push-driven přes onEventReceived, bez zbytečného pollingu).
- * - Každých 15 minut (jen při dostupné síti) tiše dotáhne data z Garminu, Withings a Health Connect.
+ * - Podle nastavených intervalů (jen při dostupné síti) tiše dotáhne data z Garminu a Withings (+ Health Connect)
+ *   a udržuje relaci Withings při životě.
  * - Používá tichou notifikaci s nejnižší prioritou (IMPORTANCE_MIN), aby uživatele nerušila.
  */
 class PulseSyncService : Service() {
@@ -41,7 +42,6 @@ class PulseSyncService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val wakeSignal = Channel<Unit>(Channel.CONFLATED)
     private var loopJob: Job? = null
-    private var lastImportAtMs: Long = 0L
     private var lastNotifText: String = ""
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -113,26 +113,19 @@ class PulseSyncService : Service() {
                 lastHeartbeatAtMs.set(now)
                 val online = hasActiveNetwork()
 
-                // 1. Periodické stahování zdravotních dat ze zdrojů (každých 15 min, jen když je síť).
-                // Poslední import se drží i v nastavení, takže restart procesu / otevření aplikace nespustí
-                // okamžitý sync; navíc je po startu procesu ochranná lhůta (AutoImportPolicy.STARTUP_GRACE_MS).
-                val persistedLast = runCatching { sl.settings.lastImportAtMs }.getOrNull()
-                val decision = AutoImportPolicy.decide(
-                    nowMs = now,
-                    lastImportAtMs = listOfNotNull(persistedLast, lastImportAtMs.takeIf { it > 0L }).maxOrNull(),
-                    processStartMs = AppProcess.startedAtMs,
-                )
-                if (online && decision.runNow) {
-                    lastImportAtMs = now
-                    runCatching { sl.settings.lastImportAtMs = now }
-                    runCatching { sl.garminExt.ensureSession() }
-                    runCatching { sl.importService.runAll(now) }
-                    runCatching {
-                        sl.withings.renewSession()
-                    }
-                    if (sl.settings.healthConnectEnabled) {
-                        runCatching { sl.healthConnect.sync(now, background = true) }
-                    }
+                // 1. Automatická práce podle plánovače: import každého poskytovatele podle jeho intervalu
+                // (Garmin 15 min, Withings 1 h, nastavitelné) a keepalive relace Withings na vlastní frekvenci.
+                // Časy posledního importu jsou perzistentní, takže restart procesu / otevření aplikace nespustí
+                // okamžitý sync; po startu procesu platí ochranná lhůta jen pro importy (AutoImportPolicy),
+                // keepalive jí vázán není.
+                var nextWakeMs: Long? = null
+                var tickRan = false
+                if (online) {
+                    val result = runCatching {
+                        AutoSyncRunner.forServices(sl).tick(processStartMs = AppProcess.startedAtMs, toleranceMs = 0L)
+                    }.onFailure { PLog.w(TAG, it) { "Auto sync tick failed" } }.getOrNull()
+                    nextWakeMs = result?.nextWakeMs
+                    tickRan = result != null
                 }
 
                 // 2. RNS / LXMF výměna: naplánovat případné nové projekce a odeslat čekající položky.
@@ -153,11 +146,10 @@ class PulseSyncService : Service() {
 
                 updateNotification(statusText(sl))
 
-                // Úsporné čekání: probudí se buď okamžitě na požadavek (ACTION_SYNC_NOW), nebo za 10 minut.
-                // Když je import jen odložen (ochranná lhůta / minimální interval), probudí se služba přesně
-                // v čase, kdy bude povolen, ne až za další plný tick.
-                val sleepMs = if (!decision.runNow && online) {
-                    decision.waitMs.coerceIn(MIN_WAKE_DELAY_MS, IDLE_TICK_DELAY_MS)
+                // Úsporné čekání: probudí se buď okamžitě na požadavek (ACTION_SYNC_NOW), nebo nejdéle za 10 minut
+                // (RNS). Když je nějaký import / keepalive naplánován dřív, probudí se služba přesně v ten čas.
+                val sleepMs = if (tickRan && nextWakeMs != null) {
+                    nextWakeMs.coerceIn(MIN_WAKE_DELAY_MS, IDLE_TICK_DELAY_MS)
                 } else {
                     IDLE_TICK_DELAY_MS
                 }

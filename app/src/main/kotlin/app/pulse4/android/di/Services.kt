@@ -3,6 +3,7 @@ package app.pulse4.android.di
 import android.content.Context
 import app.pulse4.analytics.ActivityMath
 import app.pulse4.android.data.*
+import app.pulse4.ui.SyncProvider
 import app.pulse4.android.net.OkHttpGateway
 import app.pulse4.android.reticulum.BridgeInfo
 import app.pulse4.android.reticulum.ExtendedGarminApi
@@ -1482,20 +1483,29 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
      * Spustí import všech oblastí; druhé souběžné volání se nefrontuje, ale hned vrátí `null`
      * („synchronizace již probíhá“). Vrací výsledek po oblastech.
      */
-    fun runAll(nowMs: Long): Map<SyncArea, AreaResult>? =
+    fun runAll(nowMs: Long, scope: ImportScope = ImportScope.ALL): Map<SyncArea, AreaResult>? =
         runAllGate.tryRun(onBusy = {
             PLog.i("ImportService") { "runAll skipped: another import is already running" }
             null
         }) {
             try {
-                runAllLocked(nowMs)
+                runAllLocked(nowMs, scope)
             } finally {
                 // Perzistentní čas posledního importu: automatický plán po restartu procesu nezačíná od nuly.
-                runCatching { sl.settings.lastImportAtMs = System.currentTimeMillis() }
+                val finishedAt = System.currentTimeMillis()
+                runCatching { sl.settings.lastImportAtMs = finishedAt }
+                if (scope.garmin) runCatching { sl.settings.markSynced(SyncProvider.GARMIN, finishedAt) }
+                if (scope.withings) runCatching { sl.settings.markSynced(SyncProvider.WITHINGS, finishedAt) }
             }
         }
 
-    private fun runAllLocked(nowMs: Long): Map<SyncArea, AreaResult>? = synchronized(syncLock) {
+    private fun runAllLocked(nowMs: Long, scope: ImportScope): Map<SyncArea, AreaResult>? = synchronized(syncLock) {
+        if (!scope.garmin) {
+            // Withings-only run (automatic per-provider schedule): skip the whole Garmin part.
+            runCatching { sl.withings.runImport(nowMs) }
+            runCatching { sl.withings.syncAndForwardChildWeights(nowMs) }
+            return@synchronized emptyMap()
+        }
         val cfg = config()
         val settings = sl.settings
         // Pokud je v GARMIN_API_KEY_EXPIRES uložena krátkodobá expirace access tokenu (<= 48 h), vyčistíme ji:
@@ -1646,8 +1656,10 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
                 AreaResult.Failed(app.pulse4.provider.ProviderError.Server(500))
             }
         }.getOrElse { AreaResult.Failed(app.pulse4.provider.ProviderError.Server(500)) }
-        runCatching { sl.withings.runImport(nowMs) }
-        runCatching { sl.withings.syncAndForwardChildWeights(nowMs) }
+        if (scope.withings) {
+            runCatching { sl.withings.runImport(nowMs) }
+            runCatching { sl.withings.syncAndForwardChildWeights(nowMs) }
+        }
         res?.plus(SyncArea.ACTIVITIES to actRes)
     }
 

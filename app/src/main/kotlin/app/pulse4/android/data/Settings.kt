@@ -2,6 +2,8 @@ package app.pulse4.android.data
 
 import app.pulse4.sharing.PrivacyZone
 import app.pulse4.sync.Wire
+import app.pulse4.ui.SyncProvider
+import app.pulse4.ui.SyncSchedule
 import app.pulse4.ui.UnitSystem
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -212,6 +214,39 @@ class Settings(private val dbProvider: () -> AppDatabase) {
     var lastImportAtMs: Long?
         get() = getRaw("import.lastAtMs")?.toLongOrNull()
         set(v) { if (v != null) put("import.lastAtMs", v.toString()) }
+
+    // --- Automatic import schedule (per provider) ---
+
+    /**
+     * Automatic import interval of [provider] in minutes; [SyncSchedule.OFF] = disabled. A missing key (fresh install
+     * or an upgrade from a version without this setting) yields the provider default, so no migration is needed.
+     */
+    fun syncIntervalMinutes(provider: SyncProvider): Int =
+        SyncSchedule.normalize(provider, getRaw(syncIntervalKey(provider))?.toIntOrNull())
+
+    fun setSyncIntervalMinutes(provider: SyncProvider, minutes: Int) {
+        put(syncIntervalKey(provider), SyncSchedule.normalize(provider, minutes).toString())
+    }
+
+    /**
+     * Time of the last automatic or manual import of [provider]. Falls back to the legacy global
+     * [lastImportAtMs] so the first start after an upgrade does not fire an immediate extra sync.
+     */
+    fun lastSyncAtMs(provider: SyncProvider): Long? =
+        getRaw(syncLastKey(provider))?.toLongOrNull() ?: lastImportAtMs
+
+    fun markSynced(provider: SyncProvider, atMs: Long) {
+        put(syncLastKey(provider), atMs.toString())
+    }
+
+    /** Last attempt of the Withings session keepalive (independent of the data import interval). */
+    var withingsKeepaliveAtMs: Long?
+        get() = getRaw("sync.withings.keepaliveAtMs")?.toLongOrNull()
+        set(v) { if (v != null) put("sync.withings.keepaliveAtMs", v.toString()) }
+
+    private fun syncIntervalKey(p: SyncProvider) = "sync.${p.key}.intervalMin"
+    private fun syncLastKey(p: SyncProvider) = "sync.${p.key}.lastAtMs"
+
     var gatewayHost: String get() = get("gatewayHost", ""); set(v) = put("gatewayHost", v)
     var gatewayPort: Int get() = get("gatewayPort", "4242").toInt(); set(v) = put("gatewayPort", v.toString())
     /** Uložený seznam P2P uzlů (ve tvaru host:port), které lze v nastavení přepínat, přidávat i odebírat. */

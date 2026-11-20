@@ -144,7 +144,7 @@ When you stop sharing, remove someone from a circle, or (for a child) a parent w
 
 Pulse4 is designed so that it can also be used by children from 6 years of age with a parent's involvement. These are the rules the app applies.
 
-**Age question.** When the app is first opened after installation, it asks whether the user is a child (under 18) or an adult. This is a **self-declaration**. The app cannot verify age and no information about it is sent to the provider.
+**Age question.** When the app is first opened after installation, it asks whether the user is a child (under 18) or an adult. This is a **self-declaration**. The app cannot verify age and no information about it is sent to the provider. Phones that already had the app before this feature was added are **not** asked: they are treated as adult automatically, unless the phone already had a verified link to a parent or had been set up as a child, in which case it stays a child phone. The question is only shown on a new installation.
 
 **Adult.** The app works normally.
 

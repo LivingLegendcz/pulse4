@@ -144,7 +144,7 @@ Když přestanete sdílet, odeberete někoho z okruhu nebo (u dítěte) rodič s
 
 Pulse4 je navržen tak, aby ho mohly s účastí rodiče používat i děti od 6 let. Aplikace uplatňuje tato pravidla.
 
-**Otázka na věk.** Při prvním otevření po instalaci se aplikace zeptá, zda je uživatel dítě (do 18 let), nebo dospělý. Jde o **vlastní prohlášení**. Aplikace věk nemůže ověřit a žádná informace o něm se poskytovateli neposílá.
+**Otázka na věk.** Při prvním otevření po instalaci se aplikace zeptá, zda je uživatel dítě (do 18 let), nebo dospělý. Jde o **vlastní prohlášení**. Aplikace věk nemůže ověřit a žádná informace o něm se poskytovateli neposílá. Telefony, které aplikaci používaly už před přidáním této funkce, se **neptají**: automaticky se považují za dospělé, pokud na nich už není ověřená vazba na rodiče nebo nebyly nastaveny jako dětské – pak zůstávají dětským telefonem. Otázka se zobrazuje jen při nové instalaci.
 
 **Dospělý.** Aplikace funguje normálně.
 

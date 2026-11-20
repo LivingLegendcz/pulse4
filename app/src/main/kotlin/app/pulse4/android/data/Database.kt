@@ -74,6 +74,33 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Settings key written by [FRESH_INSTALL_CALLBACK] when the database file is created from scratch. A database
+         * upgraded from an earlier schema (MIGRATION_x_y) never goes through `onCreate`, so the marker is absent there.
+         * `ServiceMigrations.migrateGuardianConsent` uses it to tell a fresh install (asked for the age) from an
+         * upgraded one (becomes ADULT automatically). The row is inserted inside the creation transaction, so it is
+         * atomic with the database itself and survives process death before the service migration runs.
+         */
+        const val KEY_FRESH_INSTALL = "install.fresh_v4"
+
+        private const val FRESH_INSTALL_SQL =
+            "INSERT OR REPLACE INTO `setting` (`key`, `value`) VALUES ('$KEY_FRESH_INSTALL', '1')"
+
+        /**
+         * Production uses the SupportSQLite (SQLCipher) open helper -> the `SupportSQLiteDatabase` overload; the
+         * driver-based path (JVM tests) uses the `SQLiteConnection` overload. The insert is idempotent, so a double
+         * invocation is harmless.
+         */
+        val FRESH_INSTALL_CALLBACK = object : RoomDatabase.Callback() {
+            override fun onCreate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL(FRESH_INSTALL_SQL)
+            }
+
+            override fun onCreate(connection: androidx.sqlite.SQLiteConnection) {
+                connection.prepare(FRESH_INSTALL_SQL).use { it.step() }
+            }
+        }
+
         fun open(context: Context, vault: KeyVault): AppDatabase {
             System.loadLibrary("sqlcipher")
             // Heslo předáváme jako bajty; SupportOpenHelperFactory je po otevření vynuluje podle `clearPassphrase`.
@@ -81,6 +108,7 @@ abstract class AppDatabase : RoomDatabase() {
             return Room.databaseBuilder(context, AppDatabase::class.java, "pulse4.db")
                 .openHelperFactory(factory)
                 .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                .addCallback(FRESH_INSTALL_CALLBACK)
                 .allowMainThreadQueries()
                 // Žádné destruktivní migrace: archiv uživatele se nikdy nemaže kvůli změně schématu.
                 .build()

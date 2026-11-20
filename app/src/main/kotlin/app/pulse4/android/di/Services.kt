@@ -3553,9 +3553,10 @@ object ServiceMigrations {
      *  - a VERIFIED legacy link where this device is the MINOR child -> MINOR (source MIGRATION, locked to that
      *    guardian); its legacy grants/circles are kept but not effective until a guardian approves them;
      *  - a stored legacy `ownAgeProfile == MINOR` stays MINOR;
-     *  - everyone else -> UNKNOWN; existing grants and circles are grandfathered (keep flowing) until the age is
-     *    confirmed; new or widened sharing is blocked until then. Choosing ADULT makes everything effective, MINOR
-     *    suspends the grandfathered ones until approved.
+     *  - a FRESH install (the database was created by this version: [AppDatabase.KEY_FRESH_INSTALL] is present)
+     *    -> UNKNOWN, the first-run question is shown;
+     *  - everyone else is an upgraded install (product decision: no existing user is a child) -> ADULT
+     *    (source MIGRATION), no question; all existing and new sharing is effective.
      * An already stored v2 record is never overwritten.
      */
     fun migrateGuardianConsent(db: AppDatabase, settings: Settings, selfId: String, nowMs: Long = System.currentTimeMillis()) {
@@ -3566,6 +3567,7 @@ object ServiceMigrations {
                 .mapNotNull { runCatching { Wire.json.decodeFromString(FamilyLink.serializer(), it.json) }.getOrNull() }
                 .filter { it.status == FamilyLinkStatus.VERIFIED && it.childId == selfId && it.childAgeProfile == AgeProfile.MINOR }
             val legacy = settings.getRaw(AgeProfileManager.KEY_LEGACY_OWN_AGE)
+            val freshInstall = settings.getRaw(AppDatabase.KEY_FRESH_INSTALL) != null
             when {
                 guardianLinks.isNotEmpty() -> {
                     val founder = guardianLinks.minWith(compareBy({ it.verifiedAtMs ?: Long.MAX_VALUE }, { it.id }))
@@ -3574,19 +3576,10 @@ object ServiceMigrations {
                 }
                 legacy == AgeProfile.MINOR.name ->
                     age.initializeIfAbsent(AgeProfileRecord(AgeState.MINOR, AgeSource.MIGRATION, nowMs))
-                else -> {
+                freshInstall ->
                     age.initializeIfAbsent(AgeProfileRecord(AgeState.UNKNOWN, AgeSource.MIGRATION, nowMs))
-                    val grantIds = db.grants().allNow()
-                        .mapNotNull { runCatching { Wire.json.decodeFromString(ShareGrant.serializer(), it.json) }.getOrNull() }
-                        .filter { it.active && it.ownerId == selfId }
-                        .mapTo(LinkedHashSet()) { it.id }
-                    age.setGrandfatheredGrantIds(grantIds)
-                    val circleIds = db.grants().groupsNow()
-                        .mapNotNull { runCatching { Wire.json.decodeFromString(Group.serializer(), it.json) }.getOrNull() }
-                        .filter { !it.dissolved && selfId in it.members }
-                        .mapTo(LinkedHashSet()) { it.id }
-                    age.setGrandfatheredCircleIds(circleIds)
-                }
+                else ->
+                    age.initializeIfAbsent(AgeProfileRecord(AgeState.ADULT, AgeSource.MIGRATION, nowMs))
             }
         }
         settings.put(KEY_GUARDIAN_CONSENT_V1, "1")

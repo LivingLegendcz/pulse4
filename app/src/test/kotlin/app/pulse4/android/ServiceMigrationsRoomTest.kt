@@ -391,6 +391,53 @@ class ServiceMigrationsRoomTest {
     }
 
     @Test
+    fun `guardian consent migration tells a freshly created database from an upgraded one`() {
+        val (_, selfPubB64) = testPublicKey(9)
+        val (selfLxmf, _) = ServiceMigrations.deriveDeliveryHashes(selfPubB64)
+        val ctx = object : ContextWrapper(null) {
+            override fun getApplicationContext() = this
+            override fun getDatabasePath(name: String): File = File(name)
+        }
+        fun open(f: File, withCallback: Boolean): AppDatabase = Room.databaseBuilder(ctx, AppDatabase::class.java, f.absolutePath)
+            .setDriver(JdbcSqliteDriver())
+            .allowMainThreadQueries()
+            .apply { if (withCallback) addCallback(AppDatabase.FRESH_INSTALL_CALLBACK) }
+            .build()
+
+        // fresh: the callback runs on creation, the marker persists across reopen, the migration yields UNKNOWN
+        val fresh = File.createTempFile("pulse4-fresh-", ".db").also { it.delete() }
+        val upgraded = File.createTempFile("pulse4-upg-", ".db").also { it.delete() }
+        try {
+            var db = open(fresh, true)
+            assertEquals("1", Settings(db).getRaw(AppDatabase.KEY_FRESH_INSTALL))
+            db.close()
+            db = open(fresh, true) // process death before the service migration: marker is still there
+            val s1 = Settings(db)
+            assertEquals("1", s1.getRaw(AppDatabase.KEY_FRESH_INSTALL))
+            ServiceMigrations.migrateGuardianConsent(db, s1, selfLxmf, 10L)
+            assertEquals(app.pulse4.sharing.AgeState.UNKNOWN, s1.ageProfileManager.state)
+            db.close()
+
+            // upgraded: the database already exists, the callback (onCreate only) is attached but never fires
+            db = open(upgraded, false) // created by "the old version" without the marker
+            Settings(db).getRaw("touch") // Room creates the file lazily on first access
+            db.close()
+            db = open(upgraded, true)
+            val s2 = Settings(db)
+            assertNull(s2.getRaw(AppDatabase.KEY_FRESH_INSTALL))
+            ServiceMigrations.migrateGuardianConsent(db, s2, selfLxmf, 10L)
+            val rec = s2.ageProfileManager.current()
+            assertEquals(app.pulse4.sharing.AgeState.ADULT, rec.state)
+            assertEquals(app.pulse4.sharing.AgeSource.MIGRATION, rec.source)
+            db.close()
+        } finally {
+            listOf(fresh, upgraded).forEach { f ->
+                f.delete(); File("${f.absolutePath}-wal").delete(); File("${f.absolutePath}-shm").delete()
+            }
+        }
+    }
+
+    @Test
     fun `R2-2 fresh install without legacy plan revisions persists plan-lxmf8`() {
         val (_, selfPubB64) = testPublicKey(7)
         val (selfLxmf, selfLegacy) = ServiceMigrations.deriveDeliveryHashes(selfPubB64)

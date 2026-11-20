@@ -499,36 +499,73 @@ class GuardianConsentHandlersTest {
     }
 
     @Test
-    fun `8 migration grandfathers everyone else as UNKNOWN until the age is confirmed`() {
-        val u = Party("user", 1)
+    fun `8 upgraded install without a child link becomes ADULT with no first-run gate and everything effective`() {
+        val u = Party("user", 1) // no fresh-install marker: the database was upgraded, not created
         putLegacyGrant(u, "g-old")
         val circle = Group("c1", "Fam", u.id, u.id, setOf(u.id, "friend"), 1L)
         u.share.saveGroup(circle)
+        u.settings.put("ownAgeProfile", "ADULT") // legacy default
+        ServiceMigrations.migrateGuardianConsent(u.db, u.settings, u.id, now)
+        val rec = u.settings.ageProfileManager.current()
+        assertEquals(AgeState.ADULT, rec.state)
+        assertEquals(AgeSource.MIGRATION, rec.source)
+        assertEquals(now, rec.atMs)
+        assertEquals(OnboardingState.ADULT, u.share.onboardingStateNow())
+        // nothing is grandfathered, everything is simply effective
+        assertTrue(u.settings.ageProfileManager.grandfatheredGrantIds().isEmpty())
+        assertTrue(u.settings.ageProfileManager.grandfatheredCircleIds().isEmpty())
+        assertEquals(listOf("g-old"), u.share.effectiveGrants(now).map { it.id })
+        assertEquals(ConsentUiState.NOT_REQUIRED, u.share.consent.grantStates(u.share.grants(), u.id, now)["g-old"])
+        assertTrue(u.share.consent.isMembershipAllowed(u.id, "c1", now))
+        // new and widened sharing needs no approval
+        assertTrue(u.share.saveGrantWithPolicy(grant(u, "g-new")).isSuccess)
+        val old = u.share.grants().first { it.id == "g-old" }
+        assertTrue(u.share.saveGrantWithPolicy(old.copy(fields = setOf(Field.SLEEP_DURATION, Field.WEIGHT))).isSuccess)
+        assertEquals(setOf("g-old", "g-new"), u.share.effectiveGrants(now + 1).map { it.id }.toSet())
+        // idempotent
+        ServiceMigrations.migrateGuardianConsent(u.db, u.settings, u.id, now + 1)
+        assertEquals(now, u.settings.ageProfileManager.current().atMs)
+        assertEquals(AgeState.ADULT, u.share.ageState())
+    }
+
+    @Test
+    fun `8 fresh install stays UNKNOWN and shows the first-run question`() {
+        val u = Party("fresh", 1)
+        u.settings.put(AppDatabase.KEY_FRESH_INSTALL, "1") // what AppDatabase.FRESH_INSTALL_CALLBACK writes on creation
         ServiceMigrations.migrateGuardianConsent(u.db, u.settings, u.id, now)
         assertEquals(AgeState.UNKNOWN, u.share.ageState())
-        assertEquals(setOf("g-old"), u.settings.ageProfileManager.grandfatheredGrantIds())
-        assertEquals(listOf("g-old"), u.share.effectiveGrants(now).map { it.id })
-        assertEquals(ConsentUiState.GRANDFATHERED, u.share.consent.grantStates(u.share.grants(), u.id, now)["g-old"])
-        // new / widened sharing is blocked, narrowing is not
+        assertEquals(OnboardingState.UNKNOWN, u.share.onboardingStateNow())
+        assertTrue(u.settings.ageProfileManager.grandfatheredGrantIds().isEmpty())
+        // new sharing is blocked until the age is confirmed
         assertTrue(u.share.saveGrantWithPolicy(grant(u, "g-new")).exceptionOrNull() is AgeNotConfirmedException)
-        val old = u.share.grants().single()
-        assertTrue(u.share.saveGrantWithPolicy(old.copy(fields = setOf(Field.SLEEP_DURATION, Field.WEIGHT))).exceptionOrNull() is AgeNotConfirmedException)
-        assertTrue(u.share.saveGrantWithPolicy(old.copy(recipients = emptySet())).isSuccess)
-        // idempotent, and an existing v2 record is never overwritten
+        // idempotent, then the first-run choice works both ways
         ServiceMigrations.migrateGuardianConsent(u.db, u.settings, u.id, now + 1)
         assertEquals(AgeState.UNKNOWN, u.share.ageState())
-        // choosing ADULT makes everything effective; MINOR suspends the grandfathered ones
-        val adult = Party("adult", 2); putLegacyGrant(adult, "g-old")
-        ServiceMigrations.migrateGuardianConsent(adult.db, adult.settings, adult.id, now)
-        assertTrue(adult.share.declareAge(AgeState.ADULT, now))
-        assertEquals(listOf("g-old"), adult.share.effectiveGrants(now).map { it.id })
-        val minor = Party("minor", 3); putLegacyGrant(minor, "g-old")
+        assertTrue(u.share.declareAge(AgeState.ADULT, now + 2))
+        assertTrue(u.share.saveGrantWithPolicy(grant(u, "g-new")).isSuccess)
+
+        val minor = Party("fresh-minor", 3)
+        minor.settings.put(AppDatabase.KEY_FRESH_INSTALL, "1")
         ServiceMigrations.migrateGuardianConsent(minor.db, minor.settings, minor.id, now)
         assertTrue(minor.share.declareAge(AgeState.MINOR, now))
-        assertTrue(minor.share.effectiveGrants(now).isEmpty())
-        // grandfathered circle keeps working while UNKNOWN
-        assertTrue(u.share.consent.isMembershipAllowed(u.id, "c1", now))
-        assertTrue(minor.share.consent.isMembershipAllowed(minor.id, "c1", now).not())
+        assertEquals(AgeState.MINOR, minor.share.ageState())
+    }
+
+    @Test
+    fun `8 fresh answer given before the deferred migration is kept`() {
+        val u = Party("early", 1)
+        u.settings.put(AppDatabase.KEY_FRESH_INSTALL, "1")
+        assertTrue(u.share.declareAge(AgeState.MINOR, now)) // user answered while the migration was still deferred
+        ServiceMigrations.migrateGuardianConsent(u.db, u.settings, u.id, now + 1)
+        assertEquals(AgeState.MINOR, u.share.ageState())
+    }
+
+    @Test
+    fun `8 upgraded v2 record is never overwritten by the ADULT migration`() {
+        val u = Party("upgraded-minor-declared", 1)
+        assertTrue(u.share.declareAge(AgeState.MINOR, now))
+        ServiceMigrations.migrateGuardianConsent(u.db, u.settings, u.id, now + 1)
+        assertEquals(AgeState.MINOR, u.share.ageState())
     }
 
     @Test

@@ -283,6 +283,7 @@ class KeyVault internal constructor(
             }
         }
 
+        secrets.evictAll()
         val shouldResetDb = resetDatabaseToo || issue?.kind == CriticalSecretKind.DB_KEY
         if (shouldResetDb) {
             File(noBackupDir, DB_KEY_NAME).delete()
@@ -337,11 +338,60 @@ class SecretStore internal constructor(
         }
         val tmp = File(dir, "$name.tmp")
         tmp.writeBytes(vault.seal(value))
-        // Atomicky: pád uprostřed zápisu nesmí zničit předchozí hodnotu (např. rotující refresh token).
-        if (!tmp.renameTo(file(name))) {
-            file(name).delete()
-            check(tmp.renameTo(file(name))) { "Zápis tajemství selhal" }
+        invalidateCache(name)
+        try {
+            // Atomicky: pád uprostřed zápisu nesmí zničit předchozí hodnotu (např. rotující refresh token).
+            if (!tmp.renameTo(file(name))) {
+                file(name).delete()
+                check(tmp.renameTo(file(name))) { "Zápis tajemství selhal" }
+            }
+        } finally {
+            invalidateCache(name)
         }
+    }
+
+    /**
+     * Cache dešifrovaných NEKRITICKÝCH tajemství jen v paměti procesu (nikdy na disku). Keystore dešifrování
+     * (zvlášť StrongBox) stojí desítky ms a jedna obrazovka čte stejná tajemství opakovaně. Záznam platí jen
+     * dokud sedí velikost a čas změny souboru; `put` / `delete` / [evictAll] ho zahodí. Kritická tajemství
+     * (identita Reticulum) se nikdy necachují – jejich poškození se musí zjistit při každém čtení.
+     */
+    private class CachedSecret(val bytes: ByteArray, val lastModified: Long, val length: Long)
+
+    private val cacheLock = Any()
+    private val cache = HashMap<String, CachedSecret>()
+    private var cacheEpoch = 0L
+
+    private fun invalidateCache(name: String) = synchronized(cacheLock) {
+        cacheEpoch++
+        cache.remove(name)?.bytes?.fill(0)
+    }
+
+    /** Zahodí všechna cachovaná tajemství (obnova po poškození klíče, zamknutí, test). */
+    fun evictAll() = synchronized(cacheLock) {
+        cacheEpoch++
+        cache.values.forEach { it.bytes.fill(0) }
+        cache.clear()
+    }
+
+    private fun cachedOrNull(name: String, f: File): ByteArray? = synchronized(cacheLock) {
+        val hit = cache[name] ?: return null
+        if (hit.lastModified == f.lastModified() && hit.length == f.length()) return hit.bytes.copyOf()
+        cache.remove(name)?.bytes?.fill(0)
+        null
+    }
+
+    private fun readThroughCache(name: String, f: File, decrypt: () -> ByteArray): ByteArray {
+        cachedOrNull(name, f)?.let { return it }
+        val epochBefore = synchronized(cacheLock) { cacheEpoch }
+        val lm = f.lastModified()
+        val len = f.length()
+        val plain = decrypt()
+        synchronized(cacheLock) {
+            // Souběžný put/delete/evictAll mezi čtením a uložením znamená, že naše hodnota může být zastaralá.
+            if (cacheEpoch == epochBefore) cache[name] = CachedSecret(plain.copyOf(), lm, len)
+        }
+        return plain
     }
 
     fun get(name: String): ByteArray? {
@@ -384,7 +434,7 @@ class SecretStore internal constructor(
             }
         }
         return try {
-            vault.open(f.readBytes())
+            readThroughCache(name, f) { vault.open(f.readBytes()) }
         } catch (e: GeneralSecurityException) {
             PLog.w("SecretStore", e) { "Nečitelné ne-kritické tajemství '$name', vracím null" }
             null
@@ -418,7 +468,9 @@ class SecretStore internal constructor(
         if (name in OPERATIONAL_STATE_KEYS) {
             operationalStore.delete(name)
         }
+        invalidateCache(name)
         file(name).delete()
+        invalidateCache(name)
     }
 
     fun has(name: String): Boolean =

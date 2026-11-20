@@ -19,7 +19,7 @@ Pulse4 is a privacy-first Android app that gathers your fitness and health data 
 
 Provider: **[PROVIDER NAME AND POSTAL ADDRESS]**
 
-Contact for privacy questions: **[CONTACT EMAIL]**
+Contact for privacy questions: **pepe.kocourek@gmail.com**
 
 Because Pulse4 has no backend, the provider does not receive, store or process your health data and cannot look up, change or delete it for you. Questions about how the app works, or about this policy, can be sent to the contact above.
 
@@ -245,7 +245,7 @@ Garmin, Withings, Google, Esri, OpenStreetMap, OpenTopoMap, CyclOSM, CARTO and R
 ## Deployment notes (not part of the policy)
 
 - Google Play requires a **public, non-editable URL** for the privacy policy, reachable without sign-in, and the same policy must also be linked inside the app. Publish this file (and the Czech version) via **GitHub Pages**, or use the repository file view as the URL. A stable, rendered page is preferable to a raw Markdown view.
-- Before publishing, replace the placeholders `[PROVIDER NAME AND POSTAL ADDRESS]`, `[CONTACT EMAIL]` and `[X.Y]`.
+- Before publishing, replace the placeholders `[PROVIDER NAME AND POSTAL ADDRESS]` and `[X.Y]`.
 - Section 8 describes a feature in development. Do not publish it as current behaviour until the release containing it ships, and re-verify every statement against the shipped code.
 - Items that still need verification against official sources are listed in [PRIVACY_OPEN_ITEMS.md](PRIVACY_OPEN_ITEMS.md). Do not describe this policy as compliant with any law or store policy until they are resolved.
 - Keep the Play Console "Data safety" answers consistent with this document.

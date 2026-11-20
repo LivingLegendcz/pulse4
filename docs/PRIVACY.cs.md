@@ -19,7 +19,7 @@ Pulse4 je Android aplikace s důrazem na soukromí, která na jednom místě sb�
 
 Poskytovatel: **[JMÉNO A POŠTOVNÍ ADRESA POSKYTOVATELE]**
 
-Kontakt pro dotazy k ochraně soukromí: **[CONTACT EMAIL]**
+Kontakt pro dotazy k ochraně soukromí: **pepe.kocourek@gmail.com**
 
 Protože Pulse4 nemá žádný backend, poskytovatel vaše zdravotní údaje nepřijímá, neukládá ani nezpracovává a nemůže je za vás vyhledat, upravit ani smazat. Dotazy k fungování aplikace nebo k těmto zásadám můžete poslat na výše uvedený kontakt.
 
@@ -245,7 +245,7 @@ Garmin, Withings, Google, Esri, OpenStreetMap, OpenTopoMap, CyclOSM, CARTO a Ret
 ## Poznámky k nasazení (nejsou součástí zásad)
 
 - Google Play vyžaduje **veřejnou, needitovatelnou URL** zásad ochrany soukromí, dostupnou bez přihlášení, a tytéž zásady musí být odkazované i v aplikaci. Tento soubor (i anglickou verzi) zveřejněte přes **GitHub Pages**, nebo jako URL použijte zobrazení souboru v repozitáři. Stabilní vykreslená stránka je lepší než surový Markdown.
-- Před zveřejněním nahraďte zástupné texty `[JMÉNO A POŠTOVNÍ ADRESA POSKYTOVATELE]`, `[CONTACT EMAIL]` a `[X.Y]`.
+- Před zveřejněním nahraďte zástupné texty `[JMÉNO A POŠTOVNÍ ADRESA POSKYTOVATELE]` a `[X.Y]`.
 - Oddíl 8 popisuje funkci ve vývoji. Nezveřejňujte ho jako současné chování, dokud nevyjde verze, která ji obsahuje, a každé tvrzení znovu ověřte proti vydanému kódu.
 - Položky, které je třeba ještě ověřit proti oficiálním zdrojům, jsou v [PRIVACY_OPEN_ITEMS.md](PRIVACY_OPEN_ITEMS.md). Nepopisujte tyto zásady jako vyhovující jakémukoli zákonu či pravidlům obchodu, dokud nejsou vyřešeny.
 - Odpovědi ve formuláři „Bezpečnost údajů“ (Data safety) v Play Console udržujte v souladu s tímto dokumentem.

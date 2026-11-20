@@ -107,6 +107,8 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 2. **Žádný sběr telemetrie:** Aplikace neobsahuje Firebase Analytics, Crashlytics ani žádný jiný sledovací SDK kód.
 3. **P2P transport:** Síťová komunikace přes Reticulum nepoužívá IP adresy ani telefonní čísla; identity jsou odvozeny z asymetrických ed25519 klíčů.
 
+Úplné [Zásady ochrany osobních údajů](docs/PRIVACY.cs.md) ([English](docs/PRIVACY.md)) a [otevřené právní a distribuční body](docs/PRIVACY_OPEN_ITEMS.md).
+
 ---
 
 ## Licence

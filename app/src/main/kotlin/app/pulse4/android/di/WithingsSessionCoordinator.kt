@@ -9,13 +9,58 @@ interface WithingsAuthStateStore {
     fun delete(key: String)
 }
 
+/** Pure numbers of the re-authentication rate limiting; unit tested directly. */
+object WithingsReauthPolicy {
+    /** Minimum gap between two password logins, even after a success (loop guard for a session that keeps dying). */
+    const val PASSWORD_MIN_SPACING_MS = 10 * 60_000L
+
+    /** After this many consecutive failed re-auth attempts the UI is told; background retries continue anyway. */
+    const val ATTENTION_AFTER_FAILURES = 6
+
+    /** Without a stored password, silent SSO is the only rung: give up (human needed) after this many real failures. */
+    const val NO_PASSWORD_HARD_PAUSE_AFTER = 3
+
+    /** HTTP 429 / lockout in a row before it is treated as "account locked" and the user is asked. */
+    const val RATE_LIMIT_HARD_PAUSE_AFTER = 3
+
+    /** Consecutive transient `extend` failures after which a (possibly misclassified) expired session is re-authenticated. */
+    const val EXTEND_ESCALATE_AFTER_TRANSIENT = 3
+
+    private val FAILURE_COOLDOWNS_MS = longArrayOf(15 * 60_000L, 60 * 60_000L, 3 * 60 * 60_000L, 6 * 60 * 60_000L)
+    private val RATE_LIMIT_COOLDOWNS_MS = longArrayOf(2 * 60 * 60_000L, 6 * 60 * 60_000L, 24 * 60 * 60_000L)
+
+    /** Cooldown after the [failures]-th consecutive failed attempt: 15 min, 1 h, 3 h, then 6 h. */
+    fun failureCooldownMs(failures: Int): Long =
+        FAILURE_COOLDOWNS_MS[(failures - 1).coerceIn(0, FAILURE_COOLDOWNS_MS.lastIndex)]
+
+    /** Cooldown after the [hits]-th consecutive rate limit: 2 h, 6 h, then 24 h. */
+    fun rateLimitCooldownMs(hits: Int): Long =
+        RATE_LIMIT_COOLDOWNS_MS[(hits - 1).coerceIn(0, RATE_LIMIT_COOLDOWNS_MS.lastIndex)]
+}
+
 /**
- * Řídí obnovování webové relace Withings, circuit-breaker při chybách autentizace
- * a exponenciální backoff při síťových výpadcích.
+ * Keeps the Withings web session alive and re-authenticates silently when it dies.
  *
- * Pokud tiché SSO selže a uživatel si nechal zapamatovat heslo, zkusí se na pozadí jedno přihlášení
- * uloženým heslem nejvýše jednou za 6 h. Při chybném heslu (heslo se smaže), rate-limitu / lockoutu
- * nebo vyžádání 2FA kódu se auto-relogin pozastaví, dokud se uživatel znovu úspěšně nepřihlásí ručně.
+ * Ladder when the session is invalid (each rung only when the previous one cannot help):
+ * 1. `session?action=extend` (keepalive, cheap),
+ * 2. silent SSO through the long-lived `account.withings.com` cookies,
+ * 3. one login with the remembered e-mail + password.
+ *
+ * The user is prompted only when a human is really needed: a 2FA / e-mail code is demanded
+ * ([REASON_MFA_REQUIRED]), Withings rejected the password ([REASON_INVALID_CREDENTIALS]), the account stays rate
+ * limited / locked for days ([REASON_RATE_LIMITED]) or there is no stored password to renew with
+ * ([REASON_AUTH_ERROR]). Those are persisted "hard pauses" that only a successful manual login clears.
+ *
+ * Everything else is TIME-BASED and self-healing, never a permanent latch (the previous design paused for good after
+ * three unclassified failures and counted skipped attempts as failures, which silently killed background renewal and
+ * made the user log in by hand again and again):
+ * - network / server trouble: exponential backoff 1 -> 30 min ([recordNetworkFailure]);
+ * - failed re-auth attempts (counted per REAL attempt only, never per skipped call): cooldown 15 min -> 1 h -> 3 h -> 6 h
+ *   ([WithingsReauthPolicy.failureCooldownMs]); after [WithingsReauthPolicy.ATTENTION_AFTER_FAILURES] failures the UI is
+ *   told ([needsHumanInput]) but retries continue every 6 h;
+ * - HTTP 429 / lockout: cooldown 2 h -> 6 h -> 24 h, escalated to a hard pause after three in a row;
+ * - password logins are spaced at least [WithingsReauthPolicy.PASSWORD_MIN_SPACING_MS] apart even after a success, so a
+ *   session that keeps dying cannot turn into a login loop that hammers the account.
  */
 class WithingsSessionCoordinator(
     private val store: WithingsAuthStateStore,
@@ -29,6 +74,10 @@ class WithingsSessionCoordinator(
     /** Background login with the remembered password; must poll [shouldAbort] between HTTP requests. */
     private val loginPassword: (email: String, password: String) -> WithingsLoginResult,
     private val onSilentRefreshOk: (WithingsLoginResult.Ok, emailFallback: String?) -> Unit,
+    /**
+     * Called when the UI should ask the user (hard pause, or [WithingsReauthPolicy.ATTENTION_AFTER_FAILURES] failed
+     * attempts in a row). Only a hard pause is persisted and stops background renewal.
+     */
     private val onAuthPaused: (reason: String, message: String) -> Unit = { _, _ -> },
     private val onLog: (String) -> Unit = {},
     /** True when a manual (user) login is waiting; background renewal then stops between HTTP calls. */
@@ -38,14 +87,30 @@ class WithingsSessionCoordinator(
 
     fun pausedMessage(): String? = store.getString(KEY_PAUSED_MESSAGE)?.takeIf { it.isNotBlank() }
 
+    /** True while a persisted HARD pause is active (a human is required). Timed cooldowns do not count. */
     fun isAutoReloginPaused(): Boolean = pausedReason() != null
 
     fun netBackoffUntilMs(): Long = store.getString(KEY_NET_BACKOFF_UNTIL_MS)?.toLongOrNull() ?: 0L
 
-    fun clearAuthPauseAndBackoff() {
+    fun reauthCooldownUntilMs(): Long = store.getString(KEY_REAUTH_COOLDOWN_UNTIL_MS)?.toLongOrNull() ?: 0L
+
+    fun reauthFailures(): Int = store.getString(KEY_OTHER_AUTH_FAILURES)?.toIntOrNull() ?: 0
+
+    /**
+     * Whether the UI should prompt the user: a hard pause, or silent renewal failed so many times in a row that
+     * something outside our control is wrong. Plain backoff / cooldown / throttling never prompts.
+     */
+    fun needsHumanInput(): Boolean =
+        isAutoReloginPaused() || reauthFailures() >= WithingsReauthPolicy.ATTENTION_AFTER_FAILURES
+
+    fun clearAuthPauseAndBackoff(keepPasswordSpacing: Boolean = false) {
         store.delete(KEY_PAUSED_REASON)
         store.delete(KEY_PAUSED_MESSAGE)
         store.delete(KEY_OTHER_AUTH_FAILURES)
+        store.delete(KEY_RATE_LIMIT_HITS)
+        store.delete(KEY_REAUTH_COOLDOWN_UNTIL_MS)
+        store.delete(KEY_LAST_PASSWORD_ATTEMPT_MS)
+        if (!keepPasswordSpacing) store.delete(KEY_PASSWORD_COOLDOWN_UNTIL_MS)
         resetNetworkBackoff()
     }
 
@@ -61,8 +126,10 @@ class WithingsSessionCoordinator(
         onAuthPaused(reason, message)
     }
 
+    private fun networkFailures(): Int = store.getString(KEY_NET_FAILURES)?.toIntOrNull() ?: 0
+
     private fun recordNetworkFailure(now: Long) {
-        val failures = (store.getString(KEY_NET_FAILURES)?.toIntOrNull() ?: 0) + 1
+        val failures = networkFailures() + 1
         val shift = (failures - 1).coerceIn(0, 5)
         val delayMs = (BASE_BACKOFF_MS shl shift).coerceAtMost(MAX_BACKOFF_MS)
         store.putString(KEY_NET_FAILURES, failures.toString())
@@ -105,6 +172,10 @@ class WithingsSessionCoordinator(
         }
     }
 
+    /**
+     * Keepalive + silent renewal entry point (app start, periodic worker, foreground service, import after a 401).
+     * Returns true when a valid session exists afterwards.
+     */
     fun renewSession(forceExtend: Boolean = false): Boolean {
         if (!isDirectEnabled()) return false
         if (isAutoReloginPaused()) {
@@ -130,6 +201,10 @@ class WithingsSessionCoordinator(
                 is WithingsExtendResult.Success -> {
                     onLog("renewSession: extendSession SUCCESS")
                     resetNetworkBackoff()
+                    // A working session proves the earlier failures are history: lift the soft prompt too.
+                    store.delete(KEY_OTHER_AUTH_FAILURES)
+                    store.delete(KEY_RATE_LIMIT_HITS)
+                    store.delete(KEY_REAUTH_COOLDOWN_UNTIL_MS)
                     saveSession(
                         s.copy(
                             sessionToken = ext.session.sessionToken ?: s.sessionToken,
@@ -142,7 +217,11 @@ class WithingsSessionCoordinator(
                 is WithingsExtendResult.TransientError -> {
                     onLog("renewSession: extendSession transient error (${ext.reason}), backing off")
                     recordNetworkFailure(now)
-                    return false
+                    // A server that keeps answering with something we cannot read is more likely a dead session
+                    // than a long outage: after a few failures in a row climb the ladder (it is network-aware).
+                    if (networkFailures() < WithingsReauthPolicy.EXTEND_ESCALATE_AFTER_TRANSIENT) return false
+                    onLog("renewSession: ${networkFailures()} transient extend failures in a row, trying re-authentication")
+                    return reauth(now, ignoreNetworkBackoff = true)
                 }
                 is WithingsExtendResult.Unauthorized -> {
                     onLog("renewSession: extendSession unauthorized, falling back to tryAutoReLogin")
@@ -154,31 +233,37 @@ class WithingsSessionCoordinator(
             onLog("renewSession aborted: manual login pending")
             return false
         }
-        return tryAutoReLogin()
+        return reauth(now, ignoreNetworkBackoff = false)
     }
 
-    /**
-     * Tiché obnovení relace na pozadí:
-     * 1. Tiché SSO přes dlouhodobé cookies `account.withings.com`.
-     * 2. Pokud SSO selže (ne síťově) a uživatel si nechal zapamatovat heslo, jeden pokus o přihlášení
-     *    uloženým heslem – nejvýše jednou za [PASSWORD_FALLBACK_INTERVAL_MS], nikdy ve smyčce.
-     */
-    fun tryAutoReLogin(): Boolean {
+    /** Silent re-authentication without prior extend: SSO cookies first, then the remembered password. */
+    fun tryAutoReLogin(): Boolean = reauth(nowMs(), ignoreNetworkBackoff = false)
+
+    private fun reauth(now: Long, ignoreNetworkBackoff: Boolean): Boolean {
         if (isAutoReloginPaused()) {
             onLog("tryAutoReLogin skipped: paused (${pausedReason()})")
             return false
         }
-        val now = nowMs()
-        val backoffUntil = netBackoffUntilMs()
-        if (now < backoffUntil) {
-            onLog("tryAutoReLogin skipped: network backoff until $backoffUntil")
+        if (!ignoreNetworkBackoff) {
+            val backoffUntil = netBackoffUntilMs()
+            if (now < backoffUntil) {
+                onLog("tryAutoReLogin skipped: network backoff until $backoffUntil")
+                return false
+            }
+        }
+        val cooldownUntil = reauthCooldownUntilMs()
+        if (now < cooldownUntil) {
+            // A cooldown skip is NOT a failure: it must never count towards escalation.
+            onLog("tryAutoReLogin skipped: cooldown for another ${(cooldownUntil - now) / 60_000L} min")
             return false
         }
 
         val email = store.getString(KEY_EMAIL)?.takeIf { it.isNotBlank() }
-        var ssoOtherFailure: WithingsLoginResult.Error? = null
+        val password = store.getString(KEY_PASSWORD)?.takeIf { it.isNotEmpty() }
+        val cookies = hasUsableCookies()
+        var ssoFailure: WithingsLoginResult.Error? = null
 
-        if (hasUsableCookies()) {
+        if (cookies) {
             if (shouldAbort()) {
                 onLog("tryAutoReLogin aborted: manual login pending")
                 return false
@@ -196,7 +281,7 @@ class WithingsSessionCoordinator(
             }
             when (ssoRes) {
                 is WithingsLoginResult.Ok -> {
-                    clearAuthPauseAndBackoff()
+                    clearAuthPauseAndBackoff(keepPasswordSpacing = true)
                     onSilentRefreshOk(ssoRes, email)
                     return true
                 }
@@ -210,14 +295,14 @@ class WithingsSessionCoordinator(
                         return false
                     }
                     WithingsAuthFailureKind.RATE_LIMITED -> {
-                        pauseAutoRelogin(REASON_RATE_LIMITED, ssoRes.message)
+                        recordRateLimit(now, ssoRes.message)
                         return false
                     }
                     WithingsAuthFailureKind.INVALID_CREDENTIALS -> {
                         pauseAutoRelogin(REASON_INVALID_CREDENTIALS, ssoRes.message)
                         return false
                     }
-                    WithingsAuthFailureKind.OTHER -> ssoOtherFailure = ssoRes
+                    WithingsAuthFailureKind.OTHER -> ssoFailure = ssoRes
                     WithingsAuthFailureKind.ABORTED -> {
                         onLog("tryAutoReLogin: SSO aborted")
                         return false
@@ -226,64 +311,59 @@ class WithingsSessionCoordinator(
             }
         }
 
-        tryPasswordFallback(now, email)?.let { return it }
+        if (password != null && email != null) return tryPasswordLogin(now, email, password)
 
-        val other = ssoOtherFailure ?: return false
-        countOtherFailure(other.message)
+        // No stored password (or e-mail): silent SSO was the only rung and it did not help.
+        val evidenceOfConnection = email != null || cookies || runCatching { loadSession() != null }.getOrDefault(false)
+        if (!evidenceOfConnection) return false
+        if (ssoFailure == null) {
+            // Not even SSO cookies and nothing to log in with: automation is impossible, a human must log in.
+            pauseAutoRelogin(REASON_AUTH_ERROR, MSG_NO_PASSWORD)
+            return false
+        }
+        registerFailure(
+            now,
+            if (password == null) MSG_NO_PASSWORD else ssoFailure.message,
+            hardPauseAt = WithingsReauthPolicy.NO_PASSWORD_HARD_PAUSE_AFTER,
+        )
         return false
     }
 
-    private fun countOtherFailure(message: String) {
-        val failures = (store.getString(KEY_OTHER_AUTH_FAILURES)?.toIntOrNull() ?: 0) + 1
-        store.putString(KEY_OTHER_AUTH_FAILURES, failures.toString())
-        if (failures >= MAX_CONSECUTIVE_OTHER_FAILURES) {
-            pauseAutoRelogin(REASON_AUTH_ERROR, message)
-        } else {
-            onLog("Non-network auth failure #$failures/$MAX_CONSECUTIVE_OTHER_FAILURES, not pausing yet")
-        }
-    }
-
-    /**
-     * Jeden pokus o přihlášení zapamatovaným heslem. Vrací `null`, pokud se pokus neprovedl
-     * (chybí heslo / e-mail, throttle 6 h, ruční přihlášení čeká), jinak výsledek obnovy.
-     */
-    private fun tryPasswordFallback(now: Long, email: String?): Boolean? {
-        val password = store.getString(KEY_PASSWORD)?.takeIf { it.isNotEmpty() } ?: return null
-        if (email == null) {
-            onLog("password fallback skipped: no stored email")
-            return null
-        }
-        val last = store.getString(KEY_LAST_PASSWORD_ATTEMPT_MS)?.toLongOrNull() ?: 0L
-        if (last > 0L && now - last in 0 until PASSWORD_FALLBACK_INTERVAL_MS) {
-            onLog("password fallback skipped: throttled (last attempt ${(now - last) / 60_000L} min ago)")
-            return null
-        }
-        if (shouldAbort()) {
-            onLog("password fallback skipped: manual login pending")
+    /** One login with the remembered password. Spaced by [WithingsReauthPolicy.PASSWORD_MIN_SPACING_MS]. */
+    private fun tryPasswordLogin(now: Long, email: String, password: String): Boolean {
+        val spacingUntil = store.getString(KEY_PASSWORD_COOLDOWN_UNTIL_MS)?.toLongOrNull() ?: 0L
+        if (now < spacingUntil) {
+            // Skipped, not failed: the session just kept dying right after a login, wait for the spacing to pass.
+            onLog("password login skipped: spaced (${(spacingUntil - now) / 60_000L} min left)")
             return false
         }
-        val previousAttempt = store.getString(KEY_LAST_PASSWORD_ATTEMPT_MS)
-        store.putString(KEY_LAST_PASSWORD_ATTEMPT_MS, now.toString())
+        if (shouldAbort()) {
+            onLog("password login skipped: manual login pending")
+            return false
+        }
+        val previousSpacing = store.getString(KEY_PASSWORD_COOLDOWN_UNTIL_MS)
+        store.putString(KEY_PASSWORD_COOLDOWN_UNTIL_MS, (now + WithingsReauthPolicy.PASSWORD_MIN_SPACING_MS).toString())
         val res = try {
             loginPassword(email, password)
         } catch (e: Exception) {
             WithingsLoginResult.Error(e.message ?: "Network error", WithingsAuthFailureKind.NETWORK)
         }
-        onLog("password fallback result: ${res::class.simpleName}")
+        onLog("password login result: ${res::class.simpleName}")
         if (res is WithingsLoginResult.Error && res.kind == WithingsAuthFailureKind.ABORTED) {
             // Přerušeno před odesláním hesla (ruční přihlášení čeká): nepočítat jako pokus ani jako selhání.
-            if (previousAttempt != null) store.putString(KEY_LAST_PASSWORD_ATTEMPT_MS, previousAttempt)
-            else store.delete(KEY_LAST_PASSWORD_ATTEMPT_MS)
-            onLog("password fallback aborted: manual login pending")
+            if (previousSpacing != null) store.putString(KEY_PASSWORD_COOLDOWN_UNTIL_MS, previousSpacing)
+            else store.delete(KEY_PASSWORD_COOLDOWN_UNTIL_MS)
+            onLog("password login aborted: manual login pending")
             return false
         }
         return when (res) {
             is WithingsLoginResult.Ok -> {
-                clearAuthPauseAndBackoff()
+                clearAuthPauseAndBackoff(keepPasswordSpacing = true)
                 onSilentRefreshOk(res, email)
                 true
             }
             is WithingsLoginResult.NeedsMfa -> {
+                // A code can only come from the human.
                 pauseAutoRelogin(REASON_MFA_REQUIRED, MSG_FALLBACK_MFA)
                 false
             }
@@ -293,14 +373,44 @@ class WithingsSessionCoordinator(
                         store.delete(KEY_PASSWORD)
                         pauseAutoRelogin(REASON_INVALID_CREDENTIALS, MSG_FALLBACK_INVALID)
                     }
-                    WithingsAuthFailureKind.RATE_LIMITED -> pauseAutoRelogin(REASON_RATE_LIMITED, res.message)
+                    WithingsAuthFailureKind.RATE_LIMITED -> recordRateLimit(now, res.message)
                     WithingsAuthFailureKind.NETWORK -> recordNetworkFailure(now)
-                    WithingsAuthFailureKind.OTHER -> countOtherFailure(res.message)
+                    WithingsAuthFailureKind.OTHER -> registerFailure(now, res.message)
                     WithingsAuthFailureKind.ABORTED -> Unit
                 }
                 false
             }
         }
+    }
+
+    /**
+     * A real, unclassified failed re-auth attempt: cooldown 15 min / 1 h / 3 h / 6 h. Never a permanent latch; after
+     * [WithingsReauthPolicy.ATTENTION_AFTER_FAILURES] failures the UI is informed while retries go on.
+     * [hardPauseAt] (no stored password) turns the count into a persisted hard pause.
+     */
+    private fun registerFailure(now: Long, message: String, hardPauseAt: Int? = null) {
+        val failures = reauthFailures() + 1
+        store.putString(KEY_OTHER_AUTH_FAILURES, failures.toString())
+        val cooldown = WithingsReauthPolicy.failureCooldownMs(failures)
+        store.putString(KEY_REAUTH_COOLDOWN_UNTIL_MS, (now + cooldown).toString())
+        onLog("Re-auth failure #$failures, next attempt in ${cooldown / 60_000L} min")
+        when {
+            hardPauseAt != null && failures >= hardPauseAt -> pauseAutoRelogin(REASON_AUTH_ERROR, message)
+            failures == WithingsReauthPolicy.ATTENTION_AFTER_FAILURES -> onAuthPaused(REASON_AUTH_ERROR, MSG_REPEATED_FAILURES)
+        }
+    }
+
+    /** HTTP 429 / lockout: cooldown 2 h / 6 h / 24 h; the third in a row is treated as a locked account. */
+    private fun recordRateLimit(now: Long, message: String) {
+        val hits = (store.getString(KEY_RATE_LIMIT_HITS)?.toIntOrNull() ?: 0) + 1
+        store.putString(KEY_RATE_LIMIT_HITS, hits.toString())
+        if (hits >= WithingsReauthPolicy.RATE_LIMIT_HARD_PAUSE_AFTER) {
+            pauseAutoRelogin(REASON_RATE_LIMITED, message)
+            return
+        }
+        val cooldown = WithingsReauthPolicy.rateLimitCooldownMs(hits)
+        store.putString(KEY_REAUTH_COOLDOWN_UNTIL_MS, (now + cooldown).toString())
+        onLog("Rate limited #$hits, no re-auth attempt for ${cooldown / 60_000L} min")
     }
 
     companion object {
@@ -310,14 +420,24 @@ class WithingsSessionCoordinator(
         const val KEY_PAUSED_MESSAGE = "withings.auth.paused_message"
         const val KEY_NET_FAILURES = "withings.auth.net_failures"
         const val KEY_NET_BACKOFF_UNTIL_MS = "withings.auth.net_backoff_until_ms"
+
+        /** Consecutive failed re-auth attempts (real attempts only). Key name kept for stored-state compatibility. */
         const val KEY_OTHER_AUTH_FAILURES = "withings.auth.other_failures"
+        const val KEY_REAUTH_COOLDOWN_UNTIL_MS = "withings.auth.reauth_cooldown_until_ms"
+        const val KEY_PASSWORD_COOLDOWN_UNTIL_MS = "withings.auth.password_cooldown_until_ms"
+        const val KEY_RATE_LIMIT_HITS = "withings.auth.rate_limit_hits"
+
+        /** Legacy (6 h throttle of the old design); only deleted now. */
         const val KEY_LAST_PASSWORD_ATTEMPT_MS = "withings.auth.last_password_attempt_ms"
-        const val PASSWORD_FALLBACK_INTERVAL_MS = 6 * 60 * 60 * 1000L
+
         const val MSG_FALLBACK_MFA =
             "Withings při automatickém přihlášení uloženým heslem vyžaduje ověřovací kód. Přihlaste se prosím ručně a zadejte kód."
         const val MSG_FALLBACK_INVALID =
             "Withings odmítl uložené heslo. Uložené heslo bylo smazáno – přihlaste se prosím ručně."
-        const val MAX_CONSECUTIVE_OTHER_FAILURES = 3
+        const val MSG_NO_PASSWORD =
+            "Relace Withings vypršela a není uloženo heslo, kterým by šla tiše obnovit. Přihlaste se prosím a ponechte zapnuté „Pamatovat heslo“."
+        const val MSG_REPEATED_FAILURES =
+            "Tiché obnovení relace Withings se opakovaně nezdařilo. Aplikace to zkouší dál sama, můžete se také přihlásit ručně."
 
         const val REASON_INVALID_CREDENTIALS = "INVALID_CREDENTIALS"
         const val REASON_RATE_LIMITED = "RATE_LIMITED"

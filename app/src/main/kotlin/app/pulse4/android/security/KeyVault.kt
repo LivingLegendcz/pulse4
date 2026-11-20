@@ -503,12 +503,15 @@ class SecretStore internal constructor(
             "garmin.ext.login_cooldown_until_ms",
             "garmin.ext.refresh_blocked_until_ms",
             "withings.auth.net_backoff_until_ms",
+            "withings.auth.reauth_cooldown_until_ms",
+            "withings.auth.password_cooldown_until_ms",
         )
         private val OPERATIONAL_FAILURE_COUNT_KEYS = setOf(
             "garmin.ext.login_failures",
             "garmin.ext.refresh_failures",
             "withings.auth.net_failures",
             "withings.auth.other_failures",
+            "withings.auth.rate_limit_hits",
         )
         private const val OPERATIONAL_PAUSE_REASON_KEY = "withings.auth.paused_reason"
         private const val OPERATIONAL_PAUSE_MESSAGE_KEY = "withings.auth.paused_message"

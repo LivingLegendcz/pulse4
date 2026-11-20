@@ -277,6 +277,27 @@ Snímky: `vault/attachments/settings_accounts_*.png`.
 - *Diagnostika:* Nastavení → Withings → „Diagnostika Withings“ ukazuje redigovaný průběh posledních pokusů (cesty URL bez parametrů, HTTP stav, výsledek; max. 30 záznamů) s tlačítkem „Zkopírovat“.
 - *OAuth režim:* zůstává pouze jako volitelná záložní cesta pro pokročilé uživatele s vlastním developer účtem.
 
+## Udržování relace a tiché obnovení (2026-11-20)
+
+Cíl: uživatel se nemusí ručně přihlašovat, dokud jsou přihlašovací údaje platné. Skutečná doba života webové relace
+Withings na serveru **není z kódu ani z HAR ověřitelná** (dřívější údaj „~48 h“ nemá zdroj), proto se relace udržuje
+často a levně a při zániku se obnoví sama.
+
+- **Keepalive** (`session?action=extend`): každých 30 minut (`AutoSyncPlanner.KEEPALIVE_INTERVAL_MS`), nezávisle na intervalu
+  importu dat, při startu aplikace (po 45 s) a při návratu aplikace do popředí. Neblokuje ho `AutoImportPolicy`,
+  ochranná lhůta po startu ani single-flight guard importu.
+- **Žebřík obnovy** (`WithingsSessionCoordinator`): extend → tiché SSO přes dlouhodobé cookies `account.withings.com` →
+  jedno přihlášení uloženým e-mailem a heslem.
+- **Limity:** selhání sítě = exponenciální backoff 1 → 30 min; neklasifikované selhání obnovy = cooldown 15 min → 1 h → 3 h →
+  6 h (počítá se jen skutečný pokus, přeskočená volání ne); HTTP 429 / zámek = cooldown 2 h → 6 h → 24 h; přihlášení
+  heslem nejvýše jednou za 10 min i po úspěchu (ochrana proti smyčce). Žádné trvalé „zamčení“ po neklasifikovaných chybách.
+- **Uživatel dostane výzvu jen když je člověk opravdu potřeba:** Withings chce ověřovací kód (2FA / e-mail / SMS),
+  odmítl heslo (změněné heslo), třikrát po sobě zamkl přihlášení, nebo není uloženo heslo a tiché SSO nestačí; navíc
+  informativně po 6 selháních v řadě (aplikace přitom zkouší dál). Výzva uvádí důvod.
+- **Interval importu dat** se nastavuje v Nastavení → Garmin & Withings pro každého poskytovatele zvlášť
+  (výchozí Garmin 15 min, Withings 1 h; volby 15 min / 30 min / 1 h / 3 h / 6 h / vypnuto). Ruční synchronizace
+  intervaly ignoruje.
+
 ## Zvažované alternativy
 
 | Cesta | Proč ne jako hlavní cesta |

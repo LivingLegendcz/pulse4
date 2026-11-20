@@ -528,4 +528,38 @@ class WithingsWebTest {
         val batch = fetcher.fetch(SyncArea.WEIGHT, 1730800000_000L)
         assertTrue(batch.tombstones.contains(oldId))
     }
+
+    private fun extendWith(code: Int, body: String, throwIo: Boolean = false): WithingsExtendResult {
+        val fakeHttp = object : HttpGateway {
+            override fun get(url: String, headers: Map<String, String>): HttpResponse = error("unused")
+            override fun postForm(url: String, form: Map<String, String>, headers: Map<String, String>): HttpResponse {
+                if (throwIo) throw java.io.IOException("offline")
+                return HttpResponse(code, emptyMap(), body)
+            }
+        }
+        return WithingsWebClient(fakeHttp).extendSessionDetailed("session_key=k; w_uuid=abc", null)
+    }
+
+    @Test
+    fun extendHttp401And403MeanTheSessionIsDeadNotATransientError() {
+        // Regression: ProviderError.Unauthorized thrown by post() used to be swallowed as TransientError, so the
+        // silent re-login ladder never ran for an expired session and only the network backoff applied.
+        assertEquals(WithingsExtendResult.Unauthorized, extendWith(401, ""))
+        assertEquals(WithingsExtendResult.Unauthorized, extendWith(403, ""))
+    }
+
+    @Test
+    fun extendRateLimitServerErrorsAndOfflineAreTransient() {
+        assertTrue(extendWith(429, "") is WithingsExtendResult.TransientError)
+        assertTrue(extendWith(503, "") is WithingsExtendResult.TransientError)
+        assertTrue(extendWith(200, """{"status":601,"error":"too many"}""") is WithingsExtendResult.TransientError)
+        assertTrue(extendWith(200, "<html>login</html>") is WithingsExtendResult.TransientError)
+        assertTrue(extendWith(0, "", throwIo = true) is WithingsExtendResult.TransientError)
+    }
+
+    @Test
+    fun extendNonZeroApplicationStatusIsUnauthorized() {
+        assertEquals(WithingsExtendResult.Unauthorized, extendWith(200, """{"status":250,"error":"credentials do not match"}"""))
+        assertEquals(WithingsExtendResult.Unauthorized, extendWith(200, """{"status":2555,"body":{}}"""))
+    }
 }

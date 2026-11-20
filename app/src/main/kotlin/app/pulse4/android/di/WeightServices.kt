@@ -158,6 +158,10 @@ class WithingsService internal constructor(
                     ?: "Relace Withings vyžaduje ruční přihlášení"
             )
         }
+            // Soft prompt: silent renewal kept failing (the app keeps retrying, but the user should know).
+            ?: (sl.secrets.getString(WithingsSessionCoordinator.KEY_OTHER_AUTH_FAILURES)?.toIntOrNull() ?: 0)
+                .takeIf { it >= WithingsReauthPolicy.ATTENTION_AFTER_FAILURES }
+                ?.let { WithingsUiState.Failed(WithingsSessionCoordinator.MSG_REPEATED_FAILURES) }
             ?: loadWebSession()?.let {
                 WithingsUiState.Connected(
                     userId = it.primaryUserId.toString(),
@@ -187,6 +191,9 @@ class WithingsService internal constructor(
     fun saveCredentials(clientId: String, secret: String) { sl.settings.withingsClientId = clientId; sl.secrets.putString(CLIENT_SECRET, secret.trim()) }
     fun hasCredentials() = creds() != null
     fun isConnected(): Boolean = loadWebSession()?.isConnected() == true || session.isConnected()
+
+    /** A web session was ever stored on this phone (so a keepalive makes sense); false = Withings never connected. */
+    fun hasStoredWebSession(): Boolean = loadWebSession() != null
     fun childUserId(): String? = WithingsProfiles.sessionChild(loadWebSession())?.id?.toString() ?: childVault.load()?.userId
 
     /**
@@ -602,6 +609,20 @@ class WithingsService internal constructor(
     fun runWebImport(nowMs: Long, allowRetry: Boolean = true): AreaResult? =
         importGate.tryRun(onBusy = { skippedBusy("runWebImport") }) { runWebImportLocked(nowMs, allowRetry) }
 
+    /**
+     * Switches the UI to "log in" ONLY when a human is really required (hard pause: code, changed password, locked
+     * account, no stored password; or silent renewal failed repeatedly). A plain expired session that the background
+     * ladder is still working on (cooldown / backoff) is not an error the user can fix, so it stays out of their face;
+     * the failed import is still visible as the last sync error.
+     */
+    private fun markNeedsLoginIfHumanRequired() {
+        if (sessionCoordinator.needsHumanInput()) {
+            _state.value = WithingsUiState.Failed(
+                sessionCoordinator.pausedMessage() ?: WithingsSessionCoordinator.MSG_REPEATED_FAILURES
+            )
+        }
+    }
+
     private fun skippedBusy(what: String): AreaResult? {
         PLog.i("Withings") { "$what skipped: another import is already running" }
         return null
@@ -765,18 +786,14 @@ class WithingsService internal constructor(
                     if (allowRetry && !sessionCoordinator.isAutoReloginPaused() && renewSession(forceExtend = true)) {
                         return@synchronized runWebImport(nowMs, allowRetry = false)
                     }
-                    _state.value = WithingsUiState.Failed(
-                        sessionCoordinator.pausedMessage() ?: "Relace Withings vyžaduje obnovení"
-                    )
+                    markNeedsLoginIfHumanRequired()
                 }
             }
             is AreaResult.NeedsUser -> if (authGate.generation() == startGen) {
                 if (allowRetry && !sessionCoordinator.isAutoReloginPaused() && renewSession(forceExtend = true)) {
                     return@synchronized runWebImport(nowMs, allowRetry = false)
                 }
-                _state.value = WithingsUiState.Failed(
-                    sessionCoordinator.pausedMessage() ?: "Relace Withings vyžaduje obnovení"
-                )
+                markNeedsLoginIfHumanRequired()
             }
             else -> Unit
         }

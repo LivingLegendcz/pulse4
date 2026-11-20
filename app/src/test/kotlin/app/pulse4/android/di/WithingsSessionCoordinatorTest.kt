@@ -63,7 +63,7 @@ class WithingsSessionCoordinatorTest {
     )
 
     @Test
-    fun `silent SSO failure falls back to stored password at most once per 6 hours`() {
+    fun `silent SSO failure falls back to the stored password and an immediate second expiry is only spaced, not failed`() {
         val store = InMemoryAuthStore()
         store.putString(WithingsSessionCoordinator.KEY_EMAIL, "user@example.com")
         store.putString(WithingsSessionCoordinator.KEY_PASSWORD, "stored-pass")
@@ -85,14 +85,18 @@ class WithingsSessionCoordinatorTest {
         assertEquals("user@example.com", okEmail)
         assertEquals("stored-pass", store.getString(WithingsSessionCoordinator.KEY_PASSWORD))
 
-        // Session expires again 1 h later: SSO is tried, password fallback is throttled.
-        now += 60 * 60_000L
+        // Session dies again 2 minutes later: SSO is tried, the password login is only SPACED (loop guard).
+        // This used to count as a failure; three of those latched the pause for good.
+        now += 2 * 60_000L
         assertFalse(coord.renewSession())
         assertEquals(2, ssoCalls)
         assertEquals(1, loginArgs.size)
+        assertEquals(0, coord.reauthFailures())
+        assertFalse(coord.isAutoReloginPaused())
+        assertEquals(0L, coord.reauthCooldownUntilMs())
 
-        // After 6 h the fallback is allowed once more.
-        now += WithingsSessionCoordinator.PASSWORD_FALLBACK_INTERVAL_MS
+        // After the 10 minute spacing the password login is allowed again (no 6 h wait any more).
+        now += WithingsReauthPolicy.PASSWORD_MIN_SPACING_MS
         assertTrue(coord.renewSession())
         assertEquals(2, loginArgs.size)
     }
@@ -167,22 +171,46 @@ class WithingsSessionCoordinatorTest {
     }
 
     @Test
-    fun `password fallback rate limited pauses and keeps password`() {
+    fun `password login rate limited cools down 2h then 6h and only the third in a row is a locked account`() {
         val store = InMemoryAuthStore()
         store.putString(WithingsSessionCoordinator.KEY_EMAIL, "user@example.com")
         store.putString(WithingsSessionCoordinator.KEY_PASSWORD, "pass")
+        var now = 10_000_000L
         var loginCalls = 0
         val coord = coordinator(
             store = store,
-            now = { 10_000_000L },
+            now = { now },
             sso = { WithingsLoginResult.Error("SSO expired", WithingsAuthFailureKind.OTHER) },
             login = { _, _ -> loginCalls++; WithingsLoginResult.Error("Too many", WithingsAuthFailureKind.RATE_LIMITED) },
         )
         assertFalse(coord.tryAutoReLogin())
-        assertEquals(WithingsSessionCoordinator.REASON_RATE_LIMITED, coord.pausedReason())
-        assertEquals("pass", store.getString(WithingsSessionCoordinator.KEY_PASSWORD))
-        assertFalse(coord.tryAutoReLogin())
         assertEquals(1, loginCalls)
+        // Timed cooldown, NOT a hard pause: nothing to prompt, retries resume by themselves.
+        assertFalse(coord.isAutoReloginPaused())
+        assertFalse(coord.needsHumanInput())
+        assertEquals(now + 2 * 60 * 60_000L, coord.reauthCooldownUntilMs())
+        assertEquals("pass", store.getString(WithingsSessionCoordinator.KEY_PASSWORD))
+
+        // Within the cooldown nothing is sent to Withings, however often we are called.
+        now += 60 * 60_000L
+        assertFalse(coord.tryAutoReLogin())
+        assertFalse(coord.renewSession())
+        assertEquals(1, loginCalls)
+
+        // After 2 h one more attempt; rate limited again -> 6 h.
+        now += 61 * 60_000L
+        assertFalse(coord.tryAutoReLogin())
+        assertEquals(2, loginCalls)
+        assertFalse(coord.isAutoReloginPaused())
+        assertEquals(now + 6 * 60 * 60_000L, coord.reauthCooldownUntilMs())
+
+        // Third in a row: the account is effectively locked, a human is needed.
+        now += 6 * 60 * 60_000L + 1
+        assertFalse(coord.tryAutoReLogin())
+        assertEquals(3, loginCalls)
+        assertEquals(WithingsSessionCoordinator.REASON_RATE_LIMITED, coord.pausedReason())
+        assertTrue(coord.needsHumanInput())
+        assertEquals("pass", store.getString(WithingsSessionCoordinator.KEY_PASSWORD))
     }
 
     @Test
@@ -203,26 +231,25 @@ class WithingsSessionCoordinatorTest {
     }
 
     @Test
-    fun `rate limit on silent SSO pauses without trying the stored password`() {
+    fun `rate limit on silent SSO cools down without trying the stored password`() {
         val store = InMemoryAuthStore()
         store.putString(WithingsSessionCoordinator.KEY_EMAIL, "user@example.com")
         store.putString(WithingsSessionCoordinator.KEY_PASSWORD, "some-pass")
 
+        var now = 10_000_000L
         var loginCalls = 0
-        var pausedCallbackReason: String? = null
         val coord = coordinator(
             store = store,
-            now = { 10_000_000L },
+            now = { now },
             sso = { WithingsLoginResult.Error("Too many attempts", WithingsAuthFailureKind.RATE_LIMITED) },
             login = { _, _ -> loginCalls++; sampleOk() },
-            onPaused = { reason, _ -> pausedCallbackReason = reason },
         )
 
         assertFalse(coord.tryAutoReLogin())
         assertEquals(0, loginCalls)
         assertEquals("some-pass", store.getString(WithingsSessionCoordinator.KEY_PASSWORD))
-        assertEquals(WithingsSessionCoordinator.REASON_RATE_LIMITED, coord.pausedReason())
-        assertEquals(WithingsSessionCoordinator.REASON_RATE_LIMITED, pausedCallbackReason)
+        assertFalse(coord.isAutoReloginPaused())
+        assertTrue(coord.reauthCooldownUntilMs() > now)
 
         assertFalse(coord.renewSession())
         assertFalse(coord.tryAutoReLogin())
@@ -284,9 +311,10 @@ class WithingsSessionCoordinatorTest {
 
         var loginCalls = 0
         var session: WithingsWebSession? = null
+        var now = 10_000_000L
         val coord = WithingsSessionCoordinator(
             store = store,
-            nowMs = { 10_000_000L },
+            nowMs = { now },
             isDirectEnabled = { true },
             loadSession = { session },
             saveSession = { session = it },
@@ -300,11 +328,15 @@ class WithingsSessionCoordinatorTest {
             onSilentRefreshOk = { _, _ -> },
         )
 
+        // No stored password: silent SSO is the only rung. Three REAL failed attempts (spaced by cooldowns) -> human.
         assertFalse(coord.tryAutoReLogin())
+        now += 16 * 60_000L
         assertFalse(coord.tryAutoReLogin())
+        now += 61 * 60_000L
         assertFalse(coord.tryAutoReLogin())
         assertEquals(0, loginCalls)
         assertTrue(coord.isAutoReloginPaused())
+        assertEquals(WithingsSessionCoordinator.REASON_AUTH_ERROR, coord.pausedReason())
 
         // User logs in manually
         val ok = sampleOk()
@@ -448,29 +480,41 @@ class WithingsSessionCoordinatorTest {
     }
 
     @Test
-    fun `other auth errors pause only after 3 consecutive failures`() {
+    fun `without a stored password silent SSO failures pause only after 3 real attempts spaced by cooldowns`() {
         val store = InMemoryAuthStore()
+        var now = 10_000_000L
+        var ssoCalls = 0
         val coord = WithingsSessionCoordinator(
             store = store,
-            nowMs = { 10_000_000L },
+            nowMs = { now },
             isDirectEnabled = { true },
             loadSession = { null },
             saveSession = {},
             extendSession = { _, _ -> WithingsExtendResult.Unauthorized },
             hasUsableCookies = { true },
-            trySilentSsoRefresh = { WithingsLoginResult.Error("Temporary parse issue", WithingsAuthFailureKind.OTHER) },
+            trySilentSsoRefresh = { ssoCalls++; WithingsLoginResult.Error("Temporary parse issue", WithingsAuthFailureKind.OTHER) },
             loginPassword = { _, _ -> sampleOk() },
             onSilentRefreshOk = { _, _ -> },
         )
 
         assertFalse(coord.tryAutoReLogin())
         assertFalse(coord.isAutoReloginPaused())
+        assertEquals(1, ssoCalls)
 
+        // Calls inside the cooldown are skipped and must NOT count as failures (they used to).
+        repeat(5) { assertFalse(coord.tryAutoReLogin()) }
+        assertEquals(1, ssoCalls)
+        assertEquals(1, coord.reauthFailures())
+
+        now += 16 * 60_000L
         assertFalse(coord.tryAutoReLogin())
         assertFalse(coord.isAutoReloginPaused())
+        assertEquals(2, coord.reauthFailures())
 
+        now += 61 * 60_000L
         assertFalse(coord.tryAutoReLogin())
         assertTrue(coord.isAutoReloginPaused())
         assertEquals(WithingsSessionCoordinator.REASON_AUTH_ERROR, coord.pausedReason())
+        assertEquals(WithingsSessionCoordinator.MSG_NO_PASSWORD, coord.pausedMessage())
     }
 }

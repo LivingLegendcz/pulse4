@@ -3050,6 +3050,8 @@ object ServiceMigrations {
     private const val KEY_FABRICATED_CLEANUP_FAILURES = "migration.fabricated_activity_cleanup_failures"
     private const val MAX_CLEANUP_FAILURES = 3
     private const val CLEANUP_WORK_NAME = "fabricated-activity-cleanup"
+    private const val CLEANUP_INITIAL_DELAY_MS = 3L * 60_000L
+    internal const val CLEANUP_BATCH_YIELD_MS = 60L
     private val FOOT_SPORTS = setOf(Sport.RUNNING, Sport.WALKING, Sport.HIKING)
 
     private val identityMigrationLock = Any()
@@ -3592,6 +3594,7 @@ object ServiceMigrations {
     fun migrateLegacyFabricatedActivities(
         sl: ServiceLocator,
         batchSize: Int = 25,
+        yieldBetweenBatchesMs: Long = 0L,
         onProgress: (processed: Int, total: Int) -> Unit = { _, _ -> },
     ): Int = migrateLegacyFabricatedActivities(
         db = sl.db,
@@ -3599,6 +3602,7 @@ object ServiceMigrations {
         fitDir = File(sl.context.noBackupFilesDir, "fit"),
         decryptFit = { sl.vault.open(it) },
         batchSize = batchSize,
+        yieldBetweenBatchesMs = yieldBetweenBatchesMs,
         onProgress = onProgress,
     )
 
@@ -3613,6 +3617,7 @@ object ServiceMigrations {
         fitDir: File,
         decryptFit: (ByteArray) -> ByteArray,
         batchSize: Int = 25,
+        yieldBetweenBatchesMs: Long = 0L,
         onProgress: (processed: Int, total: Int) -> Unit = { _, _ -> },
     ): Int = synchronized(fabricatedCleanupLock) {
         if (settings.getRaw(KEY_FABRICATED_CLEANUP_V2) != null) return@synchronized 0
@@ -3723,6 +3728,8 @@ object ServiceMigrations {
             }
             processed += batchIds.size
             onProgress(processed, allIds.size)
+            // Let foreground work (Keystore decrypts, DB reads of the UI) interleave between batches.
+            if (yieldBetweenBatchesMs > 0L && processed < allIds.size) Thread.sleep(yieldBetweenBatchesMs)
         }
         currentParsedFile = null
         currentParsedSessions = null
@@ -3772,7 +3779,11 @@ object ServiceMigrations {
 
     fun scheduleFabricatedActivityCleanup(context: Context) {
         runCatching {
-            val req = androidx.work.OneTimeWorkRequestBuilder<FabricatedActivityCleanupWorker>().build()
+            // Not at app start: wait a while and do not compete with the UI when the battery is low.
+            val req = androidx.work.OneTimeWorkRequestBuilder<FabricatedActivityCleanupWorker>()
+                .setInitialDelay(CLEANUP_INITIAL_DELAY_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
+                .setConstraints(androidx.work.Constraints.Builder().setRequiresBatteryNotLow(true).build())
+                .build()
             androidx.work.WorkManager.getInstance(context.applicationContext)
                 .enqueueUniqueWork(CLEANUP_WORK_NAME, androidx.work.ExistingWorkPolicy.KEEP, req)
         }.onFailure { e ->
@@ -3830,7 +3841,11 @@ class FabricatedActivityCleanupWorker(
         ensureChannel(nm)
         try {
             val completedOrSkipped = ServiceMigrations.runFabricatedCleanupWithRetryCap(sl.settings) {
-                ServiceMigrations.migrateLegacyFabricatedActivities(sl, batchSize = 25) { processed, total ->
+                ServiceMigrations.migrateLegacyFabricatedActivities(
+                    sl,
+                    batchSize = 25,
+                    yieldBetweenBatchesMs = ServiceMigrations.CLEANUP_BATCH_YIELD_MS,
+                ) { processed, total ->
                     setProgressAsync(androidx.work.workDataOf("processed" to processed, "total" to total))
                     updateNotification(nm, processed, total)
                 }

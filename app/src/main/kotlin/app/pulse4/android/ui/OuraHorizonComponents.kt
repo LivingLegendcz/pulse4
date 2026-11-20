@@ -177,7 +177,9 @@ data class OuraPillarState(
     val rating: OuraRating?,
     val deltaLabel: String,
     val narrative: String,
-    val contributors: List<OuraContributor>
+    val contributors: List<OuraContributor>,
+    /** Real measured value shown in the ring instead of a score when the pillar has no score (e.g. body weight). */
+    val displayValue: String? = null
 )
 
 /**
@@ -367,6 +369,9 @@ object OuraScoreCalculator {
             if (bodyFatVal != null) add("tuk ${fmt.number(bodyFatVal, 1)} %")
             if (pwvVal != null) add("PWV ${fmt.number(pwvVal, 1)} m/s")
         }
+        // No invented score: the Body ring shows the latest real weight (number only, unit follows the unit setting).
+        val bodyDisplayValue: String? = wKg?.takeIf { it.isFinite() && it > 0 }
+            ?.let { fmt.weight(it, 1).substringBefore(' ') }
         val bodyDeltaLabel = if (bodyParts.isNotEmpty()) bodyParts.joinToString(" · ") else "Připojte Withings"
         val bodyNarrative = if (bodyParts.isNotEmpty()) {
             "Poslední naměřené hodnoty: ${bodyParts.joinToString(", ")}."
@@ -405,7 +410,8 @@ object OuraScoreCalculator {
                 rating = bodyRating,
                 deltaLabel = bodyDeltaLabel,
                 narrative = bodyNarrative,
-                contributors = emptyList()
+                contributors = emptyList(),
+                displayValue = bodyDisplayValue
             )
         )
     }
@@ -533,6 +539,7 @@ fun OuraHorizonHeroCard(
                         PillarScoreOrb(
                             pillar = pillar,
                             score = state?.score,
+                            displayValue = state?.displayValue,
                             isSelected = isSelected,
                             onClick = { onSelectPillar(pillar) },
                             modifier = Modifier.weight(1f)
@@ -545,6 +552,7 @@ fun OuraHorizonHeroCard(
                 // Centrální Living Halo prstenec s astronomickým/horologickým ciferníkem na průhledném pozadí
                 OuraHaloGauge(
                     score = currentPillarState.score,
+                    displayValue = currentPillarState.displayValue,
                     primaryColor = currentPillarState.pillar.primaryColor,
                     secondaryColor = currentPillarState.pillar.secondaryColor,
                     glowColor = currentPillarState.pillar.glowColor,
@@ -825,6 +833,7 @@ private fun DrawScope.drawAmbitiousPillarBackdrop(
 private fun PillarScoreOrb(
     pillar: OuraPillar,
     score: Int?,
+    displayValue: String? = null,
     isSelected: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
@@ -903,7 +912,7 @@ private fun PillarScoreOrb(
                     }
                 }
                 Text(
-                    text = score?.toString() ?: "—",
+                    text = displayValue ?: score?.toString() ?: "—",
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.ExtraBold,
                     color = Color.White,
@@ -942,6 +951,7 @@ private fun PillarScoreOrb(
 @Composable
 fun OuraHaloGauge(
     score: Int?,
+    displayValue: String? = null,
     primaryColor: Color,
     secondaryColor: Color,
     glowColor: Color,
@@ -1089,7 +1099,7 @@ fun OuraHaloGauge(
                 )
             }
             Text(
-                text = score?.toString() ?: "—",
+                text = displayValue ?: score?.toString() ?: "—",
                 style = MaterialTheme.typography.displayMedium,
                 fontWeight = FontWeight.ExtraBold,
                 color = Color.White,

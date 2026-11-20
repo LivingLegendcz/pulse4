@@ -114,8 +114,17 @@ class PulseSyncService : Service() {
                 val online = hasActiveNetwork()
 
                 // 1. Periodické stahování zdravotních dat ze zdrojů (každých 15 min, jen když je síť).
-                if (online && now - lastImportAtMs >= IMPORT_INTERVAL_MS) {
+                // Poslední import se drží i v nastavení, takže restart procesu / otevření aplikace nespustí
+                // okamžitý sync; navíc je po startu procesu ochranná lhůta (AutoImportPolicy.STARTUP_GRACE_MS).
+                val persistedLast = runCatching { sl.settings.lastImportAtMs }.getOrNull()
+                val decision = AutoImportPolicy.decide(
+                    nowMs = now,
+                    lastImportAtMs = listOfNotNull(persistedLast, lastImportAtMs.takeIf { it > 0L }).maxOrNull(),
+                    processStartMs = AppProcess.startedAtMs,
+                )
+                if (online && decision.runNow) {
                     lastImportAtMs = now
+                    runCatching { sl.settings.lastImportAtMs = now }
                     runCatching { sl.garminExt.ensureSession() }
                     runCatching { sl.importService.runAll(now) }
                     runCatching {
@@ -145,7 +154,14 @@ class PulseSyncService : Service() {
                 updateNotification(statusText(sl))
 
                 // Úsporné čekání: probudí se buď okamžitě na požadavek (ACTION_SYNC_NOW), nebo za 10 minut.
-                withTimeoutOrNull(IDLE_TICK_DELAY_MS) {
+                // Když je import jen odložen (ochranná lhůta / minimální interval), probudí se služba přesně
+                // v čase, kdy bude povolen, ne až za další plný tick.
+                val sleepMs = if (!decision.runNow && online) {
+                    decision.waitMs.coerceIn(MIN_WAKE_DELAY_MS, IDLE_TICK_DELAY_MS)
+                } else {
+                    IDLE_TICK_DELAY_MS
+                }
+                withTimeoutOrNull(sleepMs) {
                     wakeSignal.receive()
                 }
             }
@@ -246,7 +262,7 @@ class PulseSyncService : Service() {
         private const val TAG = "PulseSyncService"
         private const val CHANNEL_ID = "pulse4_background_sync_min"
         private const val NOTIFICATION_ID = 4109
-        private const val IMPORT_INTERVAL_MS = 15L * 60_000L
+        private const val MIN_WAKE_DELAY_MS = 5_000L
         private const val IDLE_TICK_DELAY_MS = 10L * 60_000L
         private const val HEARTBEAT_FRESH_MS = 20L * 60_000L
         private val lastHeartbeatAtMs = java.util.concurrent.atomic.AtomicLong(0L)

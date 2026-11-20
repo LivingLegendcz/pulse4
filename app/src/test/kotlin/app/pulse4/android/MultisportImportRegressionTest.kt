@@ -486,15 +486,19 @@ class MultisportImportRegressionTest {
             override fun inbox() = inboxDao
             override fun familyLinks() = familyDao
             override fun pendingRequests() = pendingDao
+            val contactDao = app.pulse4.android.di.InMemoryContactDao()
+            val consentDao = app.pulse4.android.di.InMemoryGuardianConsentDao()
+            override fun contacts() = contactDao
+            override fun guardianConsents() = consentDao
         }
         val settings = object : ShareSettingsAccess {
             override var zoneId = "UTC"
             override var privacyZones: List<PrivacyZone> = emptyList()
-            override var ownAgeProfile = AgeProfile.ADULT.name
             override var acceptWeightFromParent = false
             override var childRecipientIdentity = ""
-            override fun getRaw(key: String): String? = null
-            override fun put(key: String, value: String) {}
+            private val raw = LinkedHashMap<String, String>().also { app.pulse4.android.di.seedAge(it, app.pulse4.sharing.AgeState.ADULT) }
+            override fun getRaw(key: String): String? = raw[key]
+            override fun put(key: String, value: String) { raw[key] = value }
         }
         val outbox = OutboxManager(
             store = object : OutboxStore {

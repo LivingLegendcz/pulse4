@@ -76,6 +76,8 @@ class Pulse4App : Application() {
             }
             // Tichý proaktivní keepalive Garmin & Withings relací: odložen, aby nesoutěžil se startem UI o síť a zámky.
             kotlinx.coroutines.delay(KEEPALIVE_DELAY_MS)
+            // Gated MINOR (no verified guardian yet): no provider sessions; transport/pump above keeps running.
+            if (runCatching { services.shareService.isAppGatedForGuardian() }.getOrDefault(false)) return@launch
             runCatching { services.garminExt.ensureSession() }
             runCatching { services.withings.renewSession() }
         }
@@ -100,6 +102,7 @@ class Pulse4App : Application() {
         if (!lastForegroundRenewElapsedMs.compareAndSet(last, now)) return
         appScope.launch {
             if (!services.awaitStartupReady()) return@launch
+            if (runCatching { services.shareService.isAppGatedForGuardian() }.getOrDefault(false)) return@launch
             runCatching { services.withings.renewSession() }
         }
     }

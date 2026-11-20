@@ -125,4 +125,33 @@ class FamilyLinkDirectionTest {
         assertEquals(AgeState.MINOR, locked.state)
         assertEquals(parent, locked.lockedByGuardianId)
     }
+
+    @Test
+    fun `child cannot remove a verified link, only the parent can`() {
+        val pending = FamilyLinkPolicy.createChildRequest("fl", parent, child, 10)
+        val verified = FamilyLinkPolicy.respond(pending, parent, accept = true, nowMs = 11)
+        assertFalse(FamilyLinkPolicy.canRemove(verified, child))
+        assertTrue(runCatching { FamilyLinkPolicy.removeLink(verified, child) }.isFailure)
+        assertFalse(FamilyLinkPolicy.isValidLinkRemoval(verified, child, emptyList(), emptyList()))
+        // inbound family.link.revoke authored by the child is rejected on the parent device ...
+        assertFalse(FamilyLinkPolicy.isValidRemoteRevoke(verified, envelopeAuthor = child, selfId = parent))
+        // ... while the parent's own revoke is accepted on the child device
+        assertTrue(FamilyLinkPolicy.isValidRemoteRevoke(verified, envelopeAuthor = parent, selfId = child))
+        assertTrue(FamilyLinkPolicy.canRemove(verified, parent))
+        assertEquals(FamilyLinkStatus.REVOKED, FamilyLinkPolicy.removeLink(verified, parent).status)
+    }
+
+    @Test
+    fun `pending link can be cancelled by the initiator and rejected by the counterparty`() {
+        val childInit = FamilyLinkPolicy.createChildRequest("fl", parent, child, 10)
+        assertTrue(FamilyLinkPolicy.canRemove(childInit, child))
+        assertTrue(FamilyLinkPolicy.canRemove(childInit, parent))
+        assertEquals(FamilyLinkStatus.REVOKED, FamilyLinkPolicy.removeLink(childInit, child).status)
+        assertTrue(FamilyLinkPolicy.isValidRemoteRevoke(childInit, envelopeAuthor = child, selfId = parent))
+        val parentInit = FamilyLinkPolicy.createRequest("fl2", parent, child, AgeProfile.MINOR, 10)
+        assertTrue(FamilyLinkPolicy.canRemove(parentInit, child))
+        assertEquals(FamilyLinkStatus.REVOKED, FamilyLinkPolicy.removeLink(parentInit, child).status)
+        assertTrue(FamilyLinkPolicy.isValidRemoteRevoke(parentInit, envelopeAuthor = parent, selfId = child))
+        assertFalse(FamilyLinkPolicy.canRemove(childInit, "stranger"))
+    }
 }

@@ -135,7 +135,8 @@ fun SettingsHubScreen(
         Triple("Globální Sdílení", "P2P MATICE", 1),
         Triple("Zdroje dat", "INTEGRACE", 2),
         Triple("Reticulum P2P", "MESH UZEL", 3),
-        Triple("Soukromí & Záloha", "TREZOR", 4)
+        Triple("Soukromí & Záloha", "TREZOR", 4),
+        Triple("Rodina", "SOUHLASY", 5)
     )
 
     val heroMeta = when (selectedTab) {
@@ -159,10 +160,15 @@ fun SettingsHubScreen(
             Color(0xFFA855F7),
             "Suverénní Uzel Reticulum P2P" to "Topologie šifrované sítě, propojovací brány a odchozí fronta."
         )
-        else -> Triple(
+        4 -> Triple(
             R.drawable.img_sport_tactical_hero,
             Color(0xFFF59E0B),
             "Geofencing Soukromí & Trezor" to "Automatické ořezávání GPS u bydliště a šifrovaná záloha .p4bk."
+        )
+        else -> Triple(
+            R.drawable.img_motif_body_silhouette,
+            Color(0xFFA855F7),
+            "Rodina & souhlasy" to "Věkový profil, moji rodiče, žádosti dětí a schválená sdílení."
         )
     }
 
@@ -257,7 +263,7 @@ fun SettingsHubScreen(
                                 fontSize = 10.sp
                             )
                             Text(
-                                "SEKCE 0${selectedTab + 1}/05",
+                                "SEKCE 0${selectedTab + 1}/06",
                                 style = MaterialTheme.typography.labelSmall,
                                 fontFamily = JetBrainsMonoFamily,
                                 fontWeight = FontWeight.Bold,
@@ -334,6 +340,7 @@ fun SettingsHubScreen(
             2 -> SourcesSettingsSection(sl)
             3 -> ReticulumSettingsSection(sl)
             4 -> PrivacyAndBackupSection(sl)
+            5 -> FamilySettingsSection(sl)
         }
     }
 }
@@ -812,6 +819,8 @@ private fun GlobalSharingSection(
     val grants by sl.db.grants().all().collectAsState(emptyList())
     val contacts by sl.db.contacts().all().collectAsState(emptyList())
     val groups by sl.db.grants().groups().collectAsState(emptyList())
+    val grantStateFlow = remember(sl) { sl.shareService.consentStateByGrant() }
+    val grantConsentStates by grantStateFlow.collectAsState(emptyMap())
 
     val activeGrants = remember(grants) {
         grants.mapNotNull { runCatching { Wire.json.decodeFromString(ShareGrant.serializer(), it.json) }.getOrNull() }
@@ -1109,12 +1118,11 @@ private fun GlobalSharingSection(
 
                 if (showConfirmSaveDialog) {
                     val diff = currentDiff
-                    val isMinor = sl.settings.ownAgeProfile == app.pulse4.sharing.AgeProfile.MINOR.name
+                    val isMinor = sl.settings.ageState != app.pulse4.sharing.AgeState.ADULT
                     val isRevokingAll = selectedRecipients.isEmpty() || enabledCategories.isEmpty()
                     val needsWideningConfirm = !isRevokingAll && (diff.scopeWidened || diff.planRightsWidened)
                     val needsGuardianConsent = isMinor && !isRevokingAll &&
                         (diff.addedByRecipient.isNotEmpty() || diff.scopeWidened || diff.planRightsWidened)
-                    var guardianChecked by remember(showConfirmSaveDialog) { mutableStateOf(false) }
                     var wideningConfirmed by remember(showConfirmSaveDialog) { mutableStateOf(false) }
                     fun contactName(id: String) = contacts.firstOrNull { it.identity == id }?.displayName ?: id.take(10)
                     fun categoryLabel(cat: Category) = sectionDefs.firstOrNull { it.first == cat }?.second?.first ?: cat.name
@@ -1209,25 +1217,21 @@ private fun GlobalSharingSection(
                                     }
                                 }
                                 if (needsGuardianConsent) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Checkbox(checked = guardianChecked, onCheckedChange = { guardianChecked = it })
-                                        Spacer(Modifier.width(6.dp))
-                                        Text(
-                                            "Potvrzuji souhlas zákonného zástupce s rozšířením tohoto sdílení.",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = Color(0xFFFDE68A)
-                                        )
-                                    }
+                                    Text(
+                                        "Účet nezletilého: rozšíření se odešle rodiči ke schválení a zapne se až po jeho souhlasu. Zúžení se uloží hned. " +
+                                            app.pulse4.ui.Labels.DELIVERED_DATA_NOTE,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color(0xFFFDE68A)
+                                    )
                                 }
                             }
                         },
                         confirmButton = {
                             Button(
-                                enabled = (!needsGuardianConsent || guardianChecked) && (!needsWideningConfirm || wideningConfirmed),
+                                enabled = !needsWideningConfirm || wideningConfirmed,
                                 onClick = {
                                     showConfirmSaveDialog = false
                                     if (incompatibleDirectGrants || !diff.hasChanges) return@Button
-                                    val consentAtMs = if (needsGuardianConsent && guardianChecked) System.currentTimeMillis() else null
                                     scope.launch {
                                         val resultMsg = withContext(Dispatchers.IO) {
                                             val now = System.currentTimeMillis()
@@ -1248,7 +1252,6 @@ private fun GlobalSharingSection(
                                                 newGrant = newGrant,
                                                 existingDirectGrants = directGrants,
                                                 nowMs = now,
-                                                guardianCoConsentAtMs = consentAtMs,
                                             ).fold(
                                                 onSuccess = { saved ->
                                                     isDirty = false
@@ -1266,7 +1269,16 @@ private fun GlobalSharingSection(
                                         notice = resultMsg
                                     }
                                 }
-                            ) { Text(if (isRevokingAll) "Potvrdit odvolání" else "Potvrdit a uložit", fontWeight = FontWeight.Bold) }
+                            ) {
+                                Text(
+                                    when {
+                                        isRevokingAll -> "Potvrdit odvolání"
+                                        needsGuardianConsent -> "Odeslat rodiči ke schválení"
+                                        else -> "Potvrdit a uložit"
+                                    },
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                         },
                         dismissButton = {
                             TextButton(onClick = { showConfirmSaveDialog = false }) { Text("Zrušit", color = Color(0xFF94A3B8)) }
@@ -1321,6 +1333,10 @@ private fun GlobalSharingSection(
                         }
                     }
                     Text(g.fields.joinToString { app.pulse4.ui.Labels.field(it) }, style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8))
+                    grantConsentStates[g.id]?.let { st ->
+                        Spacer(Modifier.height(6.dp))
+                        ConsentStateChip(st)
+                    }
                 }
             }
         }

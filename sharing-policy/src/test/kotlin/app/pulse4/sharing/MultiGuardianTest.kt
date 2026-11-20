@@ -197,11 +197,17 @@ class MultiGuardianTest {
         // and its approvals are then no longer usable for decisions
         val req = Fx.request(grant, guardians = both)
         assertEquals(ConsentCheck.NOT_A_GUARDIAN, decide(req, Fx.decide(req, signer = g2), listOf(revokedAdd, Fx.pending(req))))
-        // the add approval itself can be revoked by the founder
-        val revoke = GuardianConsentPolicy.verifyRevocation(
-            Fx.CHILD, g1, Fx.revocation(Fx.guardianAdd(), signer = g1), listOf(addApproved), bothLinks, Fx.keys.resolver,
-        )
-        assertEquals(ConsentCheck.OK, revoke)
+    }
+
+    @Test
+    fun `a guardian cannot revoke the guardian add approval of another guardian`() {
+        // guardians are equal: neither the founder nor the added guardian may remove the other through a revocation
+        for (signer in listOf(g1, g2)) {
+            val revoke = GuardianConsentPolicy.verifyRevocation(
+                Fx.CHILD, signer, Fx.revocation(Fx.guardianAdd(), signer = signer), listOf(addApproved), bothLinks, Fx.keys.resolver,
+            )
+            assertEquals(ConsentCheck.REVOCATION_NOT_ALLOWED, revoke)
+        }
     }
 
     // ---- removal of guardian links ----
@@ -216,12 +222,8 @@ class MultiGuardianTest {
         val l1Removed = FamilyLinkPolicy.removeLink(l1, g1)
         assertEquals(setOf(g2), guardians(listOf(l1Removed, l2), records))
         assertTrue(effective(listOf(l1Removed, l2), records))
-        // g2 removes g1's link: same
-        val l1RemovedByG2 = FamilyLinkPolicy.removeLink(l1, g2, bothLinks, records)
-        assertEquals(FamilyLinkStatus.REVOKED, l1RemovedByG2.status)
-        assertTrue(effective(listOf(l1RemovedByG2, l2), records))
-        // and the other way round, approval signed by g2, g2 removed, g1 remains
-        val l2Removed = FamilyLinkPolicy.removeLink(l2, g1, bothLinks, records)
+        // the other way round: approval signed by g2, g2 removes its own link, g1 remains
+        val l2Removed = FamilyLinkPolicy.removeLink(l2, g2)
         assertTrue(effective(listOf(l1, l2Removed), listOf(addApproved, byG2)))
         // the new sole guardian can still decide
         val req2 = Fx.request(grant, guardians = setOf(g2), requestId = "r2", nonce = Fx.nonce(2), version = 2)
@@ -273,14 +275,21 @@ class MultiGuardianTest {
     }
 
     @Test
-    fun `any verified guardian may remove another guardians link`() {
+    fun `a guardian can remove only its own link, never another guardians`() {
         val records = listOf(addApproved)
-        assertTrue(FamilyLinkPolicy.isValidLinkRemoval(l2, g1, bothLinks, records))
-        assertTrue(FamilyLinkPolicy.isValidLinkRemoval(l1, g2, bothLinks, records))
-        assertTrue(FamilyLinkPolicy.isValidLinkRemoval(l1, Fx.CHILD, bothLinks, records))
+        // guardian B cannot remove guardian A's link (and vice versa), neither locally nor as an inbound revoke
+        assertFalse(FamilyLinkPolicy.isValidLinkRemoval(l1, g2, bothLinks, records))
+        assertFalse(FamilyLinkPolicy.isValidLinkRemoval(l2, g1, bothLinks, records))
+        assertTrue(runCatching { FamilyLinkPolicy.removeLink(l1, g2, bothLinks, records) }.isFailure)
+        assertTrue(runCatching { FamilyLinkPolicy.removeLink(l2, g1, bothLinks, records) }.isFailure)
+        // only the parent of a VERIFIED link can remove it; the child cannot drop either guardian
         assertTrue(FamilyLinkPolicy.isValidLinkRemoval(l1, g1, bothLinks, records))
+        assertEquals(FamilyLinkStatus.REVOKED, FamilyLinkPolicy.removeLink(l2, g2, bothLinks, records).status)
+        assertFalse(FamilyLinkPolicy.isValidLinkRemoval(l1, Fx.CHILD, bothLinks, records))
+        assertFalse(FamilyLinkPolicy.isValidLinkRemoval(l2, Fx.CHILD, bothLinks, records))
+        assertTrue(runCatching { FamilyLinkPolicy.removeLink(l2, Fx.CHILD, bothLinks, records) }.isFailure)
+        // strangers cannot
         assertFalse(FamilyLinkPolicy.isValidLinkRemoval(l1, Fx.STRANGER, bothLinks, records))
-        assertEquals(FamilyLinkStatus.REVOKED, FamilyLinkPolicy.removeLink(l2, g1, bothLinks, records).status)
         assertTrue(runCatching { FamilyLinkPolicy.removeLink(l2, Fx.STRANGER, bothLinks, records) }.isFailure)
     }
 

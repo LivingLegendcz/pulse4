@@ -31,6 +31,7 @@ import app.pulse4.domain.Provider
 import app.pulse4.domain.Quality
 import app.pulse4.domain.Sport
 import app.pulse4.sharing.AgeProfile
+import app.pulse4.sharing.AgeState
 import app.pulse4.sharing.FamilyLink
 import app.pulse4.sharing.FamilyLinkPolicy
 import app.pulse4.sharing.FamilyLinkStatus
@@ -74,11 +75,11 @@ class PackageBEProductionTest {
     private class FakeSettings(
         override var zoneId: String = "UTC",
         override var privacyZones: List<PrivacyZone> = emptyList(),
-        override var ownAgeProfile: String = AgeProfile.ADULT.name,
+        ageState: AgeState = AgeState.ADULT,
         override var acceptWeightFromParent: Boolean = false,
         override var childRecipientIdentity: String = "",
     ) : ShareSettingsAccess {
-        val raw = LinkedHashMap<String, String>()
+        val raw = LinkedHashMap<String, String>().also { seedAge(it, ageState) }
         override fun getRaw(key: String): String? = raw[key]
         override fun put(key: String, value: String) { raw[key] = value }
     }
@@ -235,6 +236,10 @@ class PackageBEProductionTest {
         override fun inbox() = inboxDao
         override fun familyLinks() = familyDao
         override fun pendingRequests() = pendingDao
+        val contactDao = InMemoryContactDao()
+        val consentDao = InMemoryGuardianConsentDao()
+        override fun contacts() = contactDao
+        override fun guardianConsents() = consentDao
     }
 
     private fun buildOutbox(data: FakeDataAccess): OutboxManager {
@@ -517,9 +522,9 @@ class PackageBEProductionTest {
     }
 
     @Test
-    fun `N-2 and RE-7 minor narrows global profile succeeds while unconsented expansion fails without revoking existing`() {
+    fun `N-2 and RE-7 minor narrows global profile succeeds while unapproved expansion creates a request without revoking existing`() {
         val data = FakeDataAccess()
-        val settings = FakeSettings(zoneId = "UTC", ownAgeProfile = AgeProfile.MINOR.name)
+        val settings = FakeSettings(zoneId = "UTC", ageState = AgeState.MINOR)
         val outbox = buildOutbox(data)
         val service = buildShareService(data, settings, outbox, selfId = "child-1")
 
@@ -533,26 +538,36 @@ class PackageBEProductionTest {
 
         val today = LocalDate.now(ZoneId.of("UTC"))
         val now = 10_000L
+        // A legacy grant (stored before guardian approvals existed): kept in the DB, not effective, never evidence.
         val existing = ShareGrant(
             id = "g-minor-1", ownerId = "child-1", recipients = setOf("parent-1"),
             fields = setOf(Field.SLEEP_DURATION, Field.WEIGHT),
             scope = TimeScope.continuousFrom(today.minusDays(7)), createdAtMs = now,
         )
-        service.saveGrantWithPolicy(existing, guardianCoConsentAtMs = now).getOrThrow()
+        data.grants().upsert(GrantRow(existing.id, false, Wire.json.encodeToString(ShareGrant.serializer(), existing)))
+        assertTrue(service.effectiveGrants(now).isEmpty())
 
-        // Expand without guardian consent -> fails and does NOT revoke g-minor-1
+        // Expand: not saved, nothing revoked, a PENDING guardian request is created and queued for the guardian.
         val expanded = existing.copy(id = "g-minor-expand", fields = setOf(Field.SLEEP_DURATION, Field.WEIGHT, Field.HRV_DAILY))
-        val failExpand = service.saveGlobalDirectProfile(expanded, listOf(existing), nowMs = now + 100L, guardianCoConsentAtMs = null)
+        val failExpand = service.saveGlobalDirectProfile(expanded, listOf(existing), nowMs = now + 100L)
         assertTrue(failExpand.isFailure)
+        assertTrue(failExpand.exceptionOrNull() is ConsentPendingException)
         assertFalse(data.grants().get("g-minor-1")!!.revoked)
         assertNull(data.grants().get("g-minor-expand"))
+        assertEquals(listOf("PENDING"), data.consentDao.map.values.map { it.status })
+        assertEquals(listOf("parent-1"), outbox.due(now + 100L).filter { it.kind == Kinds.GUARDIAN_CONSENT_REQUEST }.map { it.recipient })
 
-        // Narrow without guardian consent -> succeeds and revokes g-minor-1
+        // Narrow: saved immediately without any approval (the approval id of the covering grant is reused).
         val narrowed = existing.copy(id = "g-minor-narrow", fields = setOf(Field.SLEEP_DURATION))
-        val okNarrow = service.saveGlobalDirectProfile(narrowed, listOf(existing), nowMs = now + 200L, guardianCoConsentAtMs = null)
+        val okNarrow = service.saveGlobalDirectProfile(narrowed, listOf(existing), nowMs = now + 200L)
         assertTrue(okNarrow.isSuccess)
-        assertTrue(data.grants().get("g-minor-1")!!.revoked)
-        assertFalse(data.grants().get("g-minor-narrow")!!.revoked)
+        assertEquals("g-minor-1", okNarrow.getOrThrow()!!.id)
+        assertFalse(data.grants().get("g-minor-1")!!.revoked)
+        assertEquals(
+            setOf(Field.SLEEP_DURATION),
+            Wire.json.decodeFromString(ShareGrant.serializer(), data.grants().get("g-minor-1")!!.json).fields,
+        )
+        assertNull(data.grants().get("g-minor-narrow"))
     }
 
     @Test
@@ -794,7 +809,7 @@ class PackageBEProductionTest {
     fun `SEC-2 FAMILY_LINK_REQUEST blocks UUID hijack and VERIFIED downgrade and RESPONSE requires PENDING`() {
         val data = FakeDataAccess()
         val settings = FakeSettings()
-        val handlers = buildFamilyAndWeightHandlers(data, settings)
+        val handlers = buildGuardianConsentHandlers(buildShareService(data, settings, buildOutbox(data), selfId = "unused"))
         val reqHandler = handlers.getValue(Kinds.FAMILY_LINK_REQUEST)
         val respHandler = handlers.getValue(Kinds.FAMILY_LINK_RESPONSE)
 

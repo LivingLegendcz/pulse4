@@ -69,6 +69,7 @@ import androidx.compose.ui.unit.sp
 import app.pulse4.android.data.ContactRow
 import app.pulse4.android.data.PendingRequestRow
 import app.pulse4.android.data.ReceivedRow
+import app.pulse4.android.di.ConsentUiState
 import app.pulse4.android.di.ServiceLocator
 import app.pulse4.android.ui.theme.JetBrainsMonoFamily
 import app.pulse4.domain.Provider
@@ -91,6 +92,7 @@ import kotlinx.coroutines.withContext
 fun SharingOverviewScreen(
     sl: ServiceLocator,
     onBack: () -> Unit,
+    initialTab: Int = 0,
 ) {
     val scope = rememberCoroutineScope()
     val contacts by sl.db.contacts().all().collectAsState(emptyList())
@@ -129,9 +131,12 @@ fun SharingOverviewScreen(
             if (awaiting.isEmpty()) null else Triple(g, grp, awaiting)
         }
     }
-    val totalPendingCount = pendingFamilyRequests.size + pendingHandoverGroups.size + awaitingConsentGrants.size
+    val guardianInboxCount = rememberGuardianInboxCount(sl)
+    val grantStateFlow = remember(sl) { sl.shareService.consentStateByGrant() }
+    val grantStates by grantStateFlow.collectAsState(emptyMap())
+    val totalPendingCount = pendingFamilyRequests.size + pendingHandoverGroups.size + awaitingConsentGrants.size + guardianInboxCount
 
-    var selectedTab by remember { mutableStateOf(0) } // 0 = Sdílím s ostatními, 1 = Ostatní sdílejí se mnou, 2 = Čekající žádosti
+    var selectedTab by remember { mutableStateOf(initialTab) } // 0 = Sdílím s ostatními, 1 = Ostatní sdílejí se mnou, 2 = Čekající žádosti
     var notice by remember { mutableStateOf<String?>(null) }
     var revocationPlanDialog by remember { mutableStateOf<RevocationPlan?>(null) }
     var editingGrant by remember { mutableStateOf<ShareGrant?>(null) }
@@ -326,6 +331,9 @@ fun SharingOverviewScreen(
         ) {
             when (selectedTab) {
                 0 -> OutgoingGrantsTab(
+                    sl = sl,
+                    grantStates = grantStates,
+                    onNotice = { notice = it },
                     grants = myActiveGrants,
                     groupsById = groupsById,
                     contacts = contacts,
@@ -353,12 +361,19 @@ fun SharingOverviewScreen(
 
 @Composable
 private fun OutgoingGrantsTab(
+    sl: ServiceLocator,
+    grantStates: Map<String, ConsentUiState>,
+    onNotice: (String) -> Unit,
     grants: List<ShareGrant>,
     groupsById: Map<String, Group>,
     contacts: List<ContactRow>,
     onEdit: (ShareGrant) -> Unit,
     onRevoke: (ShareGrant) -> Unit,
 ) {
+    val scope = rememberCoroutineScope()
+    // Child: requests that wait for a guardian (their grants do not exist yet) and the delivered-data note.
+    ChildRequestsSection(sl = sl, onNotice = onNotice)
+
     if (grants.isEmpty()) {
         EmptyStateCard(
             title = "Zatím nesdílíte žádná data",
@@ -436,6 +451,22 @@ private fun OutgoingGrantsTab(
                                 fontWeight = FontWeight.SemiBold,
                                 color = catColor
                             )
+                        }
+                    }
+                }
+
+                val consentState = grantStates[grant.id]
+                if (consentState != null && consentState != ConsentUiState.NOT_REQUIRED) {
+                    Spacer(Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        ConsentStateChip(consentState)
+                        if (consentState == ConsentUiState.NEEDS_APPROVAL) {
+                            TextButton(onClick = {
+                                scope.launch {
+                                    val res = withContext(Dispatchers.IO) { sl.shareService.requestGuardianConsent(grant) }
+                                    onNotice(res.fold({ "Žádost o schválení byla odeslána rodiči." }, { it.message ?: "Žádost se nepodařilo odeslat." }))
+                                }
+                            }) { Text("Požádat rodiče o schválení", color = Color(0xFF38BDF8), fontWeight = FontWeight.Bold) }
                         }
                     }
                 }
@@ -601,14 +632,18 @@ private fun PendingRequestsTab(
     val scope = rememberCoroutineScope()
     val isMinor by sl.settings.isMinorFlow.collectAsState()
     var pendingMinorAwaitingGrant by remember { mutableStateOf<Triple<ShareGrant, Group, Set<String>>?>(null) }
+    val guardianInboxCount = rememberGuardianInboxCount(sl)
 
-    if (pendingFamilyRequests.isEmpty() && pendingHandoverGroups.isEmpty() && awaitingConsentGrants.isEmpty()) {
+    if (pendingFamilyRequests.isEmpty() && pendingHandoverGroups.isEmpty() && awaitingConsentGrants.isEmpty() && guardianInboxCount == 0) {
         EmptyStateCard(
             title = "Žádné čekající žádosti",
-            subtitle = "Všechny rodinné vazby, předání správy kruhů i potvrzení nových členů jsou vyřízené."
+            subtitle = "Všechny rodinné vazby, předání správy kruhů, žádosti dětí i potvrzení nových členů jsou vyřízené."
         )
         return
     }
+
+    // 0. Žádosti dětí o souhlas (zákonný zástupce): schválit / zamítnout
+    GuardianInboxSection(sl = sl, onNotice = onNotice)
 
     // 1. Čekající žádosti o rodinné propojení
     pendingFamilyRequests.forEach { req ->
@@ -617,6 +652,7 @@ private fun PendingRequestsTab(
         }
         val senderName = contacts.firstOrNull { it.identity == req.fromId }?.displayName ?: req.fromId.take(12)
         val profileLabel = if (link?.childAgeProfile == AgeProfile.MINOR) "Dítě / nezletilý" else "Dospělý člen"
+        val childInitiated = link != null && req.fromId == link.childId
 
         Card(
             shape = RoundedCornerShape(18.dp),
@@ -631,7 +667,7 @@ private fun PendingRequestsTab(
                     Icon(Icons.Outlined.FamilyRestroom, contentDescription = null, tint = Color(0xFF2DD4BF), modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(8.dp))
                     Text(
-                        "Žádost o rodinné propojení",
+                        if (childInitiated) "Dítě vás žádá o roli rodiče" else "Žádost o rodinné propojení",
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.ExtraBold,
                         color = Color.White
@@ -644,7 +680,12 @@ private fun PendingRequestsTab(
                     color = Color(0xFFCBD5E1)
                 )
                 Text(
-                    "Potvrzením nevznikne automatické sdílení zdravotních dat — oprávnění se nastavují zvlášť.",
+                    if (childInitiated) {
+                        "Potvrdíte-li, stanete se rodičem (zákonným zástupcem) tohoto dítěte: budete schvalovat jeho sdílení a kruhy. " +
+                            "Potvrzujte jen dítě, které opravdu znáte. Sami se můžete kdykoli odebrat; jiného rodiče odebrat nelze."
+                    } else {
+                        "Potvrzením nevznikne automatické sdílení zdravotních dat — oprávnění se nastavují zvlášť."
+                    },
                     style = MaterialTheme.typography.labelSmall,
                     color = Color(0xFF94A3B8)
                 )
@@ -794,7 +835,7 @@ private fun PendingRequestsTab(
                             scope.launch {
                                 val res = withContext(Dispatchers.IO) {
                                     val updated = grant.copy(recipients = grant.recipients + awaitingIds)
-                                    sl.shareService.saveGrantWithPolicy(updated, null).also {
+                                    sl.shareService.saveGrantWithPolicy(updated).also {
                                         if (it.isSuccess) sl.shareService.planAndEnqueue(System.currentTimeMillis())
                                     }
                                 }
@@ -817,7 +858,6 @@ private fun PendingRequestsTab(
     }
 
     pendingMinorAwaitingGrant?.let { (grant, grp, awaitingIds) ->
-        var guardianChecked by remember { mutableStateOf(false) }
         AlertDialog(
             onDismissRequest = { pendingMinorAwaitingGrant = null },
             containerColor = Color(0xFF0A101B),
@@ -833,44 +873,33 @@ private fun PendingRequestsTab(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        "Tento účet má profil nezletilého (MINOR). Rozšíření sdílení v kruhu '${grp.name}' pro nové členy vyžaduje výslovný souhlas zákonného zástupce.",
+                        "Tento účet má profil nezletilého. Rozšíření sdílení v kruhu '${grp.name}' pro nové členy vyžaduje schválení zákonného zástupce na jeho zařízení. Žádost se odešle a sdílení se rozšíří až po schválení.",
                         style = MaterialTheme.typography.bodySmall
                     )
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(checked = guardianChecked, onCheckedChange = { guardianChecked = it })
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            "Potvrzuji souhlas zákonného zástupce s rozšířením tohoto sdílení.",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Color(0xFFFDE68A)
-                        )
-                    }
                 }
             },
             confirmButton = {
                 Button(
-                    enabled = guardianChecked,
                     onClick = {
-                        if (!guardianChecked) return@Button
                         pendingMinorAwaitingGrant = null
                         scope.launch {
                             val res = withContext(Dispatchers.IO) {
                                 val updated = grant.copy(recipients = grant.recipients + awaitingIds)
                                 val now = System.currentTimeMillis()
-                                sl.shareService.saveGrantWithPolicy(updated, now).also {
+                                sl.shareService.saveGrantWithPolicy(updated).also {
                                     if (it.isSuccess) sl.shareService.planAndEnqueue(now)
                                 }
                             }
                             onNotice(
                                 res.fold(
-                                    onSuccess = { "Sdílení v kruhu '${grp.name}' rozšířeno pro nové členy (se souhlasem zákonného zástupce)." },
+                                    onSuccess = { "Sdílení v kruhu '${grp.name}' rozšířeno pro nové členy." },
                                     onFailure = { it.message ?: "Nepodařilo se potvrdit rozšíření sdílení." }
                                 )
                             )
                         }
                     }
                 ) {
-                    Text("Potvrdit a povolit", fontWeight = FontWeight.Bold)
+                    Text("Odeslat rodiči ke schválení", fontWeight = FontWeight.Bold)
                 }
             },
             dismissButton = {
@@ -956,7 +985,6 @@ private fun EditGrantDialog(
 ) {
     val scope = rememberCoroutineScope()
     val isMinor by sl.settings.isMinorFlow.collectAsState()
-    var guardianConfirmed by remember(isMinor) { mutableStateOf(!isMinor) }
     var selectedSourceChoice by remember(grant.id) {
         mutableStateOf(GrantEditor.sourceChoiceFrom(grant.sources))
     }
@@ -968,6 +996,29 @@ private fun EditGrantDialog(
     var includeActRoute by remember(grant.id) { mutableStateOf(Field.ACT_ROUTE in grant.fields) }
     var includeActExactTime by remember(grant.id) { mutableStateOf(Field.ACT_EXACT_TIME in grant.fields) }
     var includeActFullRecord by remember(grant.id) { mutableStateOf(Field.ACT_FULL_RECORD in grant.fields) }
+
+    fun buildUpdated(): ShareGrant {
+        val explicitAct = if (activityDetailsModified) {
+            buildSet<Field> {
+                if (Field.ACT_CHARTS in grant.fields) add(Field.ACT_CHARTS)
+                if (includeActRoute) add(Field.ACT_ROUTE)
+                if (includeActExactTime) add(Field.ACT_EXACT_TIME)
+                if (includeActFullRecord) add(Field.ACT_FULL_RECORD)
+            }
+        } else {
+            null
+        }
+        return GrantEditor.editGrant(
+            existing = grant,
+            selectedCategories = selectedCategories,
+            selectedSourceChoice = selectedSourceChoice,
+            sourceModified = sourceModified,
+            explicitActivityFields = explicitAct,
+        )
+    }
+    // Narrowing (and no change) is saved immediately even for a child; only widening goes to the guardian.
+    val needsGuardian = isMinor && selectedCategories.isNotEmpty() &&
+        !app.pulse4.sharing.GuardianConsentPolicy.isGrantNarrowing(listOf(grant), buildUpdated())
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1030,56 +1081,26 @@ private fun EditGrantDialog(
                 }
 
                 if (isMinor) {
-                    Card(
-                        shape = RoundedCornerShape(12.dp),
-                        border = BorderStroke(1.dp, Color(0xFFF59E0B).copy(alpha = 0.5f)),
-                        colors = CardDefaults.cardColors(containerColor = Color(0xFF1F1607))
-                    ) {
-                        Row(
-                            Modifier.padding(10.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Checkbox(
-                                checked = guardianConfirmed,
-                                onCheckedChange = { guardianConfirmed = it }
-                            )
-                            Spacer(Modifier.width(6.dp))
-                            Text(
-                                "Účet nezletilého: potvrzuji souhlas zákonného zástupce s úpravou tohoto sdílení.",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = Color(0xFFFDE68A)
-                            )
-                        }
-                    }
+                    Text(
+                        if (needsGuardian) {
+                            "Tato změna sdílení rozšiřuje: odešle se rodiči ke schválení a zapne se až po jeho souhlasu."
+                        } else {
+                            "Změna sdílení zužuje nebo nic nemění: uloží se hned, souhlas rodiče není potřeba."
+                        } + " " + app.pulse4.ui.Labels.DELIVERED_DATA_NOTE,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xFFFDE68A)
+                    )
                 }
             }
         },
         confirmButton = {
             Button(
-                enabled = selectedCategories.isNotEmpty() && guardianConfirmed,
+                enabled = selectedCategories.isNotEmpty(),
                 onClick = {
-                    if (isMinor && !guardianConfirmed) return@Button
-                    val explicitAct = if (activityDetailsModified) {
-                        buildSet<Field> {
-                            if (Field.ACT_CHARTS in grant.fields) add(Field.ACT_CHARTS)
-                            if (includeActRoute) add(Field.ACT_ROUTE)
-                            if (includeActExactTime) add(Field.ACT_EXACT_TIME)
-                            if (includeActFullRecord) add(Field.ACT_FULL_RECORD)
-                        }
-                    } else {
-                        null
-                    }
-                    val updated = GrantEditor.editGrant(
-                        existing = grant,
-                        selectedCategories = selectedCategories,
-                        selectedSourceChoice = selectedSourceChoice,
-                        sourceModified = sourceModified,
-                        explicitActivityFields = explicitAct,
-                    )
+                    val updated = buildUpdated()
                     scope.launch {
                         val res = withContext(Dispatchers.IO) {
-                            val consentTs = if (isMinor && guardianConfirmed) System.currentTimeMillis() else null
-                            sl.shareService.saveGrantWithPolicy(updated, consentTs).also {
+                            sl.shareService.saveGrantWithPolicy(updated).also {
                                 if (it.isSuccess) sl.shareService.planAndEnqueue(System.currentTimeMillis())
                             }
                         }
@@ -1090,7 +1111,7 @@ private fun EditGrantDialog(
                     }
                 }
             ) {
-                Text("Uložit změny", fontWeight = FontWeight.Bold)
+                Text(if (needsGuardian) "Odeslat rodiči ke schválení" else "Uložit změny", fontWeight = FontWeight.Bold)
             }
         },
         dismissButton = {

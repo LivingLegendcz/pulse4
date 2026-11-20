@@ -292,12 +292,15 @@ class GuardianConsentPolicyTest {
         assertEquals(link, GuardianConsentPolicy.guardianLink(listOf(link), emptyList(), Fx.CHILD, Fx.GUARDIAN))
         assertEquals(null, GuardianConsentPolicy.guardianLink(listOf(Fx.link(profile = AgeProfile.ADULT)), emptyList(), Fx.CHILD, Fx.GUARDIAN))
         assertEquals(null, GuardianConsentPolicy.guardianLink(listOf(link), emptyList(), Fx.CHILD, Fx.STRANGER))
-        assertTrue(FamilyLinkPolicy.isValidRemoteRevoke(link, Fx.CHILD, Fx.GUARDIAN))
+        // a VERIFIED link: only the parent may revoke it, a child-authored revoke is invalid on the parent device
+        assertFalse(FamilyLinkPolicy.isValidRemoteRevoke(link, Fx.CHILD, Fx.GUARDIAN))
         assertTrue(FamilyLinkPolicy.isValidRemoteRevoke(link, Fx.GUARDIAN, Fx.CHILD))
         assertFalse(FamilyLinkPolicy.isValidRemoteRevoke(link, Fx.STRANGER, Fx.GUARDIAN))
         assertFalse(FamilyLinkPolicy.isValidRemoteRevoke(link, Fx.GUARDIAN, Fx.GUARDIAN))
         val already = Fx.link(status = FamilyLinkStatus.REVOKED)
         assertEquals(already, FamilyLinkPolicy.removeLink(already, Fx.CHILD))
+        assertFalse(FamilyLinkPolicy.canRemove(link, Fx.CHILD))
+        assertTrue(runCatching { FamilyLinkPolicy.removeLink(link, Fx.CHILD) }.isFailure)
         assertTrue(runCatching { FamilyLinkPolicy.removeLink(link, Fx.STRANGER) }.isFailure)
         assertTrue(runCatching { FamilyLinkPolicy.removeLink(Fx.link(status = FamilyLinkStatus.REJECTED), Fx.CHILD) }.isFailure)
     }

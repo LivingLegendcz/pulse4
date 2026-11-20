@@ -1109,12 +1109,11 @@ private fun GlobalSharingSection(
 
                 if (showConfirmSaveDialog) {
                     val diff = currentDiff
-                    val isMinor = sl.settings.ownAgeProfile == app.pulse4.sharing.AgeProfile.MINOR.name
+                    val isMinor = sl.settings.ageState != app.pulse4.sharing.AgeState.ADULT
                     val isRevokingAll = selectedRecipients.isEmpty() || enabledCategories.isEmpty()
                     val needsWideningConfirm = !isRevokingAll && (diff.scopeWidened || diff.planRightsWidened)
                     val needsGuardianConsent = isMinor && !isRevokingAll &&
                         (diff.addedByRecipient.isNotEmpty() || diff.scopeWidened || diff.planRightsWidened)
-                    var guardianChecked by remember(showConfirmSaveDialog) { mutableStateOf(false) }
                     var wideningConfirmed by remember(showConfirmSaveDialog) { mutableStateOf(false) }
                     fun contactName(id: String) = contacts.firstOrNull { it.identity == id }?.displayName ?: id.take(10)
                     fun categoryLabel(cat: Category) = sectionDefs.firstOrNull { it.first == cat }?.second?.first ?: cat.name
@@ -1209,25 +1208,20 @@ private fun GlobalSharingSection(
                                     }
                                 }
                                 if (needsGuardianConsent) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Checkbox(checked = guardianChecked, onCheckedChange = { guardianChecked = it })
-                                        Spacer(Modifier.width(6.dp))
-                                        Text(
-                                            "Potvrzuji souhlas zákonného zástupce s rozšířením tohoto sdílení.",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = Color(0xFFFDE68A)
-                                        )
-                                    }
+                                    Text(
+                                        "Účet nezletilého: rozšíření se odešle zákonnému zástupci ke schválení a zapne se až po něm. Zúžení se uloží hned.",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color(0xFFFDE68A)
+                                    )
                                 }
                             }
                         },
                         confirmButton = {
                             Button(
-                                enabled = (!needsGuardianConsent || guardianChecked) && (!needsWideningConfirm || wideningConfirmed),
+                                enabled = !needsWideningConfirm || wideningConfirmed,
                                 onClick = {
                                     showConfirmSaveDialog = false
                                     if (incompatibleDirectGrants || !diff.hasChanges) return@Button
-                                    val consentAtMs = if (needsGuardianConsent && guardianChecked) System.currentTimeMillis() else null
                                     scope.launch {
                                         val resultMsg = withContext(Dispatchers.IO) {
                                             val now = System.currentTimeMillis()
@@ -1248,7 +1242,6 @@ private fun GlobalSharingSection(
                                                 newGrant = newGrant,
                                                 existingDirectGrants = directGrants,
                                                 nowMs = now,
-                                                guardianCoConsentAtMs = consentAtMs,
                                             ).fold(
                                                 onSuccess = { saved ->
                                                     isDirty = false

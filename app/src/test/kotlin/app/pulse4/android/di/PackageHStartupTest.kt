@@ -245,8 +245,8 @@ class PackageHStartupTest {
 
         withTempDb { parentDb ->
             withTempDb { childDb ->
-                val parentSettings = Settings(parentDb)
-                val childSettings = Settings(childDb)
+                val parentSettings = Settings(parentDb).also { it.ageProfileManager.declare(app.pulse4.sharing.AgeState.ADULT, 1L) }
+                val childSettings = Settings(childDb).also { it.ageProfileManager.declare(app.pulse4.sharing.AgeState.ADULT, 1L) }
                 val parentOutbox = OutboxManager(RoomOutboxStore(parentDb))
                 val parentShare = ShareService(
                     data = RoomPulseDataAccess(parentDb),
@@ -370,7 +370,16 @@ class PackageHStartupTest {
                 val childReceiver = Receiver(
                     selfId = childLxmf,
                     store = RoomReceiverStore(childDb),
-                    handlers = BuiltInHandlers.all() + buildFamilyAndWeightHandlers(
+                    handlers = BuiltInHandlers.all() + buildGuardianConsentHandlers(
+                        ShareService(
+                            data = RoomPulseDataAccess(childDb),
+                            settings = RealShareSettingsAccess(childSettings),
+                            outbox = OutboxManager(RoomOutboxStore(childDb)),
+                            sentLedger = RoomSentLedger(childDb),
+                            recordSent = { r, k, v, h -> childDb.inbox().putSent(app.pulse4.android.data.SentRow(r, k, v, h)) },
+                            selfIdProvider = { childLxmf },
+                        ),
+                    ) + buildFamilyAndWeightHandlers(
                         RoomPulseDataAccess(childDb),
                         RealShareSettingsAccess(childSettings),
                     ) + mapOf(

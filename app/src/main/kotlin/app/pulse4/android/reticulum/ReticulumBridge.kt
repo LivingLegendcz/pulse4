@@ -1692,6 +1692,16 @@ class ReticulumBridge internal constructor(
         }
     }
 
+    /**
+     * Detached Ed25519 signature over [bytes] with the own identity key (guardian-consent decisions, revocations
+     * and age releases carry their own domain header inside [bytes]). Starts the bridge first so the key is loaded.
+     */
+    fun signDetached(bytes: ByteArray): ByteArray {
+        ensureStarted()
+        val priv = synchronized(this) { ed25519PrivKey } ?: error("Own identity key is not available")
+        return app.pulse4.sync.E2eeCrypto.signDetached(priv.encoded, bytes)
+    }
+
     private fun signAnnounceData(data: ByteArray): ByteArray {
         val priv = ed25519PrivKey ?: run {
             val privB64 = readIdentitySecret() ?: ""

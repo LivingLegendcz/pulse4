@@ -86,6 +86,7 @@ interface ContactDao {
     @Query("SELECT * FROM contact ORDER BY displayName") fun all(): Flow<List<ContactRow>>
     @Query("SELECT * FROM contact") fun allNow(): List<ContactRow>
     @Query("SELECT COUNT(*) FROM contact WHERE identity = :id") fun count(id: String): Int
+    @Query("SELECT * FROM contact WHERE identity = :id") fun get(id: String): ContactRow?
     @Query("DELETE FROM contact WHERE identity = :id") fun delete(id: String)
     @Query("DELETE FROM contact") fun deleteAll()
 }
@@ -195,4 +196,13 @@ interface PendingRequestDao {
     @Query("SELECT * FROM pending_request WHERE id = :id") fun get(id: String): PendingRequestRow?
     @Insert(onConflict = OnConflictStrategy.REPLACE) fun upsert(row: PendingRequestRow)
     @Query("DELETE FROM pending_request WHERE id = :id") fun delete(id: String)
+}
+
+@Dao
+interface GuardianConsentDao {
+    @Query("SELECT * FROM guardian_consent ORDER BY createdAtMs DESC") fun all(): Flow<List<GuardianConsentRow>>
+    @Query("SELECT * FROM guardian_consent ORDER BY createdAtMs") fun allNow(): List<GuardianConsentRow>
+    @Query("SELECT * FROM guardian_consent WHERE role = :role ORDER BY createdAtMs") fun byRole(role: String): List<GuardianConsentRow>
+    @Query("SELECT * FROM guardian_consent WHERE requestId = :id") fun get(id: String): GuardianConsentRow?
+    @Insert(onConflict = OnConflictStrategy.REPLACE) fun upsert(row: GuardianConsentRow)
 }

@@ -794,7 +794,7 @@ private fun PendingRequestsTab(
                             scope.launch {
                                 val res = withContext(Dispatchers.IO) {
                                     val updated = grant.copy(recipients = grant.recipients + awaitingIds)
-                                    sl.shareService.saveGrantWithPolicy(updated, null).also {
+                                    sl.shareService.saveGrantWithPolicy(updated).also {
                                         if (it.isSuccess) sl.shareService.planAndEnqueue(System.currentTimeMillis())
                                     }
                                 }
@@ -817,7 +817,6 @@ private fun PendingRequestsTab(
     }
 
     pendingMinorAwaitingGrant?.let { (grant, grp, awaitingIds) ->
-        var guardianChecked by remember { mutableStateOf(false) }
         AlertDialog(
             onDismissRequest = { pendingMinorAwaitingGrant = null },
             containerColor = Color(0xFF0A101B),
@@ -833,44 +832,33 @@ private fun PendingRequestsTab(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        "Tento účet má profil nezletilého (MINOR). Rozšíření sdílení v kruhu '${grp.name}' pro nové členy vyžaduje výslovný souhlas zákonného zástupce.",
+                        "Tento účet má profil nezletilého. Rozšíření sdílení v kruhu '${grp.name}' pro nové členy vyžaduje schválení zákonného zástupce na jeho zařízení. Žádost se odešle a sdílení se rozšíří až po schválení.",
                         style = MaterialTheme.typography.bodySmall
                     )
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(checked = guardianChecked, onCheckedChange = { guardianChecked = it })
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            "Potvrzuji souhlas zákonného zástupce s rozšířením tohoto sdílení.",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Color(0xFFFDE68A)
-                        )
-                    }
                 }
             },
             confirmButton = {
                 Button(
-                    enabled = guardianChecked,
                     onClick = {
-                        if (!guardianChecked) return@Button
                         pendingMinorAwaitingGrant = null
                         scope.launch {
                             val res = withContext(Dispatchers.IO) {
                                 val updated = grant.copy(recipients = grant.recipients + awaitingIds)
                                 val now = System.currentTimeMillis()
-                                sl.shareService.saveGrantWithPolicy(updated, now).also {
+                                sl.shareService.saveGrantWithPolicy(updated).also {
                                     if (it.isSuccess) sl.shareService.planAndEnqueue(now)
                                 }
                             }
                             onNotice(
                                 res.fold(
-                                    onSuccess = { "Sdílení v kruhu '${grp.name}' rozšířeno pro nové členy (se souhlasem zákonného zástupce)." },
+                                    onSuccess = { "Sdílení v kruhu '${grp.name}' rozšířeno pro nové členy." },
                                     onFailure = { it.message ?: "Nepodařilo se potvrdit rozšíření sdílení." }
                                 )
                             )
                         }
                     }
                 ) {
-                    Text("Potvrdit a povolit", fontWeight = FontWeight.Bold)
+                    Text("Odeslat ke schválení", fontWeight = FontWeight.Bold)
                 }
             },
             dismissButton = {
@@ -956,7 +944,6 @@ private fun EditGrantDialog(
 ) {
     val scope = rememberCoroutineScope()
     val isMinor by sl.settings.isMinorFlow.collectAsState()
-    var guardianConfirmed by remember(isMinor) { mutableStateOf(!isMinor) }
     var selectedSourceChoice by remember(grant.id) {
         mutableStateOf(GrantEditor.sourceChoiceFrom(grant.sources))
     }
@@ -1030,35 +1017,18 @@ private fun EditGrantDialog(
                 }
 
                 if (isMinor) {
-                    Card(
-                        shape = RoundedCornerShape(12.dp),
-                        border = BorderStroke(1.dp, Color(0xFFF59E0B).copy(alpha = 0.5f)),
-                        colors = CardDefaults.cardColors(containerColor = Color(0xFF1F1607))
-                    ) {
-                        Row(
-                            Modifier.padding(10.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Checkbox(
-                                checked = guardianConfirmed,
-                                onCheckedChange = { guardianConfirmed = it }
-                            )
-                            Spacer(Modifier.width(6.dp))
-                            Text(
-                                "Účet nezletilého: potvrzuji souhlas zákonného zástupce s úpravou tohoto sdílení.",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = Color(0xFFFDE68A)
-                            )
-                        }
-                    }
+                    Text(
+                        "Účet nezletilého: rozšíření oprávnění se odešle zákonnému zástupci ke schválení, zúžení se uloží hned.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xFFFDE68A)
+                    )
                 }
             }
         },
         confirmButton = {
             Button(
-                enabled = selectedCategories.isNotEmpty() && guardianConfirmed,
+                enabled = selectedCategories.isNotEmpty(),
                 onClick = {
-                    if (isMinor && !guardianConfirmed) return@Button
                     val explicitAct = if (activityDetailsModified) {
                         buildSet<Field> {
                             if (Field.ACT_CHARTS in grant.fields) add(Field.ACT_CHARTS)
@@ -1078,8 +1048,7 @@ private fun EditGrantDialog(
                     )
                     scope.launch {
                         val res = withContext(Dispatchers.IO) {
-                            val consentTs = if (isMinor && guardianConfirmed) System.currentTimeMillis() else null
-                            sl.shareService.saveGrantWithPolicy(updated, consentTs).also {
+                            sl.shareService.saveGrantWithPolicy(updated).also {
                                 if (it.isSuccess) sl.shareService.planAndEnqueue(System.currentTimeMillis())
                             }
                         }

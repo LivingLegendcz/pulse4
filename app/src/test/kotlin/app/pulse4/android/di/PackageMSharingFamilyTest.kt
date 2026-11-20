@@ -110,9 +110,10 @@ class PackageMSharingFamilyTest {
         insertMembershipRow(ownerDb, owner, missing, group, "ev-missing", DeliveryState.CANCELLED)
 
         val ownerOutbox = OutboxManager(RoomOutboxStore(ownerDb))
+        val ownerSettings = Settings(ownerDb).also { it.ageProfileManager.declare(app.pulse4.sharing.AgeState.ADULT, 1L) }
         val ownerShare = ShareService(
             data = RoomPulseDataAccess(ownerDb),
-            settings = RealShareSettingsAccess(Settings(ownerDb)),
+            settings = RealShareSettingsAccess(ownerSettings),
             outbox = ownerOutbox,
             sentLedger = RoomSentLedger(ownerDb),
             recordSent = { r, k, v, h -> RoomSentLedger(ownerDb).record(r, k, v, h) },
@@ -308,7 +309,7 @@ class PackageMSharingFamilyTest {
     @Test
     fun `M3 R4-7 revoke waits for an in-flight planAndEnqueue and leaves the ledger cleared`() {
         val db = newDb()
-        val settings = Settings(db)
+        val settings = Settings(db).also { it.ageProfileManager.declare(app.pulse4.sharing.AgeState.ADULT, 1L) }
         val zone = ZoneId.of(settings.zoneId)
         val today = LocalDate.now(zone)
         val day = today.minusDays(1)

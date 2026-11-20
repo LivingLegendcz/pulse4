@@ -12,9 +12,9 @@ import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
         ObservationRow::class, SourceRecordRow::class, ActivityRow::class, TrackRow::class, AreaStateRow::class,
         ContactRow::class, GrantRow::class, GroupRow::class, OutboxRow::class, ReceiptRow::class, ReceivedRow::class,
         SentRow::class, PlanRevisionRow::class, ProposalRow::class, ExportRow::class, TemplateRow::class, SettingRow::class, ExcludedRow::class,
-        FamilyLinkRow::class, PendingRequestRow::class,
+        FamilyLinkRow::class, PendingRequestRow::class, GuardianConsentRow::class,
     ],
-    version = 3,
+    version = 4,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -31,6 +31,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun exclusions(): ExclusionDao
     abstract fun familyLinks(): FamilyLinkDao
     abstract fun pendingRequests(): PendingRequestDao
+    abstract fun guardianConsents(): GuardianConsentDao
 
     companion object {
         val MIGRATION_1_2 = object : androidx.room.migration.Migration(1, 2) {
@@ -62,13 +63,24 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /** Verified guardian consent: one new table; nothing else changes (no existing row is touched). */
+        val MIGRATION_3_4 = object : androidx.room.migration.Migration(3, 4) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `guardian_consent` (`requestId` TEXT NOT NULL, `role` TEXT NOT NULL, `peerId` TEXT NOT NULL, `subject` TEXT NOT NULL, `subjectId` TEXT NOT NULL, `linkId` TEXT, `permissionVersion` INTEGER NOT NULL, `status` TEXT NOT NULL, `createdAtMs` INTEGER NOT NULL, `expiresAtMs` INTEGER NOT NULL, `decidedAtMs` INTEGER, `requestJson` TEXT NOT NULL, `proposedGrantJson` TEXT, `decisionJson` TEXT, PRIMARY KEY(`requestId`))"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_guardian_consent_role_status` ON `guardian_consent` (`role`, `status`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_guardian_consent_subjectId` ON `guardian_consent` (`subjectId`)")
+            }
+        }
+
         fun open(context: Context, vault: KeyVault): AppDatabase {
             System.loadLibrary("sqlcipher")
             // Heslo předáváme jako bajty; SupportOpenHelperFactory je po otevření vynuluje podle `clearPassphrase`.
             val factory = SupportOpenHelperFactory(vault.databasePassphrase())
             return Room.databaseBuilder(context, AppDatabase::class.java, "pulse4.db")
                 .openHelperFactory(factory)
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                 .allowMainThreadQueries()
                 // Žádné destruktivní migrace: archiv uživatele se nikdy nemaže kvůli změně schématu.
                 .build()

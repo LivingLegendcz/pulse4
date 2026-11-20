@@ -1761,7 +1761,6 @@ private fun GroupBranchMembersAndSharingSection(
 
     // Dialog pro potvrzení zákonného zástupce u nezletilého účtu (MINOR)
     pendingMinorGrant?.let { (grantToSave, catTitle) ->
-        var guardianChecked by remember { mutableStateOf(false) }
         AlertDialog(
             onDismissRequest = { pendingMinorGrant = null },
             containerColor = Color(0xFF0A101B),
@@ -1777,29 +1776,19 @@ private fun GroupBranchMembersAndSharingSection(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        "Tento účet má profil nezletilého (MINOR). Aktivace sdílení sekce '$catTitle' vyžaduje ověřenou rodinnou vazbu a výslovný souhlas zákonného zástupce.",
+                        "Tento účet má profil nezletilého. Aktivace sdílení sekce '$catTitle' vyžaduje schválení zákonného zástupce na jeho zařízení. Žádost se odešle a sdílení se zapne až po schválení.",
                         style = MaterialTheme.typography.bodySmall
                     )
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(checked = guardianChecked, onCheckedChange = { guardianChecked = it })
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            "Potvrzuji souhlas zákonného zástupce s aktivací tohoto sdílení.",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Color(0xFFFDE68A)
-                        )
-                    }
                 }
             },
             confirmButton = {
                 Button(
-                    enabled = guardianChecked,
                     onClick = {
                         pendingMinorGrant = null
                         scope.launch {
                             notice = withContext(Dispatchers.IO) {
                                 val now = System.currentTimeMillis()
-                                val res = sl.shareService.saveGrantWithPolicy(grantToSave, guardianCoConsentAtMs = now)
+                                val res = sl.shareService.saveGrantWithPolicy(grantToSave)
                                 res.fold(
                                     onSuccess = {
                                         sl.shareService.planAndEnqueue(now)
@@ -1811,7 +1800,7 @@ private fun GroupBranchMembersAndSharingSection(
                         }
                     }
                 ) {
-                    Text("Potvrdit a zapnout", fontWeight = FontWeight.Bold)
+                    Text("Odeslat ke schválení", fontWeight = FontWeight.Bold)
                 }
             },
             dismissButton = {
@@ -2160,7 +2149,7 @@ private fun GroupBranchMembersAndSharingSection(
                                     } else {
                                         notice = withContext(Dispatchers.IO) {
                                             val now = System.currentTimeMillis()
-                                            sl.shareService.saveGrantWithPolicy(preparedGrant, null).fold(
+                                            sl.shareService.saveGrantWithPolicy(preparedGrant).fold(
                                                 onSuccess = {
                                                     sl.shareService.planAndEnqueue(now)
                                                     "Sdílení sekce '$catTitle' do kruhu zapnuto."
@@ -2212,7 +2201,7 @@ private fun GroupBranchMembersAndSharingSection(
                                             newGrantId = "",
                                         )) {
                                             is GrantEditor.GroupToggleResult.Save -> {
-                                                sl.shareService.saveGrantWithPolicy(res.grant, null).fold(
+                                                sl.shareService.saveGrantWithPolicy(res.grant).fold(
                                                     onSuccess = {
                                                         sl.shareService.planAndEnqueue(now)
                                                         "Sdílení sekce '$catTitle' bylo zúženo."

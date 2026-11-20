@@ -1,5 +1,6 @@
 package app.pulse4.android.data
 
+import app.pulse4.sharing.AgeState
 import app.pulse4.sharing.PrivacyZone
 import app.pulse4.sync.Wire
 import app.pulse4.ui.SyncProvider
@@ -97,6 +98,7 @@ class Settings(private val dbProvider: () -> AppDatabase) {
             cache[k] = v
             missingKeys.remove(k)
         }
+        if (k == AgeProfileManager.KEY_AGE_V2) refreshAgeFlows()
     }
 
     private fun applyRowsToCache(rows: List<SettingRow>) {
@@ -144,9 +146,7 @@ class Settings(private val dbProvider: () -> AppDatabase) {
         _mapProviderFlow.value = runCatching { MapProvider.valueOf(get("mapProvider", MapProvider.CARTO_DARK.name)) }.getOrDefault(MapProvider.CARTO_DARK)
         _networkModeFlow.value = runCatching { NetworkMode.valueOf(get("networkMode", NetworkMode.AUTO.name)) }.getOrDefault(NetworkMode.AUTO)
         _backgroundServiceEnabledFlow.value = get("backgroundServiceEnabled", "true").toBoolean()
-        val ageProfile = get("ownAgeProfile", "ADULT").let { if (it == "MINOR") "MINOR" else "ADULT" }
-        _ownAgeProfileFlow.value = ageProfile
-        _isMinorFlow.value = (ageProfile == "MINOR")
+        refreshAgeFlows()
         _zoneIdFlow.value = get("zoneId", java.time.ZoneId.systemDefault().id)
     }
 
@@ -162,11 +162,22 @@ class Settings(private val dbProvider: () -> AppDatabase) {
     private val _backgroundServiceEnabledFlow = MutableStateFlow(true)
     val backgroundServiceEnabledFlow: StateFlow<Boolean> get() = _backgroundServiceEnabledFlow
 
-    private val _ownAgeProfileFlow = MutableStateFlow("ADULT")
-    val ownAgeProfileFlow: StateFlow<String> get() = _ownAgeProfileFlow
+    private val _ageStateFlow = MutableStateFlow(AgeState.UNKNOWN)
+    /** Local age state (UNKNOWN until the first-run choice / migration). Written only by [AgeProfileManager]. */
+    val ageStateFlow: StateFlow<AgeState> get() = _ageStateFlow
 
-    private val _isMinorFlow = MutableStateFlow(false)
+    private val _isMinorFlow = MutableStateFlow(true)
+    /** Derived: true whenever the user is not a confirmed ADULT (MINOR or still UNKNOWN). */
     val isMinorFlow: StateFlow<Boolean> get() = _isMinorFlow
+
+    /** The one writer of the age state; all age transitions go through its policy checks. */
+    val ageProfileManager: AgeProfileManager by lazy { AgeProfileManager(::getRaw, ::put) }
+
+    private fun refreshAgeFlows() {
+        val state = ageProfileManager.state
+        _ageStateFlow.value = state
+        _isMinorFlow.value = state != AgeState.ADULT
+    }
 
     private val _zoneIdFlow = MutableStateFlow(java.time.ZoneId.systemDefault().id)
     val zoneIdFlow: StateFlow<String> get() = _zoneIdFlow
@@ -266,17 +277,8 @@ class Settings(private val dbProvider: () -> AppDatabase) {
         }
         set(v) = put("rnsOnboardingCompleted", v.toString())
     var rnsAdvancedMode: Boolean get() = get("rnsAdvancedMode", "false").toBoolean(); set(v) = put("rnsAdvancedMode", v.toString())
-    var ownAgeProfile: String
-        get() = get("ownAgeProfile", "ADULT").let { if (it == "MINOR") "MINOR" else "ADULT" }.also {
-            _ownAgeProfileFlow.value = it
-            _isMinorFlow.value = (it == "MINOR")
-        }
-        set(v) {
-            val normalized = if (v == "MINOR") "MINOR" else "ADULT"
-            put("ownAgeProfile", normalized)
-            _ownAgeProfileFlow.value = normalized
-            _isMinorFlow.value = (normalized == "MINOR")
-        }
+    /** Current local age state; read-only here, changed solely through [ageProfileManager]. */
+    val ageState: AgeState get() = ageProfileManager.state.also { _ageStateFlow.value = it; _isMinorFlow.value = it != AgeState.ADULT }
     /** Hash LXMF propagation destination; prázdné = bez schránky (jen přímá výměna). */
     var propagationNode: String get() = get("propagationNode", ""); set(v) = put("propagationNode", v.trim().lowercase())
 

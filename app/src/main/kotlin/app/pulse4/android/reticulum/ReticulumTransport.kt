@@ -30,6 +30,10 @@ class ReticulumTransport(
     private val settings: Settings,
     private val db: AppDatabase,
     private val outbox: OutboxManager,
+    /** Runs at the start of every [pump] (e.g. consent expiry sweep). Failures never break the pump. */
+    private val beforePump: () -> Unit = {},
+    /** Runs after a received message committed (e.g. completing guardian revocations queued by handlers). */
+    private val afterReceive: (Outcome) -> Unit = {},
     private val extraHandlers: () -> Map<String, KindHandler>,
 ) {
     private var receiver: Receiver? = null
@@ -85,6 +89,7 @@ class ReticulumTransport(
                     return null
                 }
                 val outcome = rx.receive(ev.source, ev.content.toByteArray(Charsets.UTF_8), System.currentTimeMillis())
+                if (outcome is Outcome.Applied) runCatching { afterReceive(outcome) }
                 PLog.i("Pulse4Sync") { "OUTCOME: $outcome" }
                 pumpActiveCallback?.invoke(outcome)
                 // ACK až po commitu transakce; ztracené ACK vyvolá opakování, které se znovu potvrdí.
@@ -107,6 +112,7 @@ class ReticulumTransport(
      * Nikdy nemaže vlastní archiv; nepotvrzené položky zůstávají v outboxu.
      */
     fun pump(nowMs: Long, windowMs: Long, onApplied: () -> Unit = {}): PumpStats {
+        runCatching { beforePump() }
         val info = bridge.ensureStarted()
         val usePropagation = settings.propagationNode.isNotBlank()
         ensureContactsRegistered()

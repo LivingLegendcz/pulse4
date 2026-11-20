@@ -38,11 +38,23 @@ import app.pulse4.provider.SyncArea
 import app.pulse4.provider.SyncEngine
 import app.pulse4.sharing.ActivityProjector
 import app.pulse4.sharing.AgeProfile
+import app.pulse4.sharing.AgeProfileRecord
+import app.pulse4.sharing.AgeSource
+import app.pulse4.sharing.AgeState
+import app.pulse4.sharing.ConsentStatus
+import app.pulse4.sharing.GuardianConsentPolicy
+import app.pulse4.sharing.MembershipAction
+import app.pulse4.sharing.RevocationReason
+import app.pulse4.sharing.terms
 import app.pulse4.sharing.CircleAdminPolicy
 import app.pulse4.sharing.FamilyLink
 import app.pulse4.sharing.FamilyLinkPolicy
 import app.pulse4.sharing.FamilyLinkStatus
 import app.pulse4.sharing.Field
+import app.pulse4.sharing.GuardianAgeRelease
+import app.pulse4.sharing.GuardianConsentRequest
+import app.pulse4.sharing.GuardianDecision
+import app.pulse4.sharing.GuardianRevocation
 import app.pulse4.sharing.Group
 import app.pulse4.sharing.LapIn
 import app.pulse4.sharing.OwnerDayAssembler
@@ -71,7 +83,12 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -326,8 +343,12 @@ class ServiceLocator internal constructor(
     val planService by lazy { PlanService(RoomPlanStore(db)) }
     val planHandlers by lazy { PlanSyncHandlers(planService) }
     val transport by lazy {
-        ReticulumTransport(bridge, settings, db, outbox) {
-            planHandlers.handlers() + buildFamilyAndWeightHandlers(
+        ReticulumTransport(
+            bridge, settings, db, outbox,
+            beforePump = { shareService.expireStaleConsents() },
+            afterReceive = { shareService.drainPendingRevokes() },
+        ) {
+            planHandlers.handlers() + buildGuardianConsentHandlers(shareService) + buildFamilyAndWeightHandlers(
                 data = RoomPulseDataAccess(db),
                 settings = RealShareSettingsAccess(settings),
                 onSnapshotRequest = { childId, nowMs ->
@@ -1665,7 +1686,11 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
 
     internal fun deduplicateBodyBatteryRows(db: AppDatabase) = Companion.deduplicateBodyBatteryRows(db)
 
-    /** Kompletní vymazání všech testovacích dat a reset aktivit k čistému opětovnému stažení. */
+    /**
+     * Kompletní vymazání všech testovacích dat a reset aktivit k čistému opětovnému stažení.
+     * Záměrně NEmaže věkový zámek (nastavení `ageProfile.v2`) ani tabulku `guardian_consent`: test-data wipe nesmí
+     * dítě „odemknout“. Smazání kontaktů znepřístupní podpisové klíče zástupců, takže nic zůstane neúčinné.
+     */
     fun clearTestDataAndResetActivities() {
         sl.db.runInTransaction {
             sl.db.activities().deleteAll()
@@ -2028,9 +2053,18 @@ internal interface PulseDataAccess {
     fun inbox(): InboxDao
     fun familyLinks(): FamilyLinkDao
     fun pendingRequests(): PendingRequestDao
+    fun contacts(): ContactDao
+    fun guardianConsents(): GuardianConsentDao
+
+    /** Several writes that must commit together (Room: one transaction; in-memory fakes: just run the block). */
+    fun <T> inTransaction(block: () -> T): T = block()
 }
 
 internal class RoomPulseDataAccess(private val db: AppDatabase) : PulseDataAccess {
+    override fun contacts() = db.contacts()
+    override fun guardianConsents() = db.guardianConsents()
+    override fun <T> inTransaction(block: () -> T): T = db.runInTransaction(java.util.concurrent.Callable { block() })
+
     override fun observations() = db.observations()
     override fun activities() = db.activities()
     override fun areaStates() = db.areaStates()
@@ -2044,9 +2078,10 @@ internal class RoomPulseDataAccess(private val db: AppDatabase) : PulseDataAcces
 internal interface ShareSettingsAccess {
     val zoneId: String
     val privacyZones: List<app.pulse4.sharing.PrivacyZone>
-    val ownAgeProfile: String
     val acceptWeightFromParent: Boolean
     val childRecipientIdentity: String
+    /** Live age state; fakes without a settings backend may keep the empty default. */
+    val ageStateFlow: kotlinx.coroutines.flow.Flow<app.pulse4.sharing.AgeState> get() = kotlinx.coroutines.flow.emptyFlow()
     fun getRaw(key: String): String?
     fun put(key: String, value: String)
 }
@@ -2054,7 +2089,7 @@ internal interface ShareSettingsAccess {
 internal class RealShareSettingsAccess(private val s: Settings) : ShareSettingsAccess {
     override val zoneId: String get() = s.zoneId
     override val privacyZones: List<app.pulse4.sharing.PrivacyZone> get() = s.privacyZones
-    override val ownAgeProfile: String get() = s.ownAgeProfile
+    override val ageStateFlow: kotlinx.coroutines.flow.Flow<app.pulse4.sharing.AgeState> get() = s.ageStateFlow
     override val acceptWeightFromParent: Boolean get() = s.acceptWeightFromParent
     override val childRecipientIdentity: String get() = s.childRecipientIdentity
     override fun getRaw(key: String) = s.getRaw(key)
@@ -2098,68 +2133,6 @@ internal fun buildFamilyAndWeightHandlers(
         data.areaStates().put(AreaStateRow(areaKey, prevW?.cursorMs, nowMs, nowMs, null, null))
         HandlerResult.Applied
     },
-    Kinds.FAMILY_LINK_REQUEST to KindHandler { env, payload, _, nowMs ->
-        val link = runCatching {
-            Wire.json.decodeFromString(FamilyLink.serializer(), payload)
-        }.getOrNull() ?: return@KindHandler HandlerResult.Rejected(RejectReason.INVALID_PAYLOAD)
-        if (link.childId != env.recipient || link.parentId != env.author) {
-            return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
-        }
-        val existing = data.familyLinks().get(link.id)
-        if (existing != null) {
-            // SEC-2: cizí autor nesmí převzít existující vazbu podle UUID; ověřenou vazbu nelze shodit na PENDING.
-            if (existing.parentId != env.author || existing.childId != env.recipient) {
-                return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
-            }
-            if (link.version <= existing.version) {
-                return@KindHandler HandlerResult.Stale
-            }
-            if (existing.status == FamilyLinkStatus.VERIFIED.name) {
-                return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
-            }
-        }
-        val sanitized = link.copy(status = FamilyLinkStatus.PENDING, verifiedAtMs = null)
-        val sanitizedJson = Wire.json.encodeToString(FamilyLink.serializer(), sanitized)
-        data.familyLinks().upsert(FamilyLinkRow(sanitized.id, sanitized.parentId, sanitized.childId, FamilyLinkStatus.PENDING.name, sanitized.version, sanitizedJson))
-        data.pendingRequests().upsert(
-            PendingRequestRow(
-                id = sanitized.id,
-                kind = "FAMILY_LINK_REQUEST",
-                fromId = sanitized.parentId,
-                toId = sanitized.childId,
-                status = "PENDING",
-                createdAtMs = nowMs,
-                json = sanitizedJson,
-            )
-        )
-        HandlerResult.Applied
-    },
-    Kinds.FAMILY_LINK_RESPONSE to KindHandler { env, payload, _, _ ->
-        val link = runCatching {
-            Wire.json.decodeFromString(FamilyLink.serializer(), payload)
-        }.getOrNull() ?: return@KindHandler HandlerResult.Rejected(RejectReason.INVALID_PAYLOAD)
-        if (link.parentId != env.recipient || link.childId != env.author) {
-            return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
-        }
-        if (link.status != FamilyLinkStatus.VERIFIED && link.status != FamilyLinkStatus.REJECTED) {
-            return@KindHandler HandlerResult.Rejected(RejectReason.INVALID_PAYLOAD)
-        }
-        val existing = data.familyLinks().get(link.id)
-            ?: return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
-        if (existing.parentId != env.recipient || existing.childId != env.author) {
-            return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
-        }
-        // SEC-2: dítě nesmí přepnout REVOKED/REJECTED/VERIFIED bez nového požadavku rodiče (stav musí být PENDING).
-        if (existing.status != FamilyLinkStatus.PENDING.name) {
-            return@KindHandler HandlerResult.Rejected(RejectReason.NOT_PERMITTED)
-        }
-        if (link.version <= existing.version) {
-            return@KindHandler HandlerResult.Stale
-        }
-        val sanitizedJson = Wire.json.encodeToString(FamilyLink.serializer(), link)
-        data.familyLinks().upsert(FamilyLinkRow(link.id, link.parentId, link.childId, link.status.name, link.version, sanitizedJson))
-        HandlerResult.Applied
-    },
     Kinds.SNAPSHOT_REQUEST to KindHandler { env, _, _, nowMs ->
         if (env.objectType != "own_weight") {
             return@KindHandler HandlerResult.Rejected(RejectReason.INVALID_PAYLOAD)
@@ -2194,6 +2167,8 @@ class ShareService internal constructor(
     private val runMigrations: () -> Unit = {},
     private val onScheduleShare: () -> Unit = {},
     private val drainPlanNotifications: () -> List<app.pulse4.training.PlanNotification> = { emptyList() },
+    /** Detached Ed25519 signature with the own identity key (guardian decisions / revocations / releases). */
+    private val signDetached: (ByteArray) -> ByteArray = { error("No signing key available") },
 ) {
     constructor(sl: ServiceLocator) : this(
         data = RoomPulseDataAccess(sl.db),
@@ -2218,12 +2193,26 @@ class ShareService internal constructor(
             }
         },
         drainPlanNotifications = { sl.planHandlers.drainNotifications() },
+        signDetached = { sl.bridge.signDetached(it) },
     )
 
     fun scheduleShare() = onScheduleShare()
 
     private val json = Wire.json
     private val planLock = Any()
+
+    /** The only writer of the local age state. */
+    val ageProfile = AgeProfileManager(settings::getRaw, settings::put)
+
+    internal val consent = GuardianConsentService(
+        data = data,
+        age = ageProfile,
+        outbox = outbox,
+        selfIdProvider = selfIdProvider,
+        sign = signDetached,
+        revokeGrantHook = { grantId, nowMs, reason -> deferRevoke(grantId, nowMs, reason) },
+        broadcastMembership = { group, nowMs, extra, self -> broadcastMembershipUpdate(group, nowMs, extra, selfOverride = self) },
+    )
 
     fun grants(): List<ShareGrant> = data.grants().allNow().map { json.decodeFromString(ShareGrant.serializer(), it.json) }
     fun groups(): Map<String, Group> = data.grants().groupsNow().associate { it.id to json.decodeFromString(Group.serializer(), it.json) }
@@ -2246,61 +2235,82 @@ class ShareService internal constructor(
     internal fun isGrantNarrowing(existingGrants: List<ShareGrant>, candidate: ShareGrant): Boolean =
         app.pulse4.sharing.GuardianConsentPolicy.isGrantNarrowing(existingGrants, candidate)
 
-    fun saveGrantWithPolicy(grant: ShareGrant, guardianCoConsentAtMs: Long? = null): Result<ShareGrant> {
+    /**
+     * Saves a grant honoring the age/consent rules. ADULT, an approved (covered) grant and any narrowing are saved
+     * immediately; for a non-ADULT a widening is NOT saved: a PENDING guardian request is created (or kept) and
+     * the result fails with [ConsentPendingException]. UNKNOWN age fails with [AgeNotConfirmedException].
+     */
+    fun saveGrantWithPolicy(grant: ShareGrant): Result<ShareGrant> {
         if (!grant.active) {
             saveGrantDirect(grant)
             return Result.success(grant)
         }
         val self = selfIdProvider()
-        val ageProfile = AgeProfile.valueOf(settings.ownAgeProfile)
-        if (!FamilyLinkPolicy.canActivateShareGrant(self, ageProfile, grant, familyLinks(), guardianCoConsentAtMs)) {
-            val existingSame = data.grants().get(grant.id)?.let {
-                runCatching { json.decodeFromString(ShareGrant.serializer(), it.json) }.getOrNull()
-            }
-            if (existingSame != null && isGrantNarrowing(listOf(existingSame), grant)) {
-                saveGrantDirect(grant)
-                return Result.success(grant)
-            }
-            return Result.failure(
-                IllegalStateException("Sdílení nelze aktivovat: pro nezletilý účet je nutná ověřená rodinná vazba a souhlas zákonného zástupce.")
-            )
+        val now = System.currentTimeMillis()
+        val existingSame = data.grants().get(grant.id)?.let {
+            runCatching { json.decodeFromString(ShareGrant.serializer(), it.json) }.getOrNull()
         }
-        saveGrantDirect(grant)
-        return Result.success(grant)
+        if (activatable(self, grant, now) ||
+            (existingSame != null && existingSame.active && isGrantNarrowing(listOf(existingSame), grant))
+        ) {
+            saveGrantDirect(grant)
+            return Result.success(grant)
+        }
+        return failWithConsent(grant, now)
     }
 
     /**
-     * N-2 & RE-7: Globální profil nejprve ověří a uloží nový grant, teprve poté odvolá staré přímé granty.
-     * Při selhání politiky (např. nezletilý bez spolupodpisu při rozšiřování) nic neodvolá; zúžení projde.
+     * May [grant] be written as active right away? ADULT: yes. MINOR: only when already covered by a verified
+     * guardian approval. UNKNOWN: never (grandfathered grants stay as they are; only narrowing may rewrite them).
+     */
+    private fun activatable(self: String, grant: ShareGrant, now: Long): Boolean = when (ageProfile.state) {
+        AgeState.ADULT -> grant.active && grant.ownerId == self
+        AgeState.MINOR -> consent.canActivate(self, grant, now)
+        AgeState.UNKNOWN -> false
+    }
+
+    private fun <T> failWithConsent(grant: ShareGrant, now: Long): Result<T> =
+        consent.requestGuardianConsent(grant, now).fold(
+            onSuccess = { Result.failure(ConsentPendingException(it)) },
+            onFailure = { Result.failure(it) },
+        )
+
+    /**
+     * N-2 & RE-7: the global profile first validates and saves the new grant, only then revokes the old direct
+     * grants. A widening for a non-ADULT revokes nothing and creates/keeps a PENDING guardian request (failure
+     * [ConsentPendingException]); narrowing passes (for non-ADULT it reuses the id of the covering old grant so the
+     * existing approval keeps applying).
      */
     fun saveGlobalDirectProfile(
         newGrant: ShareGrant?,
         existingDirectGrants: List<ShareGrant>,
         nowMs: Long = System.currentTimeMillis(),
-        guardianCoConsentAtMs: Long? = null,
     ): Result<ShareGrant?> {
         if (newGrant == null) {
             existingDirectGrants.forEach { old -> revoke(old.id, nowMs) }
             return Result.success(null)
         }
         val self = selfIdProvider()
-        val ageProfile = AgeProfile.valueOf(settings.ownAgeProfile)
-        val policyOk = FamilyLinkPolicy.canActivateShareGrant(
-            self, ageProfile, newGrant, familyLinks(), guardianCoConsentAtMs
-        ) || isGrantNarrowing(existingDirectGrants, newGrant)
-        if (!policyOk) {
-            return Result.failure(
-                IllegalStateException("Sdílení nelze aktivovat: pro nezletilý účet je nutná ověřená rodinná vazba a souhlas zákonného zástupce.")
-            )
+        var toSave = newGrant
+        val narrowing = isGrantNarrowing(existingDirectGrants, newGrant)
+        if (narrowing && ageProfile.state != AgeState.ADULT) {
+            val survivor = existingDirectGrants.filter { it.active }.sortedBy { it.id }
+                .firstOrNull { GuardianConsentPolicy.covers(it.terms(), newGrant.terms()) && it.groupId == newGrant.groupId }
+            if (survivor != null) {
+                toSave = newGrant.copy(id = survivor.id, createdAtMs = survivor.createdAtMs)
+            } else if (ageProfile.state == AgeState.UNKNOWN) {
+                ageProfile.setGrandfatheredGrantIds(ageProfile.grandfatheredGrantIds() + newGrant.id)
+            }
         }
-        saveGrantDirect(newGrant)
+        if (!(activatable(self, toSave, nowMs) || narrowing)) return failWithConsent(newGrant, nowMs)
+        saveGrantDirect(toSave)
         existingDirectGrants.forEach { old ->
-            if (old.id != newGrant.id) {
+            if (old.id != toSave.id) {
                 revoke(old.id, nowMs)
             }
         }
         planAndEnqueue(nowMs)
-        return Result.success(newGrant)
+        return Result.success(toSave)
     }
 
     /** Dítě po zapnutí příjmu váhy od rodiče požádá ověřené rodiče o znovuposlání 30denního okna (RE-5). */
@@ -2331,6 +2341,7 @@ class ShareService internal constructor(
         return queued
     }
 
+    /** Parent-initiated link request (parent -> child); the child's acceptance ratchets the child to MINOR. */
     fun sendFamilyLinkRequest(
         childId: String,
         childAgeProfile: AgeProfile = AgeProfile.MINOR,
@@ -2346,52 +2357,123 @@ class ShareService internal constructor(
         )
         val linkJson = json.encodeToString(FamilyLink.serializer(), link)
         data.familyLinks().upsert(FamilyLinkRow(link.id, link.parentId, link.childId, link.status.name, link.version, linkJson))
-        val msg = MessageBuilder(self).build(
-            recipient = childId,
-            kind = Kinds.FAMILY_LINK_REQUEST,
-            objectType = "family_link",
-            objectId = link.id,
-            objectVersion = link.version,
-            payload = linkJson,
-            nowMs = nowMs,
-        )
-        val e = msg.envelope
-        outbox.enqueue(OutboxItem(e.eventId, e.recipient, e.kind, e.objectType, e.objectId, e.objectVersion, null, Wire.encode(msg), nowMs))
+        consent.emitFamilyLinkRequest(self, link, nowMs)
         return link
     }
 
+    /**
+     * Child-initiated link request (child -> parent) used by the onboarding of a MINOR account and to add another
+     * guardian. Requires the MINOR age state. When the child already has a verified guardian a `GUARDIAN_ADD`
+     * request is sent to the existing guardians as well; the link becomes VERIFIED only after both the parent
+     * accepted and (for a further guardian) an existing guardian approved.
+     */
+    fun sendChildFamilyLinkRequest(
+        parentContact: ContactRow,
+        nowMs: Long = System.currentTimeMillis(),
+    ): Result<FamilyLink> = consent.sendChildFamilyLinkRequest(parentContact, nowMs).also {
+        if (it.isSuccess) scheduleShare()
+    }
+
+    /** Accept / reject a pending incoming link request (either direction). Returns the stored link or `null`. */
     fun respondFamilyLink(
         linkId: String,
         accept: Boolean,
         nowMs: Long = System.currentTimeMillis(),
-    ): FamilyLink? {
-        val row = data.familyLinks().get(linkId) ?: return null
-        val link = json.decodeFromString(FamilyLink.serializer(), row.json)
-        val self = selfIdProvider()
-        val updated = runCatching { FamilyLinkPolicy.respond(link, self, accept, nowMs) }.getOrNull() ?: return null
-        val updatedJson = json.encodeToString(FamilyLink.serializer(), updated)
-        data.familyLinks().upsert(FamilyLinkRow(updated.id, updated.parentId, updated.childId, updated.status.name, updated.version, updatedJson))
-        data.pendingRequests().get(linkId)?.let { req ->
-            data.pendingRequests().upsert(
-                req.copy(
-                    status = if (accept) "ACCEPTED" else "REJECTED",
-                    json = updatedJson,
-                )
-            )
+    ): FamilyLink? = consent.respondFamilyLink(linkId, accept, nowMs).also { if (it != null) scheduleShare() }
+
+    /** Either party removes a link (also cancels a pending request). Consent fallout is applied locally. */
+    fun revokeFamilyLink(linkId: String, nowMs: Long = System.currentTimeMillis()): Result<FamilyLink> =
+        synchronized(planLock) { consent.revokeFamilyLink(linkId, nowMs) }.also { if (it.isSuccess) scheduleShare() }
+
+    // ---- guardian consent API (UI) ----
+
+    /** Local age state; changed only through [declareAge] / link acceptance / a signed release. */
+    fun ageState(): AgeState = ageProfile.state
+
+    /** User declaration (first-run choice, ADULT -> MINOR, undo of a self-declared MINOR before any verified link). */
+    fun declareAge(target: AgeState, nowMs: Long = System.currentTimeMillis()): Boolean =
+        ageProfile.declare(target, nowMs) != null
+
+    val onboardingState: Flow<OnboardingState>
+        get() = combine(settings.ageStateFlow, data.familyLinks().all(), data.guardianConsents().all()) { _, _, _ -> }
+            .map { consent.onboardingState(selfIdProvider()) }
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.IO)
+
+    fun onboardingStateNow(): OnboardingState = consent.onboardingState(selfIdProvider())
+
+    /** All consent rows (both roles), newest first. */
+    fun consentItems(): Flow<List<ConsentItem>> =
+        data.guardianConsents().all().map { rows -> rows.mapNotNull { consent.decode(it) } }.flowOn(Dispatchers.IO)
+
+    /** Guardian inbox: incoming requests still waiting for this guardian's decision. */
+    fun pendingGuardianInbox(): Flow<List<ConsentItem>> =
+        consentItems().map { list ->
+            val now = System.currentTimeMillis()
+            list.filter { it.role == ConsentRole.GUARDIAN_IN && it.status == ConsentStatus.PENDING && it.expiresAtMs >= now }
         }
-        val msg = MessageBuilder(self).build(
-            recipient = updated.parentId,
-            kind = Kinds.FAMILY_LINK_RESPONSE,
-            objectType = "family_link",
-            objectId = updated.id,
-            objectVersion = updated.version,
-            payload = updatedJson,
-            nowMs = nowMs,
-        )
-        val e = msg.envelope
-        outbox.enqueue(OutboxItem(e.eventId, e.recipient, e.kind, e.objectType, e.objectId, e.objectVersion, null, Wire.encode(msg), nowMs))
-        return updated
-    }
+
+    fun pendingGuardianInboxNow(): List<ConsentItem> =
+        consent.items(ConsentRole.GUARDIAN_IN).filter { it.status == ConsentStatus.PENDING && it.expiresAtMs >= System.currentTimeMillis() }
+
+    /** Per grant: not required / grandfathered / needs approval / waiting / approved / rejected / expired / withdrawn. */
+    fun consentStateByGrant(): Flow<Map<String, ConsentUiState>> =
+        combine(data.guardianConsents().all(), data.grants().all(), settings.ageStateFlow) { _, _, _ -> }
+            .map { consent.grantStates(grants(), selfIdProvider(), System.currentTimeMillis()) }
+            .flowOn(Dispatchers.IO)
+
+    /** Per circle (id of every stored circle plus parked invitations). */
+    fun consentStateByCircle(): Flow<Map<String, ConsentUiState>> =
+        combine(data.guardianConsents().all(), data.grants().groups(), settings.ageStateFlow) { _, _, _ -> }
+            .map {
+                val ids = groups().keys + consent.circleInvites().map { it.group.id }
+                consent.circleStates(ids, selfIdProvider(), System.currentTimeMillis())
+            }
+            .flowOn(Dispatchers.IO)
+
+    /** Circle invitations received while the membership is not approved (the group is not stored yet). */
+    fun circleInvites(): List<CircleInvite> = consent.circleInvites()
+
+    /** Ids of this child's currently verified guardians. */
+    fun verifiedGuardianIds(): Set<String> = consent.verifiedGuardianIds(selfIdProvider())
+
+    /** Own active grants that may flow right now (the send-time enforcement set). */
+    fun effectiveGrants(nowMs: Long = System.currentTimeMillis()): List<ShareGrant> =
+        consent.effectiveGrants(grants(), selfIdProvider(), nowMs)
+
+    /** Child: asks all verified guardians to approve [grant] (creates or keeps a PENDING request). */
+    fun requestGuardianConsent(grant: ShareGrant, nowMs: Long = System.currentTimeMillis()): Result<GuardianConsentRequest> =
+        consent.requestGuardianConsent(grant, nowMs).also { if (it.isSuccess) scheduleShare() }
+
+    /** Child: asks for approval to join / create [circle]. No membership message leaves before it is approved. */
+    fun requestCircleMembership(
+        circle: Group,
+        action: MembershipAction,
+        nowMs: Long = System.currentTimeMillis(),
+    ): Result<GuardianConsentRequest> =
+        consent.requestCircleMembership(circle, action, nowMs).also { if (it.isSuccess) scheduleShare() }
+
+    /** Child: asks an existing guardian to approve [newParentContact] as another guardian. */
+    fun requestGuardianAdd(newParentContact: ContactRow, nowMs: Long = System.currentTimeMillis()): Result<GuardianConsentRequest> =
+        consent.requestGuardianAdd(newParentContact, nowMs).also { if (it.isSuccess) scheduleShare() }
+
+    /** Child: withdraws a pending outgoing request. */
+    fun withdrawConsentRequest(requestId: String): Boolean = consent.withdrawRequest(requestId)
+
+    /** Guardian: signed decision on an incoming request; the first valid decision at the child wins. */
+    fun decideConsent(requestId: String, approve: Boolean, nowMs: Long = System.currentTimeMillis()): Result<GuardianDecision> =
+        consent.decideConsent(requestId, approve, nowMs).also { if (it.isSuccess) scheduleShare() }
+
+    /** Guardian: signed revocation of one approval (`grantId#version`, circle or guardian-add), also another guardian's. */
+    fun revokeConsent(permissionId: String, nowMs: Long = System.currentTimeMillis()): Result<GuardianRevocation> =
+        consent.revokeConsent(permissionId, nowMs).also { if (it.isSuccess) scheduleShare() }
+
+    /** Guardian: signed one-time release of the child's age lock (MINOR -> ADULT). */
+    fun releaseAge(childId: String, nowMs: Long = System.currentTimeMillis()): Result<GuardianAgeRelease> =
+        consent.releaseAge(childId, nowMs).also { if (it.isSuccess) scheduleShare() }
+
+    /** PENDING requests past their expiry become EXPIRED. Returns the number of rows expired. */
+    fun expireStaleConsents(nowMs: Long = System.currentTimeMillis()): Int = consent.expireStale(nowMs)
 
     fun promoteCircleAdmin(groupId: String, targetMemberId: String): Result<Group> {
         val group = groups()[groupId] ?: return Result.failure(IllegalArgumentException("Kruh nenalezen."))
@@ -2552,6 +2634,8 @@ class ShareService internal constructor(
         recipients: Set<String>? = null,
     ) {
         val self = selfOverride ?: selfIdProvider()
+        // A non-ADULT that is not an approved member of the circle sends no membership messages about it.
+        if (!consent.mayBroadcastGroup(self, group, nowMs)) return
         val builder = MessageBuilder(self)
         // R4-2: payload je vždy CELÝ kruh; `recipients` jen zúží, komu se pošle (re-emit chybějícím příjemcům).
         val payload = json.encodeToString(Group.serializer(), group)
@@ -2577,19 +2661,7 @@ class ShareService internal constructor(
         nowMs: Long = System.currentTimeMillis(),
         selfOverride: String? = null,
     ) {
-        val self = selfOverride ?: selfIdProvider()
-        val linkJson = json.encodeToString(FamilyLink.serializer(), link)
-        val msg = MessageBuilder(self).build(
-            recipient = link.childId,
-            kind = Kinds.FAMILY_LINK_REQUEST,
-            objectType = "family_link",
-            objectId = link.id,
-            objectVersion = link.version,
-            payload = linkJson,
-            nowMs = nowMs,
-        )
-        val e = msg.envelope
-        outbox.enqueue(OutboxItem(e.eventId, e.recipient, e.kind, e.objectType, e.objectId, e.objectVersion, null, Wire.encode(msg), nowMs))
+        consent.emitFamilyLinkRequest(selfOverride ?: selfIdProvider(), link, nowMs)
         scheduleShare()
     }
 
@@ -2619,9 +2691,12 @@ class ShareService internal constructor(
     fun planAndEnqueue(nowMs: Long): Int = synchronized(planLock) {
         runMigrations()
         val self = selfIdProvider()
+        drainPendingRevokes(nowMs)
+        consent.maintenance(self, nowMs)
         val zone = ZoneId.of(settings.zoneId)
         val today = LocalDate.now(zone)
-        val activeGrants = grants().filter { it.active && it.ownerId == self }
+        // Send-time enforcement: only grants that are effective (age rule + signature-verified guardian approval).
+        val activeGrants = effectiveGrants(nowMs)
         val earliestGrantFrom = activeGrants.mapNotNull { it.scope.from?.let { f -> runCatching { LocalDate.parse(f) }.getOrNull() } }.minOrNull()
         val from = earliestGrantFrom ?: today.minusDays(60)
         // Řadíme od nejnovějších dní, aby dnešek a včerejšek měly vždy přednost před starší historií.
@@ -2637,7 +2712,7 @@ class ShareService internal constructor(
         fun pendingFor(recipient: String): Int = pendingByRecipient.getOrPut(recipient) { outbox.pendingCountFor(recipient) }
 
         var queued = 0
-        val plan = ShareBuilder(self, MessageBuilder(self)).plan(grants(), groups(), dates, allObservations, sentLedger, nowMs)
+        val plan = ShareBuilder(self, MessageBuilder(self)).plan(activeGrants, groups(), dates, allObservations, sentLedger, nowMs)
             .associateBy { it.message.envelope.recipient to it.objectKey }
             .values
         val maxEventBytes = app.pulse4.sync.ProtocolLimits().maxEventBytes
@@ -2666,13 +2741,14 @@ class ShareService internal constructor(
                 }
             }
         }
-        queued + enqueueActivities(self, nowMs, from, pendingByRecipient)
+        queued + enqueueActivities(self, nowMs, from, activeGrants, pendingByRecipient)
     }
 
     private fun enqueueActivities(
         self: String,
         nowMs: Long,
         from: LocalDate,
+        effective: List<ShareGrant>,
         pendingByRecipient: MutableMap<String, Int> = HashMap(),
     ): Int {
         val zone = ZoneId.of(settings.zoneId)
@@ -2682,7 +2758,7 @@ class ShareService internal constructor(
         val acts = data.activities().since(from.atStartOfDay(zone).toInstant().toEpochMilli())
             .sortedByDescending { it.startUtcMs }
         val allGroups = groups()
-        val activeActivityGrants = grants().filter {
+        val activeActivityGrants = effective.filter {
             it.active && it.ownerId == self && it.fields.any { f -> f.category == app.pulse4.sharing.Category.ACTIVITY }
         }
         val recipientsByGrant = activeActivityGrants.associateWith {
@@ -2748,6 +2824,7 @@ class ShareService internal constructor(
 
     private companion object {
         const val MAX_PENDING_PER_RECIPIENT = 25
+        const val PENDING_REVOKES_KEY = "consent.pendingRevokes"
     }
 
     /**
@@ -2775,7 +2852,7 @@ class ShareService internal constructor(
                 json.encodeToString(app.pulse4.training.ProposalDecision.serializer(), note.decision), nowMs))
             note.revision?.let { rev ->
                 val allGroups = groups()
-                val viewers = grants()
+                val viewers = effectiveGrants(nowMs)
                     .filter { it.active && it.planRight(rev.planId) != null }
                     .flatMap { app.pulse4.sharing.MembershipPolicy.effectiveRecipients(it, it.groupId?.let(allGroups::get)) }
                     .toSet() + note.toIdentity
@@ -2814,10 +2891,40 @@ class ShareService internal constructor(
      * Odvolání: zruší čekající položky, odešle požadavek na odstranění už doručených kopií a vrátí plán s popisem omezení,
      * který UI musí uživateli ukázat přesně (doručená data nelze vzít zpět).
      */
-    fun revoke(grantId: String, nowMs: Long): RevocationPlan? = synchronized(planLock) { revokeLocked(grantId, nowMs) }
+    fun revoke(grantId: String, nowMs: Long, reason: RevocationReason? = null): RevocationPlan? =
+        synchronized(planLock) { revokeLocked(grantId, nowMs, reason) }
+
+    private val pendingRevokeSerializer = kotlinx.serialization.builtins.MapSerializer(String.serializer(), String.serializer())
+
+    /**
+     * Called from receive handlers (inside the receive transaction, no planLock): the grant is deactivated right
+     * away, the heavy part of [revoke] (cancel queued items, removal requests) is queued and done by
+     * [drainPendingRevokes] under `planLock` right after the transaction commits.
+     */
+    private fun deferRevoke(grantId: String, nowMs: Long, reason: RevocationReason) {
+        val row = data.grants().get(grantId) ?: return
+        val g = runCatching { json.decodeFromString(ShareGrant.serializer(), row.json) }.getOrNull() ?: return
+        if (g.active) saveGrantDirect(g.copy(revokedAtMs = nowMs))
+        val pending = settings.getRaw(PENDING_REVOKES_KEY)
+            ?.let { runCatching { json.decodeFromString(pendingRevokeSerializer, it) }.getOrNull() }.orEmpty().toMutableMap()
+        pending[grantId] = reason.name
+        settings.put(PENDING_REVOKES_KEY, json.encodeToString(pendingRevokeSerializer, pending))
+    }
+
+    /** Completes revocations queued by receive handlers (removal requests, queued items); returns how many ran. */
+    fun drainPendingRevokes(nowMs: Long = System.currentTimeMillis()): Int = synchronized(planLock) {
+        val raw = settings.getRaw(PENDING_REVOKES_KEY) ?: return@synchronized 0
+        val pending = runCatching { json.decodeFromString(pendingRevokeSerializer, raw) }.getOrNull().orEmpty()
+        if (pending.isEmpty()) return@synchronized 0
+        settings.put(PENDING_REVOKES_KEY, "{}")
+        for ((id, reason) in pending) {
+            runCatching { revokeLocked(id, nowMs, RevocationReason.valueOf(reason)) }
+        }
+        pending.size
+    }
 
     // R4-7: běží výhradně pod `planLock` – souběžný `planAndEnqueue` nesmí přepsat ledger `(R, "")` zpět na hash.
-    private fun revokeLocked(grantId: String, nowMs: Long): RevocationPlan? {
+    private fun revokeLocked(grantId: String, nowMs: Long, reason: RevocationReason? = null): RevocationPlan? {
         val row = data.grants().get(grantId) ?: return null
         val g = json.decodeFromString(ShareGrant.serializer(), row.json)
         val self = selfIdProvider()
@@ -2833,12 +2940,12 @@ class ShareService internal constructor(
             (fromOutbox + fromDurable).distinct()
         }
         val inNode = allOutbox.any { grantId in parseGrantRefs(it.grantId) && it.state == "STORED_IN_PROPAGATION" }
-        val plan = Revocation.plan(g, nowMs, delivered, inNode)
+        val plan = Revocation.plan(g, nowMs, delivered, inNode, reason)
         saveGrantDirect(plan.revokedGrant)
         outbox.cancelForGrant(plan.cancelQueuedForGrantId)
         settings.put("delivered_keys.$grantId", "{}")
         val allGroups = groups()
-        val otherActiveGrants = grants().filter { it.id != grantId && it.active && it.ownerId == self }
+        val otherActiveGrants = effectiveGrants(nowMs).filter { it.id != grantId }
         val effectiveRecipientsByGrant = otherActiveGrants.associateWith { other ->
             app.pulse4.sharing.MembershipPolicy.effectiveRecipients(other, other.groupId?.let(allGroups::get))
         }
@@ -2967,6 +3074,7 @@ object ServiceMigrations {
     private const val KEY_IDENTITY_V1 = "migration.lxmf_identity_v1"
     private const val KEY_ACCEPT_WEIGHT_V1 = "migration.accept_weight_default_v1"
     private const val KEY_R3_5_REEMIT_V1 = "migration.r3_5_reemit_v1"
+    private const val KEY_GUARDIAN_CONSENT_V1 = "migration.guardian_consent_v1"
     private const val KEY_FABRICATED_CLEANUP_V1 = "migration.fabricated_activity_cleanup_v1"
     private const val KEY_FABRICATED_CLEANUP_V2 = "migration.fabricated_activity_cleanup_v2"
     private const val KEY_FABRICATED_CLEANUP_FAILURES = "migration.fabricated_activity_cleanup_failures"
@@ -2985,7 +3093,8 @@ object ServiceMigrations {
     internal fun needsDeferredMigration(sl: ServiceLocator): Boolean =
         sl.settings.getRaw(KEY_IDENTITY_V1) == null ||
             sl.settings.getRaw(KEY_ACCEPT_WEIGHT_V1) == null ||
-            sl.settings.getRaw(KEY_R3_5_REEMIT_V1) == null
+            sl.settings.getRaw(KEY_R3_5_REEMIT_V1) == null ||
+            sl.settings.getRaw(KEY_GUARDIAN_CONSENT_V1) == null
 
     internal fun deriveSelfIdentityFromSecrets(secrets: SecretStore): Pair<String, String>? {
         val privateKeyB64 = secrets.getString(SecretStore.RETICULUM_IDENTITY) ?: return null
@@ -3301,6 +3410,7 @@ object ServiceMigrations {
         broadcastMembershipUpdate = { group, missingRecipients, ts ->
             shareService.broadcastMembershipUpdate(group, ts, selfOverride = selfId, recipients = missingRecipients)
         },
+        reemitConsentRequests = { ts -> shareService.consent.reemitPendingRequests(selfId, ts) },
     )
 
     /**
@@ -3314,6 +3424,7 @@ object ServiceMigrations {
         emitFamilyLinkRequest: (FamilyLink, Long) -> Unit,
         emitAdminHandoverRequest: (Group, String, Long) -> Unit,
         broadcastMembershipUpdate: (Group, Set<String>, Long) -> Unit,
+        reemitConsentRequests: (Long) -> Int = { 0 },
         json: kotlinx.serialization.json.Json = Wire.json,
     ): Int {
         if (selfId.isBlank()) return 0
@@ -3326,13 +3437,15 @@ object ServiceMigrations {
         val outboxRows = db.outbox().all()
         var reemitted = 0
 
+        // Pending link requests this device initiated (parent -> child or child -> parent).
         for (row in db.familyLinks().allNow()) {
-            if (row.status != FamilyLinkStatus.PENDING.name || row.parentId != selfId) continue
+            if (row.status != FamilyLinkStatus.PENDING.name) continue
             val link = runCatching { json.decodeFromString(FamilyLink.serializer(), row.json) }.getOrNull() ?: continue
+            if (link.initiator != selfId) continue
             val hasActive = outboxRows.any {
                 it.kind == Kinds.FAMILY_LINK_REQUEST &&
                     it.objectId == link.id &&
-                    it.recipient == link.childId &&
+                    it.recipient == link.counterparty &&
                     it.state in activeStates
             }
             if (!hasActive) {
@@ -3340,6 +3453,9 @@ object ServiceMigrations {
                 reemitted++
             }
         }
+
+        // PENDING guardian consent requests lacking an active outbox item (per addressed guardian).
+        reemitted += reemitConsentRequests(nowMs)
 
         val groupsById = db.grants().groupsNow().mapNotNull { row ->
             runCatching { json.decodeFromString(Group.serializer(), row.json) }.getOrNull()
@@ -3405,6 +3521,51 @@ object ServiceMigrations {
             }
         }
         return reemitted
+    }
+
+    /**
+     * One-time guardian-consent migration (`migration.guardian_consent_v1`). A legacy checkbox timestamp is never
+     * evidence of a guardian's consent:
+     *  - a VERIFIED legacy link where this device is the MINOR child -> MINOR (source MIGRATION, locked to that
+     *    guardian); its legacy grants/circles are kept but not effective until a guardian approves them;
+     *  - a stored legacy `ownAgeProfile == MINOR` stays MINOR;
+     *  - everyone else -> UNKNOWN; existing grants and circles are grandfathered (keep flowing) until the age is
+     *    confirmed; new or widened sharing is blocked until then. Choosing ADULT makes everything effective, MINOR
+     *    suspends the grandfathered ones until approved.
+     * An already stored v2 record is never overwritten.
+     */
+    fun migrateGuardianConsent(db: AppDatabase, settings: Settings, selfId: String, nowMs: Long = System.currentTimeMillis()) {
+        if (settings.getRaw(KEY_GUARDIAN_CONSENT_V1) != null) return
+        val age = settings.ageProfileManager
+        if (!age.hasRecord()) {
+            val guardianLinks = db.familyLinks().allNow()
+                .mapNotNull { runCatching { Wire.json.decodeFromString(FamilyLink.serializer(), it.json) }.getOrNull() }
+                .filter { it.status == FamilyLinkStatus.VERIFIED && it.childId == selfId && it.childAgeProfile == AgeProfile.MINOR }
+            val legacy = settings.getRaw(AgeProfileManager.KEY_LEGACY_OWN_AGE)
+            when {
+                guardianLinks.isNotEmpty() -> {
+                    val founder = guardianLinks.minWith(compareBy({ it.verifiedAtMs ?: Long.MAX_VALUE }, { it.id }))
+                    age.initializeIfAbsent(AgeProfileRecord(AgeState.MINOR, AgeSource.MIGRATION, nowMs, founder.parentId))
+                    age.markGuardianLinkVerified()
+                }
+                legacy == AgeProfile.MINOR.name ->
+                    age.initializeIfAbsent(AgeProfileRecord(AgeState.MINOR, AgeSource.MIGRATION, nowMs))
+                else -> {
+                    age.initializeIfAbsent(AgeProfileRecord(AgeState.UNKNOWN, AgeSource.MIGRATION, nowMs))
+                    val grantIds = db.grants().allNow()
+                        .mapNotNull { runCatching { Wire.json.decodeFromString(ShareGrant.serializer(), it.json) }.getOrNull() }
+                        .filter { it.active && it.ownerId == selfId }
+                        .mapTo(LinkedHashSet()) { it.id }
+                    age.setGrandfatheredGrantIds(grantIds)
+                    val circleIds = db.grants().groupsNow()
+                        .mapNotNull { runCatching { Wire.json.decodeFromString(Group.serializer(), it.json) }.getOrNull() }
+                        .filter { !it.dissolved && selfId in it.members }
+                        .mapTo(LinkedHashSet()) { it.id }
+                    age.setGrandfatheredCircleIds(circleIds)
+                }
+            }
+        }
+        settings.put(KEY_GUARDIAN_CONSENT_V1, "1")
     }
 
     fun migrateAcceptWeightDefaultIfVerified(db: AppDatabase, settings: Settings, selfId: String) {
@@ -3719,8 +3880,9 @@ object ServiceMigrations {
                 val needsIdentity = sl.settings.getRaw(KEY_IDENTITY_V1) == null
                 val needsWeight = sl.settings.getRaw(KEY_ACCEPT_WEIGHT_V1) == null
                 val needsReemit = sl.settings.getRaw(KEY_R3_5_REEMIT_V1) == null
+                val needsConsent = sl.settings.getRaw(KEY_GUARDIAN_CONSENT_V1) == null
                 // R3-14 F7: Nejprve zkontrolujeme příznaky migrací, teprve poté dešifrujeme tajemství z Keystoru.
-                if (needsIdentity || needsWeight || needsReemit) {
+                if (needsIdentity || needsWeight || needsReemit || needsConsent) {
                     val selfIdentity = deriveSelfIdentityFromSecrets(sl.secrets)
                     // R3-14 F6: Pokud selfIdentity == null (klíč ještě neexistuje nebo je nedostupný), migraci odložíme a flag nenastavíme.
                     if (selfIdentity != null) {
@@ -3730,6 +3892,9 @@ object ServiceMigrations {
                         }
                         if (needsWeight) {
                             migrateAcceptWeightDefaultIfVerified(sl.db, sl.settings, selfLxmf)
+                        }
+                        if (needsConsent) {
+                            migrateGuardianConsent(sl.db, sl.settings, selfLxmf)
                         }
                         if (needsReemit) {
                             reemitPendingControlMessages(

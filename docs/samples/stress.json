@@ -1,0 +1,32 @@
+[
+  {
+    "calendarDate": "2025-01-12",
+    "values": {
+      "overallStressLevel": 25,
+      "restStressDuration": 43200,
+      "lowStressDuration": 21600,
+      "mediumStressDuration": 6912,
+      "highStressDuration": 1728
+    }
+  },
+  {
+    "calendarDate": "2025-01-13",
+    "values": {
+      "overallStressLevel": 31,
+      "restStressDuration": 40000,
+      "lowStressDuration": 20000,
+      "mediumStressDuration": 8000,
+      "highStressDuration": 2000
+    }
+  },
+  {
+    "calendarDate": "2025-01-14",
+    "values": {
+      "overallStressLevel": 22,
+      "restStressDuration": 44000,
+      "lowStressDuration": 22000,
+      "mediumStressDuration": 6000,
+      "highStressDuration": 1000
+    }
+  }
+]

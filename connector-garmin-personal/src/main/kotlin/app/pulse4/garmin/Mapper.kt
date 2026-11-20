@@ -65,7 +65,7 @@ object ResponseMapper {
             val end = spec.endTimePath?.let { parseTime(spec, JsonPath.get(item, it)) }?.takeIf { it >= start }
             val zone = JsonPath.string(item, spec.zonePath) ?: defaultZone
             val ext = JsonPath.string(item, spec.externalIdPath)
-            val local = JsonPath.string(item, spec.localDatePath) ?: TimeRules.localDate(end ?: start, zone).toString()
+            val local = localDateOf(item, spec.localDatePath) ?: TimeRules.localDate(end ?: start, zone).toString()
             val scopedExt = ext?.let { "${spec.metric.name}:$it" }
             val stableFields = when (spec.metric) {
                 app.pulse4.domain.MetricType.BODY_BATTERY,
@@ -91,8 +91,23 @@ object ResponseMapper {
         else -> false
     }
 
+    /**
+     * Den přiřazený poskytovatelem. Oficiální OpenAPI popisuje `calendarDate` u `dailyHeartRate` jako objekt
+     * `{date, localDate}`; skutečný tvar odpovědi nebyl v tomto repozitáři ověřen, proto se akceptují oba.
+     */
+    private fun localDateOf(item: JsonElement, path: String?): String? {
+        if (path == null) return null
+        return when (val node = JsonPath.get(item, path)) {
+            is JsonPrimitive -> node.takeIf { it.isString || it.content != "null" }?.content
+            is JsonObject -> ((node["localDate"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+                ?: (node["date"] as? JsonPrimitive)?.takeIf { it.isString }?.content?.take(10))
+            else -> null
+        }
+    }
+
     private fun parseTime(spec: EndpointSpec, e: JsonElement?): Long? {
-        val p = e as? JsonPrimitive ?: return null
+        // Objekt `{date, localDate}` (OpenAPI `ConnectTimestamp`) se čte přes `date`.
+        val p = (e as? JsonPrimitive) ?: ((e as? JsonObject)?.get("date") as? JsonPrimitive) ?: return null
         return when (spec.timeFormat) {
             EndpointSpec.TimeFormat.EPOCH_S -> p.longOrNull?.times(1000)
             EndpointSpec.TimeFormat.EPOCH_MS -> p.longOrNull

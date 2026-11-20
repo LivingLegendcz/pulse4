@@ -1,6 +1,7 @@
 package app.pulse4.garmin
 
 import app.pulse4.domain.MetricObservation
+import app.pulse4.domain.MetricType
 import app.pulse4.provider.AreaFetcher
 import app.pulse4.provider.Batch
 import app.pulse4.provider.HttpGateway
@@ -30,6 +31,8 @@ class GarminPersonalFetcher(
     private val initialDays: Int = 28,
     /** Původní odpověď poskytovatele se uchovává před mapováním; originál se nepřepisuje. */
     private val onRawResponse: (EndpointSpec, String) -> Unit = { _, _ -> },
+    /** Čas posledního uloženého pozorování metriky (pro rozlišení „nikdy nebylo“ a „dříve bylo, teď přichází prázdné“). */
+    private val latestObservationMs: (MetricType) -> Long? = { null },
 ) : AreaFetcher {
     private var accessToken: String? = null
     var skippedItems = 0
@@ -42,19 +45,42 @@ class GarminPersonalFetcher(
         val from = sinceMs ?: (now - initialDays * DAY)
         val all = ArrayList<MetricObservation>()
         val responseCache = HashMap<String, HttpResponse>()
-        for (spec in specs) {
-            if (!spec.verified) throw ProviderError.NotConfigured("endpoint ${spec.area}/${spec.metric} není ověřen proti oficiální specifikaci")
-            var cursor = from
-            while (cursor <= now) {
-                val rangeEnd = minOf(cursor + spec.maxRangeDays * DAY - 1, now)
-                val res = call(spec, cursor, rangeEnd, responseCache)
-                onRawResponse(spec, res.body)
-                val mapped = ResponseMapper.map(spec, res.body, accountId, zoneId)
-                skippedItems += mapped.skipped
-                all += mapped.items
-                cursor = rangeEnd + 1
+        val warnings = ArrayList<String>()
+        var firstError: ProviderError? = null
+        var healthyMetrics = 0
+        var holdCursor = false
+        // Každá metrika se stahuje izolovaně: její chyba nesmí zahodit ostatní metriky téže oblasti (např. SpO2 vedle klidového tepu).
+        for ((metric, group) in specs.groupBy { it.metric }) {
+            val chain = group.filter { !it.fallback } + group.filter { it.fallback }
+            var items: List<MetricObservation> = emptyList()
+            var metricError: ProviderError? = null
+            for (spec in chain) {
+                try {
+                    val r = fetchSpec(spec, from, now, responseCache)
+                    if (r.isNotEmpty()) { items = r; break }
+                } catch (e: ProviderError) {
+                    if (e.isAreaWide()) throw e
+                    if (metricError == null) metricError = e
+                }
+            }
+            when {
+                items.isNotEmpty() -> { all += items; healthyMetrics++ }
+                metricError != null -> {
+                    warnings += "${metric.name}=${metricError.errorCode}"
+                    if (firstError == null) firstError = metricError
+                    // 5xx je přechodné: kurzor se nechá stát, aby se okno příště stáhlo znovu; 403/NotConfigured se nezacyklí.
+                    if (metricError is ProviderError.Server && metricError.code >= 500) holdCursor = true
+                }
+                else -> {
+                    healthyMetrics++
+                    // Prázdné okno je zdravé, pokud metrika dříve data neměla nebo jsou čerstvá; jinak je to diagnostika.
+                    val latest = latestObservationMs(metric)
+                    if (latest != null && now - latest > STALE_EMPTY_MS) warnings += "${metric.name}=$EMPTY_RESPONSE"
+                }
             }
         }
+        // Selhaly všechny metriky oblasti: žádný úspěch, chyba se předá enginu (stav, opakování).
+        if (healthyMetrics == 0 && firstError != null) throw firstError
         // Kurzor se posouvá až po uložení dávky (SyncEngine); zde jen nabízí nový bod.
         val deduped = LinkedHashMap<String, MetricObservation>(all.size)
         for (obs in all) {
@@ -63,7 +89,32 @@ class GarminPersonalFetcher(
                 deduped[obs.id] = obs
             }
         }
-        return Batch(deduped.values.toList(), now)
+        val nextCursor = if (holdCursor) maxOf(from, now - initialDays * DAY) else now
+        return Batch(deduped.values.toList(), nextCursor, warnings = warnings)
+    }
+
+    /** Stáhne celé okno jedné specifikace; chyby se předávají jako [ProviderError]. */
+    private fun fetchSpec(spec: EndpointSpec, from: Long, now: Long, cache: MutableMap<String, HttpResponse>): List<MetricObservation> {
+        if (!spec.verified) throw ProviderError.NotConfigured("endpoint ${spec.area}/${spec.metric} není ověřen proti oficiální specifikaci")
+        val out = ArrayList<MetricObservation>()
+        var cursor = from
+        while (cursor <= now) {
+            val rangeEnd = minOf(cursor + spec.maxRangeDays * DAY - 1, now)
+            val res = call(spec, cursor, rangeEnd, cache)
+            onRawResponse(spec, res.body)
+            val mapped = ResponseMapper.map(spec, res.body, accountId, zoneId)
+            skippedItems += mapped.skipped
+            out += mapped.items
+            cursor = rangeEnd + 1
+        }
+        return out
+    }
+
+    /** Chyby, které se týkají celého přístupu (ne jedné metriky): předávají se enginu beze změny. */
+    private fun ProviderError.isAreaWide(): Boolean = when (this) {
+        is ProviderError.Unauthorized, is ProviderError.RateLimited, is ProviderError.MfaRequired,
+        is ProviderError.Network, is ProviderError.Timeout -> true
+        is ProviderError.Forbidden, is ProviderError.NotConfigured, is ProviderError.Server -> false
     }
 
     override fun refreshSession() {
@@ -126,5 +177,14 @@ class GarminPersonalFetcher(
     private fun retryAfterSeconds(r: HttpResponse): Long? =
         r.headers.entries.firstOrNull { it.key.equals("Retry-After", ignoreCase = true) }?.value?.trim()?.toLongOrNull()?.takeIf { it >= 0 }
 
-    private companion object { const val DAY = 24L * 3600 * 1000 }
+    companion object {
+        /** Kód diagnostiky: celé stažené okno metriky vyšlo prázdné (404/204/prázdné tělo/nic mapovatelného). */
+        const val EMPTY_RESPONSE = "EmptyResponse"
+        /**
+         * Pravidlo pro [EMPTY_RESPONSE]: jen když okno nevrátilo nic, metrika má uložená dřívější data a poslední z nich je
+         * starší než tento práh. Prázdný den ani prázdné okno u metriky, která nikdy neměla data, chybou není.
+         */
+        const val STALE_EMPTY_MS = 7L * 24 * 3600 * 1000
+        private const val DAY = 24L * 3600 * 1000
+    }
 }

@@ -32,6 +32,11 @@ data class EndpointSpec(
     val verified: Boolean = false,
     /** Odkaz na anonymizovaný vzor odpovědi v dokumentaci konektoru. */
     val sampleRef: String? = null,
+    /**
+     * Záložní specifikace téže metriky: volá se jen tehdy, když primární (nezáložní) položky metriky selžou
+     * nebo nevrátí za celé okno žádné mapovatelné záznamy (např. 404/204/prázdné tělo).
+     */
+    val fallback: Boolean = false,
 ) {
     @Serializable enum class TimeFormat { EPOCH_S, EPOCH_MS, ISO_INSTANT }
 }

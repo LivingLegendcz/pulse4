@@ -86,6 +86,9 @@ class WithingsSession(
 
     fun isConnected() = vault.load() != null
 
+    /** True když udělený OAuth rozsah zahrnuje `user.activity` (nutné pro v2/measure getactivity/getworkouts a v2/sleep). */
+    fun hasActivityScope(): Boolean = vault.load()?.scope?.contains("user.activity", ignoreCase = true) == true
+
     fun accessToken(): String = synchronized(lock) {
         val t = vault.load() ?: throw ProviderError.Unauthorized()
         if (t.expiresAtMs - now() > config.refreshSkewMs) t.accessToken else refresh(t).accessToken

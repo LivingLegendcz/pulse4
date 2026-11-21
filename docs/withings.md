@@ -45,6 +45,12 @@ Stav k 7. 11. 2026. Plný konektor Withings (`WithingsWebClient`, `WithingsWebMa
   - Pokud v `v2/heart?action=list` není přímo vyplněn `heart_rate`, spáruje `WithingsWebMapper.mapEcgSummaries` záznam EKG se souběžným měřením tepu z váhy (`type 11` v okně ±300 s).
   - Při rekonciliaci tombstonů (`Reconcile.tombstones`) jsou ID záznamů EKG (`withings:<userId>:ecg:<signalid>:ECG`) i modifikovaných záznamů zahrnuta do `fetchedIdsInWindow`, takže se při synchronizaci nikdy nesmažou.
   - Plná křivka EKG (15 000 vzorků, `with_filtered=true`, 500 Hz) se stahuje přes `WithingsWebClient.getSignal` a ukládá do `withings_ecg_signal`.
+- **Hodinky a spánkové senzory Withings (`WithingsWatch.kt`, implementováno podle oficiálního Withings Public API v2; živý HAR s hodinkami zatím neověřen)**:
+  - `measure?action=getmeas`: přidán typ `54` (**SpO2**, `%`) v `WithingsWebMapper` i `WithingsMapper`.
+  - `v2/measure?action=getactivity`: denní kroky (`STEPS`) a průměrný tep (`HEART_RATE`) se stránkováním (`more`/`offset`).
+  - `v2/sleep?action=getsummary`: spánkové souhrny (`SLEEP_DURATION`, `SLEEP_SCORE`, `SLEEP_DEEP`, `SLEEP_LIGHT`, `SLEEP_REM`, `SLEEP_AWAKE`, `SLEEP_AWAKE_COUNT`, `RESPIRATION`, `RESTING_HEART_RATE`).
+  - `v2/measure?action=getworkouts`: sportovní aktivity mapované na `Activity` (`id = "withings-<id>"`, kategorie sportů, `movingTimeS`, vzdálenost, převýšení, tepové zóny Z0–Z3, plavecké záběry/délka bazénu, volitelně `spo2_average`) ukládané do Room tabulky `activity` se zachováním ručních poznámek.
+  - **Bezpečná degradace:** všechny 3 hodinkové endpointy vrací `Result`, takže na účtech jen s váhou (nebo pokud webové `scalews.withings.com` použije jiný tvar parametrů před ověřením HAR) nikdy nerozbijí sync váhy ani nevytvoří falešné tombstony. OAuth rozsah rozšířen na `user.metrics,user.activity`.
 
 ## Aktuální směr: přihlášení na pozadí bez developer účtu a bez WebView (Implementováno)
 

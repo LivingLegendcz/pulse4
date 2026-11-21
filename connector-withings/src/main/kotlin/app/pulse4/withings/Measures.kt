@@ -1,5 +1,6 @@
 package app.pulse4.withings
 
+import app.pulse4.domain.Activity
 import app.pulse4.domain.ImportFilter
 import app.pulse4.domain.ImportKey
 import app.pulse4.domain.MeasurementExclusions
@@ -52,6 +53,7 @@ object WithingsTypes {
     const val FAT_RATIO = 6
     const val FAT_MASS_WEIGHT = 8
     const val HEART_RATE = 11
+    const val SPO2 = 54
     const val MUSCLE_MASS = 76
     const val HYDRATION = 77
     const val BONE_MASS = 88
@@ -67,6 +69,7 @@ object WithingsTypes {
         FAT_RATIO,
         FAT_MASS_WEIGHT,
         HEART_RATE,
+        SPO2,
         MUSCLE_MASS,
         HYDRATION,
         BONE_MASS,
@@ -108,11 +111,80 @@ class WithingsApi(
         return out
     }
 
-    private fun call(form: Map<String, String>): JsonObject {
+    /** Oficiální Withings Public API `v2/measure?action=getactivity` (denní kroky, kalorie, vzdálenost, tep). */
+    fun getDailyActivities(startDateYmd: String, endDateYmd: String): Result<List<WithingsDailyActivity>> = runCatching {
+        val out = ArrayList<WithingsDailyActivity>()
+        var offset = 0L
+        var guard = 0
+        do {
+            val form = linkedMapOf(
+                "action" to "getactivity",
+                "startdateymd" to startDateYmd,
+                "enddateymd" to endDateYmd,
+                "data_fields" to WithingsWatchFields.ACTIVITY_DATA_FIELDS,
+            )
+            if (offset > 0L) form["offset"] = offset.toString()
+            val body = call(form, config.measureV2Url)
+            out += WithingsWatchParser.parseDailyActivities(body)
+            val more = (body["more"]?.jsonPrimitive?.intOrNull ?: 0) != 0 ||
+                body["more"]?.jsonPrimitive?.contentOrNull.equals("true", ignoreCase = true)
+            offset = body["offset"]?.jsonPrimitive?.longOrNull ?: 0L
+            if (++guard > 100) break
+        } while (more && offset > 0L)
+        out
+    }
+
+    /** Oficiální Withings Public API `v2/sleep?action=getsummary` (spánkové souhrny, fáze, skóre, tep, dech). */
+    fun getSleepSummaries(startDateYmd: String, endDateYmd: String): Result<List<WithingsSleepSummary>> = runCatching {
+        val out = ArrayList<WithingsSleepSummary>()
+        var offset = 0L
+        var guard = 0
+        do {
+            val form = linkedMapOf(
+                "action" to "getsummary",
+                "startdateymd" to startDateYmd,
+                "enddateymd" to endDateYmd,
+                "data_fields" to WithingsWatchFields.SLEEP_DATA_FIELDS,
+            )
+            if (offset > 0L) form["offset"] = offset.toString()
+            val body = call(form, config.sleepV2Url)
+            out += WithingsWatchParser.parseSleepSummaries(body)
+            val more = (body["more"]?.jsonPrimitive?.intOrNull ?: 0) != 0 ||
+                body["more"]?.jsonPrimitive?.contentOrNull.equals("true", ignoreCase = true)
+            offset = body["offset"]?.jsonPrimitive?.longOrNull ?: 0L
+            if (++guard > 100) break
+        } while (more && offset > 0L)
+        out
+    }
+
+    /** Oficiální Withings Public API `v2/measure?action=getworkouts` (jednotlivé sportovní aktivity). */
+    fun getWorkouts(startDateYmd: String, endDateYmd: String): Result<List<WithingsWorkout>> = runCatching {
+        val out = ArrayList<WithingsWorkout>()
+        var offset = 0L
+        var guard = 0
+        do {
+            val form = linkedMapOf(
+                "action" to "getworkouts",
+                "startdateymd" to startDateYmd,
+                "enddateymd" to endDateYmd,
+                "data_fields" to WithingsWatchFields.WORKOUT_DATA_FIELDS,
+            )
+            if (offset > 0L) form["offset"] = offset.toString()
+            val body = call(form, config.measureV2Url)
+            out += WithingsWatchParser.parseWorkouts(body)
+            val more = (body["more"]?.jsonPrimitive?.intOrNull ?: 0) != 0 ||
+                body["more"]?.jsonPrimitive?.contentOrNull.equals("true", ignoreCase = true)
+            offset = body["offset"]?.jsonPrimitive?.longOrNull ?: 0L
+            if (++guard > 100) break
+        } while (more && offset > 0L)
+        out
+    }
+
+    private fun call(form: Map<String, String>, url: String = config.measureUrl): JsonObject {
         var token = session.accessToken()
         repeat(2) { attempt ->
             val res = try {
-                http.postForm(config.measureUrl, form, mapOf("Authorization" to "Bearer $token"))
+                http.postForm(url, form, mapOf("Authorization" to "Bearer $token"))
             } catch (e: IOException) { throw ProviderError.Network(e.javaClass.simpleName) }
             if (res.code == 429) throw ProviderError.RateLimited(res.headers.entries.firstOrNull { it.key.equals("Retry-After", true) }?.value?.toLongOrNull())
             try { return Wire.check(Wire.parse(res.body)) } catch (e: ProviderError.Unauthorized) {
@@ -206,6 +278,7 @@ object WithingsMapper {
                         }
                     }
                     WithingsTypes.HEART_RATE -> Triple(MetricType.HEART_RATE, m.value, m.value in 30.0..240.0)
+                    WithingsTypes.SPO2 -> Triple(MetricType.SPO2, m.value, m.value in 50.0..100.0)
                     WithingsTypes.PWV -> Triple(MetricType.PULSE_WAVE_VELOCITY, m.value, m.value in 2.0..25.0)
                     WithingsTypes.VASCULAR_AGE -> Triple(MetricType.VASCULAR_AGE, m.value, m.value in 10.0..120.0)
                     WithingsTypes.VISCERAL_FAT -> Triple(MetricType.VISCERAL_FAT, m.value, m.value in 0.1..50.0)
@@ -245,6 +318,8 @@ class WithingsFetcher(
     private val exclusions: MeasurementExclusions = MeasurementExclusions { false },
     private val nowMs: () -> Long = System::currentTimeMillis,
     private val initialDays: Int = 365,
+    private val initialWatchDays: Int = 90,
+    private val onWorkouts: (List<Activity>) -> Unit = {},
 ) : AreaFetcher {
     var skippedItems = 0; private set
 
@@ -257,8 +332,32 @@ class WithingsFetcher(
         val modified = if (sinceMs != null) WithingsMapper.map(api.getMeasures(WithingsApi.Filter.LAST_UPDATE, from, now), uid, zoneId, config) else null
         skippedItems += window.skipped + (modified?.skipped ?: 0)
 
-        val items = (window.items + modified?.items.orEmpty()).distinctBy { it.id }
-        val tombstones = Reconcile.tombstones(existingIds(from, now), window.items.map { it.id }.toSet())
+        // Hodinkové endpointy oficiálního Withings Public API v2 (pouze pokud OAuth token má rozsah `user.activity`)
+        var dailyObs: List<MetricObservation> = emptyList()
+        var sleepObs: List<MetricObservation> = emptyList()
+        var workoutObs: List<MetricObservation> = emptyList()
+        if (session.hasActivityScope()) {
+            val watchFrom = maxOf(from, now - initialWatchDays.toLong() * 86_400_000L)
+            val startYmd = WithingsWatchMapper.formatYmd(watchFrom, zoneId)
+            val endYmd = WithingsWatchMapper.formatYmd(now, zoneId)
+            dailyObs = api.getDailyActivities(startYmd, endYmd)
+                .map { WithingsWatchMapper.mapDailyActivities(it, uid, zoneId) }
+                .getOrDefault(emptyList())
+            sleepObs = api.getSleepSummaries(startYmd, endYmd)
+                .map { WithingsWatchMapper.mapSleepSummaries(it, uid, zoneId) }
+                .getOrDefault(emptyList())
+            val (workouts, wObs) = api.getWorkouts(startYmd, endYmd)
+                .map { WithingsWatchMapper.mapWorkouts(it, uid, zoneId) }
+                .getOrDefault(emptyList<Activity>() to emptyList())
+            workoutObs = wObs
+            if (workouts.isNotEmpty()) onWorkouts(workouts)
+        }
+
+        val items = (window.items + modified?.items.orEmpty() + dailyObs + sleepObs + workoutObs).distinctBy { it.id }
+        val existingMeasureIds = existingIds(from, now).filterNot {
+            it.contains("|id:act:") || it.contains("|id:sleep:") || it.contains("|id:wkt:")
+        }.toSet()
+        val tombstones = Reconcile.tombstones(existingMeasureIds, window.items.map { it.id }.toSet())
         return Batch(ImportFilter.apply(items, exclusions), now, tombstones)
     }
 

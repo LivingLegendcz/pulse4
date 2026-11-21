@@ -728,6 +728,7 @@ class WithingsService internal constructor(
                 if (activeUserId != null) db.observations().idsInForAccount(Provider.WITHINGS_API.name, activeUserId, 0L, Long.MAX_VALUE).toSet()
                 else emptySet()
             },
+            onWorkouts = { workouts -> saveWithingsWorkouts(db, workouts) },
         )
         val engine = SyncEngine(
             fetcher = fetcher,
@@ -821,6 +822,7 @@ class WithingsService internal constructor(
             config(), WithingsApi(config(), session, http), session, { vault.load()!!.userId }, sl.settings.zoneId,
             existingIds = { f, t -> db.observations().idsIn(Provider.WITHINGS_API.name, f, t).toSet() },
             exclusions = MeasurementExclusions { db.exclusions().count(it) > 0 }, nowMs = { nowMs },
+            onWorkouts = { workouts -> saveWithingsWorkouts(db, workouts) },
         )
         val engine = SyncEngine(fetcher, { _, b ->
             db.runInTransaction {
@@ -829,6 +831,32 @@ class WithingsService internal constructor(
             }
         }, RoomAreaStateStore(db, "withings."))
         return runCatching { engine.runArea(SyncArea.WEIGHT, nowMs) }.getOrElse { AreaResult.Failed(it as? ProviderError ?: ProviderError.Server(0)) }
+    }
+
+    /** Uloží sportovní aktivity z hodinek Withings (`v2/measure?action=getworkouts`) se zachováním ručních poznámek. */
+    private fun saveWithingsWorkouts(db: app.pulse4.android.data.AppDatabase, workouts: List<app.pulse4.domain.Activity>) {
+        if (workouts.isEmpty()) return
+        runCatching {
+            db.runInTransaction {
+                for (w in workouts) {
+                    val existing = db.activities().get(w.id)?.let { row ->
+                        runCatching { Wire.json.decodeFromString(app.pulse4.domain.Activity.serializer(), row.json) }.getOrNull()
+                    }
+                    val merged = if (existing != null) {
+                        w.copy(
+                            notes = existing.notes ?: w.notes,
+                            tags = (existing.tags + w.tags),
+                            equipmentId = existing.equipmentId ?: w.equipmentId,
+                            perceivedEffort = existing.perceivedEffort ?: w.perceivedEffort,
+                        )
+                    } else w
+                    db.activities().upsert(merged.toRow(Wire.json.encodeToString(app.pulse4.domain.Activity.serializer(), merged)))
+                }
+            }
+            PLog.i("Withings") { "saveWithingsWorkouts: saved ${workouts.size} workouts" }
+        }.onFailure {
+            PLog.w("Withings", it) { "saveWithingsWorkouts failed" }
+        }
     }
 
     /** CSV export z aplikace Withings – nouzová a referenční cesta. Vrací počet přijatých záznamů a chyby po řádcích. */

@@ -1311,11 +1311,12 @@ fun TodayScreen(
         }
 
         fun syncTimeFor(type: MetricType): Long? = when (type) {
-            MetricType.SLEEP_DURATION, MetricType.RESPIRATION -> loaded.syncByArea[SyncArea.SLEEP] ?: loaded.garminLastSyncMs
+            MetricType.SLEEP_DURATION, MetricType.RESPIRATION -> loaded.syncByArea[SyncArea.SLEEP] ?: loaded.garminLastSyncMs ?: loaded.withingsLastSyncMs
             MetricType.BODY_BATTERY -> loaded.syncByArea[SyncArea.BODY_BATTERY] ?: loaded.garminLastSyncMs
             MetricType.HRV -> loaded.syncByArea[SyncArea.HRV] ?: loaded.garminLastSyncMs
-            MetricType.RESTING_HEART_RATE, MetricType.SPO2 -> loaded.syncByArea[SyncArea.HEART_RATE] ?: loaded.garminLastSyncMs
-            MetricType.STRESS, MetricType.STEPS -> loaded.syncByArea[SyncArea.STEPS_STRESS] ?: loaded.garminLastSyncMs
+            MetricType.RESTING_HEART_RATE, MetricType.SPO2 -> loaded.syncByArea[SyncArea.HEART_RATE] ?: loaded.garminLastSyncMs ?: loaded.withingsLastSyncMs
+            MetricType.STRESS -> loaded.syncByArea[SyncArea.STEPS_STRESS] ?: loaded.garminLastSyncMs
+            MetricType.STEPS -> loaded.syncByArea[SyncArea.STEPS_STRESS] ?: loaded.garminLastSyncMs ?: loaded.withingsLastSyncMs
             MetricType.WEIGHT,
             MetricType.BODY_FAT,
             MetricType.MUSCLE_MASS,

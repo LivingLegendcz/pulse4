@@ -12,7 +12,9 @@ data class WithingsConfig(
     val authorizeUrl: String = "https://account.withings.com/oauth2_user/authorize2",
     val tokenUrl: String = "https://wbsapi.withings.net/v2/oauth2",
     val measureUrl: String = "https://wbsapi.withings.net/measure",
-    val scope: String = "user.metrics",
+    val measureV2Url: String = "https://wbsapi.withings.net/v2/measure",
+    val sleepV2Url: String = "https://wbsapi.withings.net/v2/sleep",
+    val scope: String = "user.metrics,user.activity",
     /** Ověřený HTTPS App Link (potřebuje doménu a statický assetlinks.json, nikoli token broker). */
     val redirectUri: String,
     /** Podepsaný požadavek na token (getnonce + HMAC) místo posílání client_secret; Withings uvádí obojí, ověřit. */

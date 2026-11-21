@@ -1,5 +1,6 @@
 package app.pulse4.withings
 
+import app.pulse4.domain.Activity
 import app.pulse4.domain.EcgAfibClassification
 import app.pulse4.domain.ImportFilter
 import app.pulse4.domain.ImportKey
@@ -132,6 +133,7 @@ object WithingsWebTypes {
     const val FAT_RATIO = 6
     const val FAT_MASS_WEIGHT = 8
     const val HEART_RATE = 11
+    const val SPO2 = 54
     const val MUSCLE_MASS = 76
     const val HYDRATION = 77
     const val BONE_MASS = 88
@@ -152,6 +154,7 @@ object WithingsWebTypes {
         FAT_RATIO,
         FAT_MASS_WEIGHT,
         HEART_RATE,
+        SPO2,
         MUSCLE_MASS,
         HYDRATION,
         BONE_MASS,
@@ -424,6 +427,109 @@ class WithingsWebClient(
         )
     }
 
+    /**
+     * Načte denní souhrny aktivity z `/cgi-bin/v2/measure` (`action=getactivity`) dle oficiálního API Withings.
+     * Vrací [Result], aby nepodporovaný/prázdný endpoint u účtů bez hodinek nikdy nerozbil synchronizaci váhy.
+     */
+    fun getDailyActivities(
+        cookies: String,
+        userId: Long,
+        startDateYmd: String,
+        endDateYmd: String,
+        sessionToken: String? = null,
+    ): Result<List<WithingsDailyActivity>> = runCatching {
+        val out = ArrayList<WithingsDailyActivity>()
+        var offset = 0L
+        var guard = 0
+        do {
+            val form = baseForm("getactivity", cookies, sessionToken).apply {
+                put("userid", userId.toString())
+                put("startdateymd", startDateYmd)
+                put("enddateymd", endDateYmd)
+                put("data_fields", WithingsWatchFields.ACTIVITY_DATA_FIELDS)
+                if (offset > 0L) put("offset", offset.toString())
+            }
+            val res = post("v2/measure", form, cookies, sessionToken)
+            val env = Wire.parse(res.body)
+            if (env.status != 0) throw ProviderError.Server(env.status)
+            val body = env.body ?: break
+            out += WithingsWatchParser.parseDailyActivities(body)
+            val more = (body["more"]?.jsonPrimitive?.intOrNull ?: 0) != 0 ||
+                (body["more"]?.jsonPrimitive?.booleanOrNull == true)
+            offset = body["offset"]?.jsonPrimitive?.longOrNull ?: 0L
+            if (++guard > 100) break
+        } while (more && offset > 0L)
+        out
+    }
+
+    /**
+     * Načte spánkové souhrny z `/cgi-bin/v2/sleep` (`action=getsummary`) dle oficiálního API Withings.
+     */
+    fun getSleepSummaries(
+        cookies: String,
+        userId: Long,
+        startDateYmd: String,
+        endDateYmd: String,
+        sessionToken: String? = null,
+    ): Result<List<WithingsSleepSummary>> = runCatching {
+        val out = ArrayList<WithingsSleepSummary>()
+        var offset = 0L
+        var guard = 0
+        do {
+            val form = baseForm("getsummary", cookies, sessionToken).apply {
+                put("userid", userId.toString())
+                put("startdateymd", startDateYmd)
+                put("enddateymd", endDateYmd)
+                put("data_fields", WithingsWatchFields.SLEEP_DATA_FIELDS)
+                if (offset > 0L) put("offset", offset.toString())
+            }
+            val res = post("v2/sleep", form, cookies, sessionToken)
+            val env = Wire.parse(res.body)
+            if (env.status != 0) throw ProviderError.Server(env.status)
+            val body = env.body ?: break
+            out += WithingsWatchParser.parseSleepSummaries(body)
+            val more = (body["more"]?.jsonPrimitive?.intOrNull ?: 0) != 0 ||
+                (body["more"]?.jsonPrimitive?.booleanOrNull == true)
+            offset = body["offset"]?.jsonPrimitive?.longOrNull ?: 0L
+            if (++guard > 100) break
+        } while (more && offset > 0L)
+        out
+    }
+
+    /**
+     * Načte jednotlivé sportovní tréninky z `/cgi-bin/v2/measure` (`action=getworkouts`) dle oficiálního API Withings.
+     */
+    fun getWorkouts(
+        cookies: String,
+        userId: Long,
+        startDateYmd: String,
+        endDateYmd: String,
+        sessionToken: String? = null,
+    ): Result<List<WithingsWorkout>> = runCatching {
+        val out = ArrayList<WithingsWorkout>()
+        var offset = 0L
+        var guard = 0
+        do {
+            val form = baseForm("getworkouts", cookies, sessionToken).apply {
+                put("userid", userId.toString())
+                put("startdateymd", startDateYmd)
+                put("enddateymd", endDateYmd)
+                put("data_fields", WithingsWatchFields.WORKOUT_DATA_FIELDS)
+                if (offset > 0L) put("offset", offset.toString())
+            }
+            val res = post("v2/measure", form, cookies, sessionToken)
+            val env = Wire.parse(res.body)
+            if (env.status != 0) throw ProviderError.Server(env.status)
+            val body = env.body ?: break
+            out += WithingsWatchParser.parseWorkouts(body)
+            val more = (body["more"]?.jsonPrimitive?.intOrNull ?: 0) != 0 ||
+                (body["more"]?.jsonPrimitive?.booleanOrNull == true)
+            offset = body["offset"]?.jsonPrimitive?.longOrNull ?: 0L
+            if (++guard > 100) break
+        } while (more && offset > 0L)
+        out
+    }
+
     private fun post(endpoint: String, form: Map<String, String>, cookies: String, sessionToken: String? = null) = try {
         val r = http.postForm("${config.baseUrl}$endpoint", form, defaultHeaders(cookies, sessionToken))
         if (r.code == 429) {
@@ -590,6 +696,7 @@ object WithingsWebMapper {
                         Triple(MetricType.BODY_WATER, pct, pct.isFinite() && pct > 0.0)
                     }
                     WithingsWebTypes.HEART_RATE -> Triple(MetricType.HEART_RATE, m.value, m.value in 30.0..240.0)
+                    WithingsWebTypes.SPO2 -> Triple(MetricType.SPO2, m.value, m.value in 50.0..100.0)
                     WithingsWebTypes.PWV -> Triple(MetricType.PULSE_WAVE_VELOCITY, m.value, m.value in 2.0..25.0)
                     WithingsWebTypes.VASCULAR_AGE -> Triple(MetricType.VASCULAR_AGE, m.value, m.value in 10.0..120.0)
                     WithingsWebTypes.VISCERAL_FAT -> Triple(MetricType.VISCERAL_FAT, m.value, m.value in 0.0..50.0)
@@ -717,10 +824,12 @@ class WithingsWebFetcher(
     private val exclusions: MeasurementExclusions = MeasurementExclusions { false },
     private val nowMs: () -> Long = System::currentTimeMillis,
     private val initialDays: Int = 730, // 2 roky historie při prvním importu
+    private val initialWatchDays: Int = 90,
     private val config: WithingsWebConfig = WithingsWebConfig(),
     private val existingHeartRates: () -> Map<Long, Double> = { emptyMap() },
     private val onRefreshFallback: (() -> WithingsWebSession?)? = null,
     private val existingIdsByGrpIds: (Set<Long>) -> Set<String> = { emptySet() },
+    private val onWorkouts: (List<Activity>) -> Unit = {},
 ) : AreaFetcher {
     var skippedItems = 0
         private set
@@ -785,6 +894,23 @@ class WithingsWebFetcher(
         val heartOk = heartResult.isSuccess
         val ecgItems = heartResult.getOrDefault(emptyList())
 
+        // Hodinky / spánkové senzory Withings (oficiální v2 API: getactivity, getsummary, getworkouts).
+        // Volitelné – selhání či prázdná odpověď u účtů bez hodinek nesmí ovlivnit váhu ani tvořit tombstony.
+        val uidStr = s.primaryUserId.toString()
+        val watchFromMs = maxOf(fromMs, now - initialWatchDays.toLong() * 86_400_000L)
+        val startYmd = WithingsWatchMapper.formatYmd(watchFromMs, zone)
+        val endYmd = WithingsWatchMapper.formatYmd(now, zone)
+        val dailyObs = client.getDailyActivities(s.cookies, s.primaryUserId, startYmd, endYmd, s.sessionToken)
+            .map { WithingsWatchMapper.mapDailyActivities(it, uidStr, zone) }
+            .getOrDefault(emptyList())
+        val sleepObs = client.getSleepSummaries(s.cookies, s.primaryUserId, startYmd, endYmd, s.sessionToken)
+            .map { WithingsWatchMapper.mapSleepSummaries(it, uidStr, zone) }
+            .getOrDefault(emptyList())
+        val (workouts, workoutObs) = client.getWorkouts(s.cookies, s.primaryUserId, startYmd, endYmd, s.sessionToken)
+            .map { WithingsWatchMapper.mapWorkouts(it, uidStr, zone) }
+            .getOrDefault(emptyList<Activity>() to emptyList())
+        if (workouts.isNotEmpty()) onWorkouts(workouts)
+
         skippedItems += windowMapped.skipped + (modifiedMapped?.skipped ?: 0)
 
         // Sloučíme položky (při kolizi vyhrává novější z modifiedMapped)
@@ -792,16 +918,20 @@ class WithingsWebFetcher(
         windowMapped.items.forEach { mergedById[it.id] = it }
         modifiedMapped?.items?.forEach { mergedById[it.id] = it }
         ecgItems.forEach { mergedById[it.id] = it }
+        dailyObs.forEach { mergedById[it.id] = it }
+        sleepObs.forEach { mergedById[it.id] = it }
+        workoutObs.forEach { mergedById[it.id] = it }
 
         val allDeletedGrpIds = windowMapped.deletedGroupIds + (modifiedMapped?.deletedGroupIds ?: emptySet())
         val existingInWindow = existingIds(fromMs, now)
 
-        // 1. Tombstony z porovnání okna (při selhání v2/heart vyřadíme ecg:* aby nedošlo k falešnému smazání)
-        val existingForReconcile = if (heartOk) {
-            existingInWindow
-        } else {
-            existingInWindow.filterNot { it.contains("|id:ecg:") }.toSet()
-        }
+        // 1. Tombstony z porovnání okna (hodinkové záznamy a při selhání v2/heart i ecg:* nikdy nerekoncilujeme jako smazané)
+        val existingForReconcile = existingInWindow.filterNot { id ->
+            id.contains("|id:act:") ||
+                id.contains("|id:sleep:") ||
+                id.contains("|id:wkt:") ||
+                (!heartOk && id.contains("|id:ecg:"))
+        }.toSet()
         val fetchedIdsInWindow = (windowMapped.items.map { it.id } + modifiedMapped?.items.orEmpty().map { it.id } + ecgItems.map { it.id }).toSet()
         val windowTombstones = if (windowMapped.items.isEmpty()) {
             emptyList()

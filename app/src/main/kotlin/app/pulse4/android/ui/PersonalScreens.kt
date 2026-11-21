@@ -128,6 +128,7 @@ import app.pulse4.android.data.MapProvider
 import app.pulse4.android.data.effectiveMovingTimeS
 import app.pulse4.android.data.toRow
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -455,7 +456,7 @@ fun getMetricUiConfig(type: MetricType): MetricUiConfig = when (type) {
 
 private const val DASHBOARD_REFRESH_DEBOUNCE_MS = 250L
 
-/** Observation types behind the Today series cards (WEIGHT comes from `withings.trend`). */
+/** Observation types behind the Today series cards (WEIGHT and body composition come from `withings.trend`). */
 private val TODAY_SERIES_TYPES = listOf(
     MetricType.SLEEP_DURATION,
     MetricType.BODY_BATTERY,
@@ -463,7 +464,68 @@ private val TODAY_SERIES_TYPES = listOf(
     MetricType.RESTING_HEART_RATE,
     MetricType.STRESS,
     MetricType.STEPS,
+    MetricType.SPO2,
+    MetricType.RESPIRATION,
 )
+
+private val EXTENDED_BODY_WIDGET_TYPES: Map<String, MetricType> = linkedMapOf(
+    "body_fat" to MetricType.BODY_FAT,
+    "muscle" to MetricType.MUSCLE_MASS,
+    "body_water" to MetricType.BODY_WATER,
+    "bone" to MetricType.BONE_MASS,
+    "visceral_fat" to MetricType.VISCERAL_FAT,
+    "pwv" to MetricType.PULSE_WAVE_VELOCITY,
+    "vascular_age" to MetricType.VASCULAR_AGE,
+    "bmr" to MetricType.BMR,
+    "metabolic_age" to MetricType.METABOLIC_AGE,
+)
+
+internal val DEFAULT_TODAY_WIDGET_ORDER: List<String> = listOf(
+    "sleep", "bb", "hrv", "rhr", "stress", "steps", "spo2", "respiration",
+    "weight", "body_fat", "muscle", "body_water", "bone", "visceral_fat",
+    "pwv", "vascular_age", "bmr", "metabolic_age", "ecg",
+)
+
+/** Základní karty, které se na Dnes zobrazí vždy (i když ještě nemají naměřenou hodnotu). */
+internal val CORE_TODAY_WIDGET_KEYS: Set<String> = setOf(
+    "sleep", "bb", "hrv", "rhr", "stress", "steps", "spo2", "respiration", "weight", "ecg",
+)
+
+internal fun normalizeTodayWidgetOrder(saved: List<String>): List<String> {
+    val known = DEFAULT_TODAY_WIDGET_ORDER.toSet()
+    val kept = saved.filter { it in known }.distinct()
+    val missing = DEFAULT_TODAY_WIDGET_ORDER.filter { it !in kept }
+    return kept + missing
+}
+
+internal fun todayWidgetMetricType(key: String): MetricType = when (key) {
+    "sleep" -> MetricType.SLEEP_DURATION
+    "bb" -> MetricType.BODY_BATTERY
+    "hrv" -> MetricType.HRV
+    "rhr" -> MetricType.RESTING_HEART_RATE
+    "stress" -> MetricType.STRESS
+    "steps" -> MetricType.STEPS
+    "spo2" -> MetricType.SPO2
+    "respiration" -> MetricType.RESPIRATION
+    "weight" -> MetricType.WEIGHT
+    "body_fat" -> MetricType.BODY_FAT
+    "muscle" -> MetricType.MUSCLE_MASS
+    "body_water" -> MetricType.BODY_WATER
+    "bone" -> MetricType.BONE_MASS
+    "visceral_fat" -> MetricType.VISCERAL_FAT
+    "pwv" -> MetricType.PULSE_WAVE_VELOCITY
+    "vascular_age" -> MetricType.VASCULAR_AGE
+    "bmr" -> MetricType.BMR
+    "metabolic_age" -> MetricType.METABOLIC_AGE
+    "ecg" -> MetricType.ECG
+    else -> MetricType.HRV
+}
+
+private fun formatShortLocalDate(localDate: String?): String? {
+    if (localDate.isNullOrBlank()) return null
+    val d = runCatching { LocalDate.parse(localDate) }.getOrNull() ?: return localDate.takeLast(5)
+    return "${d.dayOfMonth}. ${d.monthValue}."
+}
 
 object ScreenMemoryCache {
     @Volatile var todayDashboard: TodayDashboardBundle? = null
@@ -480,6 +542,8 @@ data class TodayDashboardBundle(
     val latestEcgObs: app.pulse4.domain.MetricObservation? = null,
     val garminLastSyncMs: Long?,
     val withingsLastSyncMs: Long?,
+    val latestByType: Map<MetricType, app.pulse4.domain.MetricObservation> = emptyMap(),
+    val syncByArea: Map<SyncArea, Long?> = emptyMap(),
 )
 
 @Composable
@@ -489,7 +553,6 @@ private fun WidgetOrderReorderDialog(
     onSave: (List<String>, Boolean) -> Unit,
     onDismiss: () -> Unit
 ) {
-    val defaultOrder = listOf("sleep", "bb", "hrv", "rhr", "stress", "steps", "weight", "ecg")
     val widgetMeta = mapOf(
         "sleep" to ("Spánek" to "Doba spánku a noční skóre regenerace"),
         "bb" to ("Body Battery" to "Aktuální tělesná energie a průběh nabití"),
@@ -497,13 +560,22 @@ private fun WidgetOrderReorderDialog(
         "rhr" to ("Klidový tep" to "Klidová tepová frekvence (RHR)"),
         "stress" to ("Stresová zátěž" to "Reakce autonomního nervového systému"),
         "steps" to ("Denní kroky" to "Kroky a celková denní aktivita"),
+        "spo2" to ("Okysličení krve (SpO2)" to "Noční saturace krve kyslíkem"),
+        "respiration" to ("Dechová frekvence" to "Průměrný počet dechů za minutu"),
         "weight" to ("Hmotnost & Tělo" to "Váha a složení tělesných tkání"),
+        "body_fat" to ("Tělesný tuk" to "Procentuální podíl tukové tkáně"),
+        "muscle" to ("Svalová hmota" to "Hmotnost kosterního svalstva"),
+        "body_water" to ("Tělesná voda" to "Celková hydratace organismu"),
+        "bone" to ("Kostní hmota" to "Minerální hmotnost kostí"),
+        "visceral_fat" to ("Viscerální tuk" to "Index vnitřního tuku"),
+        "pwv" to ("Rychlost pulzní vlny (PWV)" to "Pružnost tepen a cévní zdraví"),
+        "vascular_age" to ("Cévní věk" to "Biologické stáří cév"),
+        "bmr" to ("Bazální metabolismus (BMR)" to "Klidový denní energetický výdej"),
+        "metabolic_age" to ("Metabolický věk" to "Srovnání bazálního metabolismu"),
         "ecg" to ("6svodové EKG" to "Srdeční rytmus a záznamy z váhy")
     )
     var currentOrder by remember {
-        val complete = initialOrder.filter { it in widgetMeta }.toMutableList()
-        defaultOrder.forEach { if (!complete.contains(it)) complete.add(it) }
-        mutableStateOf(complete.toList())
+        mutableStateOf(normalizeTodayWidgetOrder(initialOrder))
     }
     var showAll by remember { mutableStateOf(initialShowAll) }
 
@@ -567,17 +639,7 @@ private fun WidgetOrderReorderDialog(
                 )
                 currentOrder.forEachIndexed { idx, key ->
                     val meta = widgetMeta[key] ?: (key to "")
-                    val widgetType = when (key) {
-                        "sleep" -> MetricType.SLEEP_DURATION
-                        "bb" -> MetricType.BODY_BATTERY
-                        "hrv" -> MetricType.HRV
-                        "rhr" -> MetricType.RESTING_HEART_RATE
-                        "stress" -> MetricType.STRESS
-                        "steps" -> MetricType.STEPS
-                        "weight" -> MetricType.WEIGHT
-                        "ecg" -> MetricType.ECG
-                        else -> MetricType.HRV
-                    }
+                    val widgetType = todayWidgetMetricType(key)
                     val wCfg = getMetricUiConfig(widgetType)
                     Card(
                         shape = RoundedCornerShape(10.dp),
@@ -666,7 +728,7 @@ private fun WidgetOrderReorderDialog(
         },
         dismissButton = {
             Row {
-                TextButton(onClick = { currentOrder = defaultOrder; showAll = true }) {
+                TextButton(onClick = { currentOrder = DEFAULT_TODAY_WIDGET_ORDER; showAll = true }) {
                     Text("Obnovit výchozí", color = Color(0xFF94A3B8))
                 }
                 TextButton(onClick = onDismiss) {
@@ -706,8 +768,29 @@ fun TodayScreen(
     val statesOrNull by sl.db.areaStates().all().collectAsState(initial = null)
     val states = statesOrNull.orEmpty()
     val units by sl.settings.unitSystemFlow.collectAsState()
+    val zoneIdStr by sl.settings.zoneIdFlow.collectAsState()
     val recentActs by sl.db.activities().recentSummaries(30).collectAsState(initial = emptyList())
-    val currentDateKey = LocalDate.now(ZoneId.of(sl.settings.zoneId)).toString()
+    var currentDateKey by remember(zoneIdStr) {
+        mutableStateOf(LocalDate.now(runCatching { ZoneId.of(zoneIdStr) }.getOrDefault(ZoneId.systemDefault())).toString())
+    }
+    var resumeTick by remember { mutableStateOf(0) }
+    var syncDoneTick by remember { mutableStateOf(0) }
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, zoneIdStr) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                val z = runCatching { ZoneId.of(zoneIdStr) }.getOrDefault(ZoneId.systemDefault())
+                currentDateKey = LocalDate.now(z).toString()
+                resumeTick++
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    val obsWindowFrom = remember(currentDateKey, bgWindowDays) {
+        LocalDate.parse(currentDateKey).minusDays(maxOf(bgWindowDays, 90).toLong()).toString()
+    }
+    val obsRevision by sl.db.observations().observeRevisionSince(obsWindowFrom).collectAsState(initial = null)
     val importWorkInfos by androidx.work.WorkManager.getInstance(ctx)
         .getWorkInfosForUniqueWorkFlow("import-now")
         .collectAsState(initial = emptyList())
@@ -728,6 +811,7 @@ fun TodayScreen(
                 androidx.work.WorkInfo.State.SUCCEEDED -> {
                     syncing = false
                     syncTriggeredAtMs = null
+                    syncDoneTick++
                     val recentError = states.firstOrNull { (it.lastAttemptMs ?: 0L) >= triggeredAt && !it.lastError.isNullOrBlank() }?.lastError
                     syncMessage = if (recentError != null) "Synchronizace s chybou: ${app.pulse4.ui.Labels.syncError(recentError)}" else "Synchronizace dokončena."
                 }
@@ -738,16 +822,26 @@ fun TodayScreen(
 
     val dashboardData by produceState<TodayDashboardBundle?>(
         initialValue = ScreenMemoryCache.todayDashboard,
-        key1 = listOf(statesOrNull?.map { it.area to it.lastSuccessMs }, bgWindowDays, units, currentDateKey)
+        key1 = listOf(
+            statesOrNull?.map { it.area to it.lastSuccessMs },
+            obsRevision,
+            bgWindowDays,
+            units,
+            currentDateKey,
+            zoneIdStr,
+            resumeTick,
+            syncDoneTick,
+        )
     ) {
-        // Stale-while-revalidate: with a cached bundle on screen, wait for the area-state placeholder and coalesce
-        // bursts of sync writes (each restart of this block cancels the previous delay) before recomputing.
-        if (ScreenMemoryCache.todayDashboard != null) {
-            if (statesOrNull == null) return@produceState
+        // Stale-while-revalidate: with a cached bundle for today on screen, wait for the initial Room placeholder
+        // and coalesce bursts of sync writes before recomputing. If the date rolled over, refresh immediately.
+        val cached = ScreenMemoryCache.todayDashboard
+        if (cached != null && cached.today.toString() == currentDateKey) {
+            if (statesOrNull == null && obsRevision == null) return@produceState
             kotlinx.coroutines.delay(DASHBOARD_REFRESH_DEBOUNCE_MS)
         }
         val result = withContext(Dispatchers.IO) {
-            val today = LocalDate.now(ZoneId.of(sl.settings.zoneId))
+            val today = LocalDate.now(runCatching { ZoneId.of(zoneIdStr) }.getOrDefault(ZoneId.systemDefault()))
             val obsToday = sl.db.observations().forDate(today.toString()).map { it.toDomain() }
             val maxDays = maxOf(bgWindowDays, 30)
             val rangeFrom = today.minusDays((maxDays - 1).toLong()).toString()
@@ -770,22 +864,33 @@ fun TodayScreen(
                 sl.db.areaStates().get("withings.WEIGHT")?.lastSuccessMs
             }
 
-            val metricsOrder = listOf(
-                MetricType.SLEEP_DURATION,
-                MetricType.BODY_BATTERY,
-                MetricType.HRV,
-                MetricType.RESTING_HEART_RATE,
-                MetricType.STRESS,
-                MetricType.STEPS,
-                MetricType.WEIGHT
-            )
-            val seriesByType = metricsOrder.associateWith { mType ->
-                val src = if (mType == MetricType.WEIGHT) weightObs else rangeObs
-                MetricSeries.build(mType, src, today, bgWindowDays)
+            val seriesMap = LinkedHashMap<MetricType, MetricSeries>()
+            val latestMap = LinkedHashMap<MetricType, MetricObservation>()
+            for (mType in TODAY_SERIES_TYPES) {
+                seriesMap[mType] = MetricSeries.build(mType, rangeObs, today, bgWindowDays)
+                val latest = rangeObs.filter { it.type == mType && !it.deleted }.maxByOrNull { it.endUtcMs ?: it.startUtcMs }
+                    ?: sl.db.observations().latest(mType.name)?.toDomain()
+                if (latest != null) latestMap[mType] = latest
             }
+            seriesMap[MetricType.WEIGHT] = MetricSeries.build(MetricType.WEIGHT, weightObs, today, bgWindowDays)
             val todaySleepScore = obsToday.filter { it.type == MetricType.SLEEP_SCORE && !it.deleted }.maxByOrNull { it.startUtcMs }?.value
             val latestWeightObs = weightObs.filter { !it.deleted }.maxByOrNull { it.startUtcMs }
                 ?: sl.db.observations().latest(MetricType.WEIGHT.name)?.toDomain()
+            if (latestWeightObs != null) latestMap[MetricType.WEIGHT] = latestWeightObs
+
+            // Rozšířené metriky složení těla a cév (Withings): načítají se jen pokud má uživatel aspoň 1 záznam.
+            for ((_, extType) in EXTENDED_BODY_WIDGET_TYPES) {
+                val dbLatest = sl.db.observations().latest(extType.name)?.toDomain()
+                if (dbLatest != null) {
+                    val trendRows = runCatching { sl.withings.trend(extType, maxOf(bgWindowDays, 90)) }.getOrDefault(emptyList())
+                    val srcRows = trendRows.ifEmpty {
+                        sl.db.observations().forTypeInRange(extType.name, rangeFrom, today.toString()).map { it.toDomain() }
+                    }
+                    seriesMap[extType] = MetricSeries.build(extType, srcRows, today, bgWindowDays)
+                    latestMap[extType] = srcRows.filter { !it.deleted }.maxByOrNull { it.startUtcMs } ?: dbLatest
+                }
+            }
+
             val latestEcgObs = pickLatestEcgObservation(
                 ECG_METRIC_TYPES.flatMap { t -> runCatching { sl.withings.trend(t, 30) }.getOrDefault(emptyList()) }
             ) ?: pickLatestEcgObservation(
@@ -795,12 +900,14 @@ fun TodayScreen(
             TodayDashboardBundle(
                 today = today,
                 cards = TodayCards.build(obsToday, success, fmt),
-                seriesByType = seriesByType,
+                seriesByType = seriesMap,
                 todaySleepScore = todaySleepScore,
                 latestWeightObs = latestWeightObs,
                 latestEcgObs = latestEcgObs,
                 garminLastSyncMs = garminLastSyncMs,
-                withingsLastSyncMs = withingsLastSyncMs
+                withingsLastSyncMs = withingsLastSyncMs,
+                latestByType = latestMap,
+                syncByArea = success,
             )
         }
         ScreenMemoryCache.todayDashboard = result
@@ -1088,15 +1195,19 @@ fun TodayScreen(
 
         Spacer(Modifier.height(16.dp))
 
-        // 4. Chytré filtrování karet podle aktivního pilíře (žádné zahlcení 8 kartami najednou!)
-        val displayedKeys = remember(selectedPillar, showAllWidgets, currentWidgetOrder) {
-            if (showAllWidgets) {
-                currentWidgetOrder
-            } else {
-                val pillarSet = selectedPillar.widgetKeys.toSet()
-                currentWidgetOrder.filter { it in pillarSet }.ifEmpty { selectedPillar.widgetKeys }
+        // 4. Karty metrik: všechny základní + všechny další, které mají data (nikdy nevynechává chybějící/nové klíče)
+        val normalizedOrder = remember(currentWidgetOrder) { normalizeTodayWidgetOrder(currentWidgetOrder) }
+        val allVisibleKeys = remember(normalizedOrder, loaded.latestByType, loaded.latestEcgObs) {
+            normalizedOrder.filter { key ->
+                key in CORE_TODAY_WIDGET_KEYS ||
+                    (EXTENDED_BODY_WIDGET_TYPES[key]?.let { it in loaded.latestByType } == true)
             }
         }
+        val pillarVisibleKeys = remember(selectedPillar, allVisibleKeys) {
+            val pillarSet = selectedPillar.widgetKeys.toSet()
+            allVisibleKeys.filter { it in pillarSet }.ifEmpty { selectedPillar.widgetKeys.filter { it in CORE_TODAY_WIDGET_KEYS } }
+        }
+        val displayedKeys = if (showAllWidgets) allVisibleKeys else pillarVisibleKeys
 
         Row(
             Modifier
@@ -1105,7 +1216,7 @@ fun TodayScreen(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column {
+            Column(Modifier.weight(1f).padding(end = 8.dp)) {
                 Text(
                     if (showAllWidgets) "VŠECHNY BIOMETRICKÉ KARTY"
                     else "FAKTORY PILÍŘE: ${selectedPillar.title.uppercase()}",
@@ -1114,11 +1225,18 @@ fun TodayScreen(
                     color = selectedPillar.primaryColor,
                     letterSpacing = 1.1.sp
                 )
+                val syncParts = buildList {
+                    loaded.garminLastSyncMs?.let { add("Garmin ${fmt.time(it)}") }
+                    loaded.withingsLastSyncMs?.let { add("Withings ${fmt.time(it)}") }
+                }
                 Text(
-                    "Klepnutím na kartu otevřete detailní analýzu",
+                    if (syncParts.isNotEmpty()) "Sync: ${syncParts.joinToString(" · ")}"
+                    else "Klepnutím na kartu otevřete detailní analýzu",
                     style = MaterialTheme.typography.labelSmall,
-                    color = Color(0xFF64748B),
-                    fontSize = 10.sp
+                    color = Color(0xFF94A3B8),
+                    fontSize = 10.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
 
@@ -1149,7 +1267,7 @@ fun TodayScreen(
                     )
                 }
 
-                // Přepínač: Jen aktivní pilíř vs Všech 8 karet
+                // Přepínač: Jen aktivní pilíř vs Všechny dostupné karty
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(10.dp))
@@ -1161,7 +1279,7 @@ fun TodayScreen(
                         .padding(horizontal = 10.dp, vertical = 5.dp)
                 ) {
                     Text(
-                        if (showAllWidgets) "Dle pilíře (${selectedPillar.widgetKeys.size})" else "Vše (${currentWidgetOrder.size})",
+                        if (showAllWidgets) "Dle pilíře (${pillarVisibleKeys.size})" else "Vše (${allVisibleKeys.size})",
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.Bold,
                         color = if (showAllWidgets) selectedPillar.primaryColor else Color(0xFF38BDF8)
@@ -1172,240 +1290,80 @@ fun TodayScreen(
 
         Spacer(Modifier.height(6.dp))
 
+        // Helper: každá karta ukazuje dnešní hodnotu nebo poslední naměřenou hodnotu + čas posledního syncu
+        fun formatMetricValue(type: MetricType, value: Double): String = when (type) {
+            MetricType.SLEEP_DURATION -> fmt.sleep(value)
+            MetricType.BODY_BATTERY -> fmt.number(value, 0)
+            MetricType.HRV -> "${fmt.number(value, 0)} ms"
+            MetricType.RESTING_HEART_RATE -> "${fmt.number(value, 0)} bpm"
+            MetricType.STRESS -> fmt.number(value, 0)
+            MetricType.STEPS -> fmt.number(value, 0)
+            MetricType.SPO2 -> "${fmt.number(value, 0)} %"
+            MetricType.RESPIRATION -> "${fmt.number(value, 1)} d/min"
+            MetricType.WEIGHT -> fmt.weight(value)
+            MetricType.BODY_FAT, MetricType.BODY_WATER -> "${fmt.number(value, 1)} %"
+            MetricType.MUSCLE_MASS, MetricType.BONE_MASS, MetricType.FAT_FREE_MASS -> fmt.weight(value, 1)
+            MetricType.VISCERAL_FAT -> fmt.number(value, 0)
+            MetricType.PULSE_WAVE_VELOCITY -> "${fmt.number(value, 1)} m/s"
+            MetricType.VASCULAR_AGE, MetricType.METABOLIC_AGE -> "${fmt.number(value, 0)} let"
+            MetricType.BMR -> "${fmt.number(value, 0)} kcal"
+            else -> fmt.number(value, 1)
+        }
+
+        fun syncTimeFor(type: MetricType): Long? = when (type) {
+            MetricType.SLEEP_DURATION, MetricType.RESPIRATION -> loaded.syncByArea[SyncArea.SLEEP] ?: loaded.garminLastSyncMs
+            MetricType.BODY_BATTERY -> loaded.syncByArea[SyncArea.BODY_BATTERY] ?: loaded.garminLastSyncMs
+            MetricType.HRV -> loaded.syncByArea[SyncArea.HRV] ?: loaded.garminLastSyncMs
+            MetricType.RESTING_HEART_RATE, MetricType.SPO2 -> loaded.syncByArea[SyncArea.HEART_RATE] ?: loaded.garminLastSyncMs
+            MetricType.STRESS, MetricType.STEPS -> loaded.syncByArea[SyncArea.STEPS_STRESS] ?: loaded.garminLastSyncMs
+            MetricType.WEIGHT,
+            MetricType.BODY_FAT,
+            MetricType.MUSCLE_MASS,
+            MetricType.BODY_WATER,
+            MetricType.BONE_MASS,
+            MetricType.VISCERAL_FAT,
+            MetricType.PULSE_WAVE_VELOCITY,
+            MetricType.VASCULAR_AGE,
+            MetricType.BMR,
+            MetricType.METABOLIC_AGE,
+            MetricType.ECG -> loaded.withingsLastSyncMs ?: loaded.syncByArea[SyncArea.WEIGHT]
+            else -> loaded.garminLastSyncMs
+        }
+
+        fun atmosphereFor(type: MetricType) = when (type) {
+            MetricType.SLEEP_DURATION -> MetricAtmosphereCatalog.Sleep
+            MetricType.BODY_BATTERY -> MetricAtmosphereCatalog.BodyBattery
+            MetricType.HRV -> MetricAtmosphereCatalog.Hrv
+            MetricType.RESTING_HEART_RATE -> MetricAtmosphereCatalog.RestingHr
+            MetricType.STRESS -> MetricAtmosphereCatalog.Stress
+            MetricType.STEPS -> MetricAtmosphereCatalog.Steps
+            MetricType.SPO2, MetricType.RESPIRATION -> MetricAtmosphereCatalog.Sleep
+            MetricType.WEIGHT, MetricType.VISCERAL_FAT, MetricType.BMR, MetricType.METABOLIC_AGE -> MetricAtmosphereCatalog.Weight
+            MetricType.BODY_FAT -> MetricAtmosphereCatalog.BodyFat
+            MetricType.MUSCLE_MASS -> MetricAtmosphereCatalog.Weight
+            MetricType.BODY_WATER -> MetricAtmosphereCatalog.BodyWater
+            MetricType.BONE_MASS -> MetricAtmosphereCatalog.BoneMass
+            MetricType.PULSE_WAVE_VELOCITY, MetricType.VASCULAR_AGE -> MetricAtmosphereCatalog.RestingHr
+            MetricType.ECG -> MetricAtmosphereCatalog.Ecg
+            else -> MetricAtmosphereCatalog.Hrv
+        }
+
         // Vykreslení vyfiltrovaných atmosférických karet
         displayedKeys.forEach { key ->
             when (key) {
-                "sleep" -> {
-                    val card = cards.firstOrNull { it.key == "sleep" }
-                    val s = seriesByType[MetricType.SLEEP_DURATION]
-                    val rawVals = s?.values ?: emptyList()
-                    val chartVals = rawVals.map { it?.div(3600.0) }
-                    val usual = s?.usual
-                    val todayVal = rawVals.lastOrNull()
-                    val deltaLabel = if (usual != null && todayVal != null) {
-                        val diff = todayVal - usual.median
-                        val sign = if (diff >= 0) "+" else ""
-                        "$sign${(diff / 60).toLong()} min vs medián"
-                    } else null
-                    val customStatus = if (sleepScore != null) "Skóre ${sleepScore.toInt()}/100" else null
-                    val cfg = getMetricUiConfig(MetricType.SLEEP_DURATION)
-                    val atmo = MetricAtmosphereCatalog.Sleep
-
-                    SinglestatCard(
-                        title = cfg.title,
-                        icon = cfg.icon,
-                        reading = card?.reading ?: Reading.NotSyncedYet,
-                        historyValues = chartVals,
-                        accentColor = cfg.color,
-                        artworkRes = atmo.artworkRes,
-                        motifKind = atmo.motifKind,
-                        heroTopColor = atmo.heroTopColor,
-                        windowLabel = "${bgWindowDays}d",
-                        deltaLabel = deltaLabel,
-                        statusLabel = customStatus,
-                        onClick = { onOpenMetric(MetricType.SLEEP_DURATION) }
-                    )
-                }
-                "bb" -> {
-                    val card = cards.firstOrNull { it.key == "bb" }
-                    val s = seriesByType[MetricType.BODY_BATTERY]
-                    val rawVals = s?.values ?: emptyList()
-                    val usual = s?.usual
-                    val todayVal = rawVals.lastOrNull()
-                    val deltaLabel = if (usual != null && todayVal != null) {
-                        val diff = todayVal - usual.median
-                        val sign = if (diff >= 0) "+" else ""
-                        "$sign${fmt.number(diff, 0)} ${getMetricUiConfig(MetricType.BODY_BATTERY).unit} vs medián"
-                    } else null
-                    val cfg = getMetricUiConfig(MetricType.BODY_BATTERY)
-                    val atmo = MetricAtmosphereCatalog.BodyBattery
-
-                    SinglestatCard(
-                        title = cfg.title,
-                        icon = cfg.icon,
-                        reading = card?.reading ?: Reading.NotSyncedYet,
-                        historyValues = rawVals,
-                        accentColor = cfg.color,
-                        artworkRes = atmo.artworkRes,
-                        motifKind = atmo.motifKind,
-                        heroTopColor = atmo.heroTopColor,
-                        windowLabel = "${bgWindowDays}d",
-                        deltaLabel = deltaLabel,
-                        statusLabel = null,
-                        onClick = { onOpenMetric(MetricType.BODY_BATTERY) }
-                    )
-                }
-                "hrv" -> {
-                    val card = cards.firstOrNull { it.key == "hrv" }
-                    val s = seriesByType[MetricType.HRV]
-                    val rawVals = s?.values ?: emptyList()
-                    val usual = s?.usual
-                    val todayVal = rawVals.lastOrNull()
-                    val deltaLabel = if (usual != null && todayVal != null) {
-                        val diff = todayVal - usual.median
-                        val sign = if (diff >= 0) "+" else ""
-                        "$sign${fmt.number(diff, 0)} ${getMetricUiConfig(MetricType.HRV).unit} vs medián"
-                    } else null
-                    val cfg = getMetricUiConfig(MetricType.HRV)
-                    val atmo = MetricAtmosphereCatalog.Hrv
-
-                    SinglestatCard(
-                        title = cfg.title,
-                        icon = cfg.icon,
-                        reading = card?.reading ?: Reading.NotSyncedYet,
-                        historyValues = rawVals,
-                        accentColor = cfg.color,
-                        artworkRes = atmo.artworkRes,
-                        motifKind = atmo.motifKind,
-                        heroTopColor = atmo.heroTopColor,
-                        windowLabel = "${bgWindowDays}d",
-                        deltaLabel = deltaLabel,
-                        statusLabel = null,
-                        onClick = { onOpenMetric(MetricType.HRV) }
-                    )
-                }
-                "rhr" -> {
-                    val card = cards.firstOrNull { it.key == "rhr" }
-                    val s = seriesByType[MetricType.RESTING_HEART_RATE]
-                    val rawVals = s?.values ?: emptyList()
-                    val usual = s?.usual
-                    val todayVal = rawVals.lastOrNull()
-                    val deltaLabel = if (usual != null && todayVal != null) {
-                        val diff = todayVal - usual.median
-                        val sign = if (diff >= 0) "+" else ""
-                        "$sign${fmt.number(diff, 0)} ${getMetricUiConfig(MetricType.RESTING_HEART_RATE).unit} vs medián"
-                    } else null
-                    val cfg = getMetricUiConfig(MetricType.RESTING_HEART_RATE)
-                    val atmo = MetricAtmosphereCatalog.RestingHr
-
-                    SinglestatCard(
-                        title = cfg.title,
-                        icon = cfg.icon,
-                        reading = card?.reading ?: Reading.NotSyncedYet,
-                        historyValues = rawVals,
-                        accentColor = cfg.color,
-                        artworkRes = atmo.artworkRes,
-                        motifKind = atmo.motifKind,
-                        heroTopColor = atmo.heroTopColor,
-                        windowLabel = "${bgWindowDays}d",
-                        deltaLabel = deltaLabel,
-                        statusLabel = null,
-                        onClick = { onOpenMetric(MetricType.RESTING_HEART_RATE) }
-                    )
-                }
-                "stress" -> {
-                    val card = cards.firstOrNull { it.key == "stress" }
-                    val s = seriesByType[MetricType.STRESS]
-                    val rawVals = s?.values ?: emptyList()
-                    val usual = s?.usual
-                    val todayVal = rawVals.lastOrNull()
-                    val deltaLabel = if (usual != null && todayVal != null) {
-                        val diff = todayVal - usual.median
-                        val sign = if (diff >= 0) "+" else ""
-                        "$sign${fmt.number(diff, 0)} ${getMetricUiConfig(MetricType.STRESS).unit} vs medián"
-                    } else null
-                    val cfg = getMetricUiConfig(MetricType.STRESS)
-                    val atmo = MetricAtmosphereCatalog.Stress
-
-                    SinglestatCard(
-                        title = cfg.title,
-                        icon = cfg.icon,
-                        reading = card?.reading ?: Reading.NotSyncedYet,
-                        historyValues = rawVals,
-                        accentColor = cfg.color,
-                        artworkRes = atmo.artworkRes,
-                        motifKind = atmo.motifKind,
-                        heroTopColor = atmo.heroTopColor,
-                        windowLabel = "${bgWindowDays}d",
-                        deltaLabel = deltaLabel,
-                        statusLabel = null,
-                        onClick = { onOpenMetric(MetricType.STRESS) }
-                    )
-                }
-                "steps" -> {
-                    val card = cards.firstOrNull { it.key == "steps" }
-                    val s = seriesByType[MetricType.STEPS]
-                    val rawVals = s?.values ?: emptyList()
-                    val usual = s?.usual
-                    val todayVal = rawVals.lastOrNull()
-                    val deltaLabel = if (usual != null && todayVal != null) {
-                        val diff = todayVal - usual.median
-                        val sign = if (diff >= 0) "+" else ""
-                        "$sign${fmt.number(diff, 0)} ${getMetricUiConfig(MetricType.STEPS).unit} vs medián"
-                    } else null
-                    val cfg = getMetricUiConfig(MetricType.STEPS)
-                    val atmo = MetricAtmosphereCatalog.Steps
-
-                    SinglestatCard(
-                        title = cfg.title,
-                        icon = cfg.icon,
-                        reading = card?.reading ?: Reading.NotSyncedYet,
-                        historyValues = rawVals,
-                        accentColor = cfg.color,
-                        artworkRes = atmo.artworkRes,
-                        motifKind = atmo.motifKind,
-                        heroTopColor = atmo.heroTopColor,
-                        windowLabel = "${bgWindowDays}d",
-                        deltaLabel = deltaLabel,
-                        statusLabel = null,
-                        onClick = { onOpenMetric(MetricType.STEPS) }
-                    )
-                }
-                "weight" -> {
-                    val weightSeries = seriesByType[MetricType.WEIGHT]
-                    val wCfg = getMetricUiConfig(MetricType.WEIGHT)
-                    val latestW = loaded.latestWeightObs
-                    val isWeightToday = latestW?.localDate == today.toString()
-                    val wReading: Reading<String> = when {
-                        latestW != null -> Reading.Value(
-                            fmt.weight(latestW.value),
-                            latestW.startUtcMs,
-                            loaded.withingsLastSyncMs ?: latestW.startUtcMs
-                        )
-                        loaded.withingsLastSyncMs != null -> Reading.DeviceDoesNotMeasure
-                        else -> Reading.NotSyncedYet
-                    }
-                    val weightValueColor = if (latestW != null && !isWeightToday) Color(0xFFF59E0B) else Color.White
-                    val weightStatusBadge = when {
-                        latestW == null -> null
-                        isWeightToday -> "Dnes"
-                        else -> "Starší (${latestW.localDate?.takeLast(5) ?: fmt.time(latestW.startUtcMs)})"
-                    }
-                    val weightUsual = weightSeries?.usual
-                    val weightDelta = if (weightUsual != null && latestW != null) {
-                        val diff = fmt.convertWeight(latestW.value - weightUsual.median)
-                        val sign = if (diff >= 0) "+" else ""
-                        "$sign${fmt.number(diff, 1)} ${fmt.weightUnit()} vs medián"
-                    } else null
-                    val atmo = MetricAtmosphereCatalog.Weight
-
-                    SinglestatCard(
-                        title = wCfg.title,
-                        icon = wCfg.icon,
-                        reading = wReading,
-                        historyValues = weightSeries?.values?.map { it?.let(fmt::convertWeight) }.orEmpty(),
-                        accentColor = wCfg.color,
-                        artworkRes = atmo.artworkRes,
-                        motifKind = atmo.motifKind,
-                        heroTopColor = atmo.heroTopColor,
-                        windowLabel = "${bgWindowDays}d",
-                        deltaLabel = weightDelta,
-                        statusLabel = weightStatusBadge,
-                        valueColor = weightValueColor,
-                        onClick = { onOpenMetric(MetricType.WEIGHT) }
-                    )
-                }
                 "ecg" -> {
+                    val ecgCfg = getMetricUiConfig(MetricType.ECG)
+                    val atmo = MetricAtmosphereCatalog.Ecg
                     val latestEcg = loaded.latestEcgObs
+                    val syncMs = syncTimeFor(MetricType.ECG)
                     if (latestEcg != null) {
-                        val ecgCfg = getMetricUiConfig(MetricType.ECG)
                         val isEcgToday = latestEcg.localDate == today.toString()
                         val ecgDet = parseEcgOrigin(latestEcg.origin, latestEcg.value)
                         val ecgStatusBadge = when (ecgDet.afibClassification) {
-                            0 -> "AFib nezjištěna"
+                            0 -> if (isEcgToday) "AFib nezjištěna" else "AFib nezjištěna · ${formatShortLocalDate(latestEcg.localDate) ?: ""}"
                             1 -> "AFib detekována"
                             2 -> "Neprůkazný záznam"
-                            else -> if (isEcgToday) "Dnes" else "Starší (${latestEcg.localDate?.takeLast(5) ?: fmt.time(latestEcg.startUtcMs)})"
+                            else -> if (isEcgToday) "Dnes" else "Poslední (${formatShortLocalDate(latestEcg.localDate) ?: fmt.time(latestEcg.startUtcMs)})"
                         }
                         val ecgValFormatted = when (latestEcg.type.name) {
                             "ECG_HR" -> "${fmt.number(latestEcg.value, 0)} bpm"
@@ -1428,10 +1386,8 @@ fun TodayScreen(
                         val ecgReading: Reading<String> = Reading.Value(
                             ecgValFormatted,
                             latestEcg.startUtcMs,
-                            loaded.withingsLastSyncMs ?: latestEcg.startUtcMs
+                            syncMs ?: 0L
                         )
-                        val atmo = MetricAtmosphereCatalog.Ecg
-
                         SinglestatCard(
                             title = ecgCfg.title,
                             icon = ecgCfg.icon,
@@ -1441,13 +1397,117 @@ fun TodayScreen(
                             artworkRes = atmo.artworkRes,
                             motifKind = atmo.motifKind,
                             heroTopColor = atmo.heroTopColor,
+                            lastSyncMs = syncMs,
                             windowLabel = "${bgWindowDays}d",
                             deltaLabel = null,
                             statusLabel = ecgStatusBadge,
-                            valueColor = if (ecgDet.afibClassification == 1) Color(0xFFEF4444) else Color.White,
+                            valueColor = when {
+                                ecgDet.afibClassification == 1 -> Color(0xFFEF4444)
+                                !isEcgToday -> Color(0xFFF59E0B)
+                                else -> Color.White
+                            },
+                            onClick = { onOpenMetric(MetricType.ECG) }
+                        )
+                    } else {
+                        SinglestatCard(
+                            title = ecgCfg.title,
+                            icon = ecgCfg.icon,
+                            reading = if (syncMs != null) Reading.DeviceDoesNotMeasure else Reading.NotSyncedYet,
+                            historyValues = emptyList(),
+                            accentColor = ecgCfg.color,
+                            artworkRes = atmo.artworkRes,
+                            motifKind = atmo.motifKind,
+                            heroTopColor = atmo.heroTopColor,
+                            lastSyncMs = syncMs,
+                            windowLabel = "${bgWindowDays}d",
+                            deltaLabel = null,
+                            statusLabel = null,
                             onClick = { onOpenMetric(MetricType.ECG) }
                         )
                     }
+                }
+                else -> {
+                    val mType = todayWidgetMetricType(key)
+                    val cfg = getMetricUiConfig(mType)
+                    val atmo = atmosphereFor(mType)
+                    val s = seriesByType[mType]
+                    val rawVals = s?.values ?: emptyList()
+                    val isWeightUnitMetric = mType in setOf(
+                        MetricType.WEIGHT, MetricType.MUSCLE_MASS, MetricType.BONE_MASS, MetricType.FAT_FREE_MASS
+                    )
+                    val chartVals = when {
+                        mType == MetricType.SLEEP_DURATION -> rawVals.map { it?.div(3600.0) }
+                        isWeightUnitMetric -> rawVals.map { it?.let(fmt::convertWeight) }
+                        else -> rawVals
+                    }
+                    val card = cards.firstOrNull { it.key == key }
+                    val todayReading = card?.reading as? Reading.Value<String>
+                    val latestObs = loaded.latestByType[mType]
+                    val syncMs = syncTimeFor(mType)
+                    val isToday = todayReading != null || latestObs?.localDate == today.toString()
+
+                    val reading: Reading<String> = when {
+                        todayReading != null -> todayReading.copy(fetchedAtUtcMs = todayReading.fetchedAtUtcMs.takeIf { it > 0L } ?: (syncMs ?: 0L))
+                        latestObs != null -> Reading.Value(
+                            value = formatMetricValue(mType, latestObs.value),
+                            measuredAtUtcMs = latestObs.endUtcMs ?: latestObs.startUtcMs,
+                            fetchedAtUtcMs = syncMs ?: 0L
+                        )
+                        syncMs != null -> Reading.DeviceDoesNotMeasure
+                        else -> Reading.NotSyncedYet
+                    }
+
+                    val currentNumeric = rawVals.lastOrNull() ?: latestObs?.value
+                    val usual = s?.usual
+                    val deltaLabel = if (usual != null && currentNumeric != null) {
+                        when {
+                            mType == MetricType.SLEEP_DURATION -> {
+                                val diff = currentNumeric - usual.median
+                                val sign = if (diff >= 0) "+" else ""
+                                "$sign${(diff / 60).toLong()} min vs medián"
+                            }
+                            isWeightUnitMetric -> {
+                                val diff = fmt.convertWeight(currentNumeric - usual.median)
+                                val sign = if (diff >= 0) "+" else ""
+                                "$sign${fmt.number(diff, 1)} ${fmt.weightUnit()} vs medián"
+                            }
+                            mType in setOf(MetricType.BODY_FAT, MetricType.BODY_WATER, MetricType.PULSE_WAVE_VELOCITY, MetricType.RESPIRATION) -> {
+                                val diff = currentNumeric - usual.median
+                                val sign = if (diff >= 0) "+" else ""
+                                "$sign${fmt.number(diff, 1)} ${cfg.unit} vs medián"
+                            }
+                            else -> {
+                                val diff = currentNumeric - usual.median
+                                val sign = if (diff >= 0) "+" else ""
+                                "$sign${fmt.number(diff, 0)} ${cfg.unit} vs medián"
+                            }
+                        }
+                    } else null
+
+                    val statusBadge = when {
+                        reading !is Reading.Value -> null
+                        mType == MetricType.SLEEP_DURATION && isToday && sleepScore != null -> "Skóre ${sleepScore.toInt()}/100"
+                        isToday -> "Dnes"
+                        else -> "Poslední (${formatShortLocalDate(latestObs?.localDate) ?: fmt.time(reading.measuredAtUtcMs)})"
+                    }
+                    val valueCol = if (reading is Reading.Value && !isToday) Color(0xFFF59E0B) else Color.White
+
+                    SinglestatCard(
+                        title = cfg.title,
+                        icon = cfg.icon,
+                        reading = reading,
+                        historyValues = chartVals,
+                        accentColor = cfg.color,
+                        artworkRes = atmo.artworkRes,
+                        motifKind = atmo.motifKind,
+                        heroTopColor = atmo.heroTopColor,
+                        lastSyncMs = syncMs,
+                        windowLabel = "${bgWindowDays}d",
+                        deltaLabel = deltaLabel,
+                        statusLabel = statusBadge,
+                        valueColor = valueCol,
+                        onClick = { onOpenMetric(mType) }
+                    )
                 }
             }
         }
@@ -2393,9 +2453,15 @@ fun DedicatedMetricDetailScreen(
     var showInfoDialog by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val units by sl.settings.unitSystemFlow.collectAsState()
+    val zoneIdStr by sl.settings.zoneIdFlow.collectAsState()
+    val detailObsFrom = remember(daysCount, zoneIdStr) {
+        val z = runCatching { ZoneId.of(zoneIdStr) }.getOrDefault(ZoneId.systemDefault())
+        LocalDate.now(z).minusDays(daysCount.toLong()).toString()
+    }
+    val obsRevision by sl.db.observations().observeRevisionSince(detailObsFrom).collectAsState(initial = null)
     val cfg = getMetricUiConfig(type)
 
-    val dataBundle by io(Triple(type, daysCount, units to refreshTick)) {
+    val dataBundle by io(listOf(type, daysCount, units, refreshTick, obsRevision, zoneIdStr)) {
         val zone = ZoneId.of(sl.settings.zoneId)
         val today = LocalDate.now(zone)
         val fromDate = today.minusDays((daysCount - 1).toLong()).toString()
@@ -4296,11 +4362,22 @@ fun MetricsScreen(sl: ServiceLocator, initialType: MetricType? = null) {
     // Stale-while-revalidate: the last bundle for the same selection is shown instantly on tab entry and refreshed
     // in the background; a failed load becomes a visible "retry" state instead of an endless spinner.
     var bundleRetry by remember { mutableStateOf(0) }
+    val metricsZoneId by sl.settings.zoneIdFlow.collectAsState()
+    val metricsToday = remember(metricsZoneId) {
+        LocalDate.now(runCatching { ZoneId.of(metricsZoneId) }.getOrDefault(ZoneId.systemDefault())).toString()
+    }
+    val metricsObsFrom = remember(metricsToday, daysCount) {
+        LocalDate.parse(metricsToday).minusDays(maxOf(daysCount, 90).toLong()).toString()
+    }
+    val metricsObsRev by sl.db.observations().observeRevisionSince(metricsObsFrom).collectAsState(initial = null)
+    LaunchedEffect(metricsObsRev) {
+        if (metricsObsRev != null) bundleRetry++
+    }
     val bundleKey = MetricsBundleKey(
         types = selectedTypes.toList(),
         days = daysCount,
         units = units,
-        today = LocalDate.now(ZoneId.of(sl.settings.zoneId)).toString(),
+        today = metricsToday,
     )
     val bundleState by ioCached(bundleKey, metricsBundleCache, bundleRetry) {
         loadMetricsBundle(sl, bundleKey.types, daysCount)

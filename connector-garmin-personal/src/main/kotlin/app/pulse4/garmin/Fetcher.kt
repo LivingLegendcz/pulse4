@@ -49,6 +49,8 @@ class GarminPersonalFetcher(
         var firstError: ProviderError? = null
         var healthyMetrics = 0
         var holdCursor = false
+        val zone = runCatching { java.time.ZoneId.of(zoneId) }.getOrDefault(ZoneOffset.UTC)
+        val todayDate = Instant.ofEpochMilli(now).atZone(zone).toLocalDate().toString()
         // Každá metrika se stahuje izolovaně: její chyba nesmí zahodit ostatní metriky téže oblasti (např. SpO2 vedle klidového tepu).
         for ((metric, group) in specs.groupBy { it.metric }) {
             val chain = group.filter { !it.fallback } + group.filter { it.fallback }
@@ -57,7 +59,16 @@ class GarminPersonalFetcher(
             for (spec in chain) {
                 try {
                     val r = fetchSpec(spec, from, now, responseCache)
-                    if (r.isNotEmpty()) { items = r; break }
+                    if (r.isNotEmpty()) {
+                        items = if (items.isEmpty()) {
+                            r
+                        } else {
+                            // Primární vrátil starší dny bez dneška: ze zálohy doplníme jen chybějící dny.
+                            val existingDates = items.mapNotNull { it.localDate }.toHashSet()
+                            items + r.filter { it.localDate == null || it.localDate !in existingDates }
+                        }
+                        if (items.any { it.localDate == todayDate }) break
+                    }
                 } catch (e: ProviderError) {
                     if (e.isAreaWide()) throw e
                     if (metricError == null) metricError = e
@@ -93,19 +104,23 @@ class GarminPersonalFetcher(
         return Batch(deduped.values.toList(), nextCursor, warnings = warnings)
     }
 
-    /** Stáhne celé okno jedné specifikace; chyby se předávají jako [ProviderError]. */
+    /** Stáhne celé okno jedné specifikace po kalendářních dnech v zóně uživatele; chyby se předávají jako [ProviderError]. */
     private fun fetchSpec(spec: EndpointSpec, from: Long, now: Long, cache: MutableMap<String, HttpResponse>): List<MetricObservation> {
         if (!spec.verified) throw ProviderError.NotConfigured("endpoint ${spec.area}/${spec.metric} není ověřen proti oficiální specifikaci")
+        val zone = runCatching { java.time.ZoneId.of(zoneId) }.getOrDefault(ZoneOffset.UTC)
+        val fromDate = Instant.ofEpochMilli(from).atZone(zone).toLocalDate()
+        val toDate = Instant.ofEpochMilli(now).atZone(zone).toLocalDate()
+        val spanDays = spec.maxRangeDays.coerceAtLeast(1).toLong()
         val out = ArrayList<MetricObservation>()
-        var cursor = from
-        while (cursor <= now) {
-            val rangeEnd = minOf(cursor + spec.maxRangeDays * DAY - 1, now)
-            val res = call(spec, cursor, rangeEnd, cache)
+        var day = fromDate
+        while (!day.isAfter(toDate)) {
+            val chunkEnd = minOf(day.plusDays(spanDays - 1L), toDate)
+            val res = call(spec, day, chunkEnd, cache)
             onRawResponse(spec, res.body)
             val mapped = ResponseMapper.map(spec, res.body, accountId, zoneId)
             skippedItems += mapped.skipped
             out += mapped.items
-            cursor = rangeEnd + 1
+            day = chunkEnd.plusDays(1L)
         }
         return out
     }
@@ -142,12 +157,11 @@ class GarminPersonalFetcher(
         }
     }
 
-    private fun call(spec: EndpointSpec, fromMs: Long, toMs: Long, cache: MutableMap<String, HttpResponse>): HttpResponse {
-        val zone = runCatching { java.time.ZoneId.of(zoneId) }.getOrDefault(ZoneOffset.UTC)
-        val fmt = DateTimeFormatter.ofPattern(spec.dateFormat).withZone(zone)
+    private fun call(spec: EndpointSpec, fromDate: java.time.LocalDate, toDate: java.time.LocalDate, cache: MutableMap<String, HttpResponse>): HttpResponse {
+        val fmt = DateTimeFormatter.ofPattern(spec.dateFormat)
         val url = config.baseUrl.trimEnd('/') + spec.path
-            .replace("{from}", fmt.format(Instant.ofEpochMilli(fromMs)))
-            .replace("{to}", fmt.format(Instant.ofEpochMilli(toMs)))
+            .replace("{from}", fmt.format(fromDate))
+            .replace("{to}", fmt.format(toDate))
         cache[url]?.let { return it }
         if (accessToken == null) refreshSession()
         val headers = mapOf(config.authHeader to config.authValue.replace("{accessToken}", accessToken!!))

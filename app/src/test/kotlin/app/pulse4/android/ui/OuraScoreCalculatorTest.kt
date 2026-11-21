@@ -137,4 +137,17 @@ class OuraScoreCalculatorTest {
         val pts = OuraScoreCalculator.scoreActivityEffort(row)
         assertTrue("Indoor cardio with 45 min HR 146 should score >= 15 pts, got $pts", pts >= 15.0)
     }
+
+    @Test
+    fun normalizeTodayWidgetOrderPreservesUserOrderAndAppendsMissingKeys() {
+        val legacy = listOf("steps", "sleep", "unknown_old", "steps")
+        val normalized = normalizeTodayWidgetOrder(legacy)
+        assertEquals("steps", normalized[0])
+        assertEquals("sleep", normalized[1])
+        assertEquals(DEFAULT_TODAY_WIDGET_ORDER.size, normalized.size)
+        assertTrue(CORE_TODAY_WIDGET_KEYS.all { it in normalized })
+        assertTrue("spo2" in normalized)
+        assertTrue("respiration" in normalized)
+        assertTrue("ecg" in normalized)
+    }
 }

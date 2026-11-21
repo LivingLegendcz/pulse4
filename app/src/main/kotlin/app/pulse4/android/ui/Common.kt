@@ -187,6 +187,7 @@ fun SinglestatCard(
     artworkRes: Int? = null,
     motifKind: MetricMotifKind? = null,
     heroTopColor: Color? = null,
+    lastSyncMs: Long? = null,
     modifier: Modifier = Modifier,
     onClick: () -> Unit = {},
 ) {
@@ -472,9 +473,11 @@ fun SinglestatCard(
                             )
                         }
                         Spacer(Modifier.height(4.dp))
+                        val syncMs = reading.fetchedAtUtcMs.takeIf { it > 0L } ?: lastSyncMs?.takeIf { it > 0L }
                         Row(
                             Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
                                 "Měřeno ${fmt.time(reading.measuredAtUtcMs)}",
@@ -491,9 +494,19 @@ fun SinglestatCard(
                                 )
                             }
                         }
+                        if (syncMs != null) {
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                "Sync ${fmt.time(syncMs)}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFF94A3B8),
+                                fontSize = 10.5.sp
+                            )
+                        }
                     }
                     Reading.NotShared -> Text("Není sdíleno", style = MaterialTheme.typography.bodyMedium, color = Color(0xFF64748B))
                     Reading.DeviceDoesNotMeasure -> {
+                        val syncMs = lastSyncMs?.takeIf { it > 0L }
                         Text(
                             "—",
                             style = MaterialTheme.typography.headlineSmall,
@@ -501,9 +514,9 @@ fun SinglestatCard(
                             color = Color(0xFF64748B)
                         )
                         Text(
-                            "Dnes bez měření · klikněte pro historii",
+                            if (syncMs != null) "Zatím bez měření · Sync ${fmt.time(syncMs)}" else "Dnes bez měření · klikněte pro historii",
                             style = MaterialTheme.typography.labelSmall,
-                            color = Color(0xFF64748B)
+                            color = Color(0xFF94A3B8)
                         )
                     }
                     Reading.NotSyncedYet -> {

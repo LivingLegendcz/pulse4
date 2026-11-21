@@ -381,6 +381,7 @@ class MultisportImportRegressionTest {
                 override fun pagedForType(type: String, limit: Int, offset: Int) = emptyList<ObservationRow>()
                 override fun countForType(type: String) = 0
                 override fun series(type: String, from: String, to: String): Flow<List<ObservationRow>> = emptyFlow()
+                override fun observeRevisionSince(from: String): Flow<String> = emptyFlow()
                 override fun markDeleted(ids: List<String>) {}
                 override fun idsIn(provider: String, from: Long, to: Long) = emptyList<String>()
                 override fun idsInForAccount(provider: String, accountId: String, from: Long, to: Long) = emptyList<String>()
@@ -459,6 +460,7 @@ class MultisportImportRegressionTest {
                 override fun deleteSent(r: String, k: String) { sentMap.remove(r to k) }
                 override fun removeAllFrom(a: String) {}
                 override fun lastReceived(a: String): Long? = null
+                override fun lastReceivedFlow(a: String): Flow<Long?> = emptyFlow()
                 override fun deleteAll() {}
                 override fun deleteAllReceipts() {}
                 override fun deleteAllSent() { sentMap.clear() }

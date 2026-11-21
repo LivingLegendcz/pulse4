@@ -201,4 +201,39 @@ class MetricRestoreTest {
         SyncEngine(ok, { _, _ -> }, states).runArea(SyncArea.STEPS_STRESS, now + 1)
         assertNull(states.get(SyncArea.STEPS_STRESS).lastError)
     }
+
+    @Test fun `maxRangeDays=1 endpoints always include today even when previous cursor was later in the day`() {
+        // Předchozí sync proběhl 2025-01-15 ve 22:00 CET; nyní je 2025-01-16 v 08:00 CET.
+        // S překryvem 1 den je `since` 2025-01-14 22:00 CET – denní endpointy (maxRangeDays=1) musí přesto stáhnout i 2025-01-16.
+        val zone = java.time.ZoneId.of("Europe/Prague")
+        val morningNow = java.time.ZonedDateTime.of(2025, 1, 16, 8, 0, 0, 0, zone).toInstant().toEpochMilli()
+        val prevEveningSince = java.time.ZonedDateTime.of(2025, 1, 14, 22, 0, 0, 0, zone).toInstant().toEpochMilli()
+        val h = Routing { url ->
+            when {
+                url.contains("dailyHeartRate?date=2025-01-16") -> ok(rhrBody)
+                url.contains("spo2acclimation/2025-01-16") -> ok(spo2Body)
+                else -> empty()
+            }
+        }
+        val f = GarminPersonalFetcher(cfg, h, { "KEY" }, "acc", "Europe/Prague", { morningNow }, initialDays = 2)
+        val batch = f.fetch(SyncArea.HEART_RATE, prevEveningSince)
+        assertTrue(h.gets.any { it.contains("dailyHeartRate?date=2025-01-16") }, "musí dotázat dnešek: ${h.gets}")
+        assertTrue(h.gets.any { it.contains("spo2acclimation/2025-01-16") }, "SpO2 musí dotázat dnešek: ${h.gets}")
+        assertEquals(54.0, batch.items.single { it.type == MetricType.RESTING_HEART_RATE }.value)
+    }
+
+    @Test fun `primary returning only yesterday falls back to dailysummaries to fill missing today`() {
+        val h = Routing { url ->
+            when {
+                url.contains("stats/steps") -> ok("""[{"calendarDate":"2025-01-15","totalSteps":7200}]""")
+                url.contains("stats/stress") -> ok("""[{"calendarDate":"2025-01-15","values":{"overallStressLevel":30}}]""")
+                url.contains("dailysummaries") -> ok(dailySummaries(rhr = 55, steps = 4321, stress = 22))
+                else -> empty()
+            }
+        }
+        val batch = fetcher(h, initialDays = 1).fetch(SyncArea.STEPS_STRESS, null)
+        val stepsByDate = batch.items.filter { it.type == MetricType.STEPS }.associate { it.localDate to it.value }
+        assertEquals(7200.0, stepsByDate["2025-01-15"])
+        assertEquals(4321.0, stepsByDate["2025-01-16"])
+    }
 }

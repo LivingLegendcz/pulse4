@@ -17,6 +17,9 @@ interface ObservationDao {
     @Query("SELECT * FROM observation WHERE deleted = 0 AND type = :type ORDER BY startUtcMs DESC LIMIT :limit OFFSET :offset") fun pagedForType(type: String, limit: Int, offset: Int): List<ObservationRow>
     @Query("SELECT COUNT(*) FROM observation WHERE deleted = 0 AND type = :type") fun countForType(type: String): Int
     @Query("SELECT * FROM observation WHERE deleted = 0 AND type = :type AND localDate BETWEEN :from AND :to ORDER BY startUtcMs") fun series(type: String, from: String, to: String): Flow<List<ObservationRow>>
+    /** Lehký reaktivní otisk změn v tabulce observation od data :from (mění se při každém vložení, aktualizaci hodnoty/času, potvrzení či smazání). */
+    @Query("SELECT COUNT(*) || '|' || COALESCE(SUM(value), 0) || '|' || COALESCE(MAX(startUtcMs), 0) || '|' || COALESCE(MAX(endUtcMs), 0) || '|' || COALESCE(SUM(CASE WHEN quality = 'OK' THEN 1 ELSE 0 END), 0) FROM observation WHERE deleted = 0 AND localDate >= :from")
+    fun observeRevisionSince(from: String): Flow<String>
     @Query("UPDATE observation SET deleted = 1 WHERE id IN (:ids)") fun markDeleted(ids: List<String>)
     @Query("SELECT id FROM observation WHERE provider = :provider AND deleted = 0 AND startUtcMs BETWEEN :from AND :to") fun idsIn(provider: String, from: Long, to: Long): List<String>
     @Query("SELECT id FROM observation WHERE provider = :provider AND accountId = :accountId AND (origin IS NULL OR origin NOT LIKE '%csv') AND id NOT LIKE 'family-%' AND deleted = 0 AND startUtcMs BETWEEN :from AND :to") fun idsInForAccount(provider: String, accountId: String, from: Long, to: Long): List<String>
@@ -137,6 +140,7 @@ interface InboxDao {
     @Query("DELETE FROM sent_projection WHERE recipient = :r AND objectKey = :k") fun deleteSent(r: String, k: String)
     @Query("DELETE FROM received_object WHERE author = :a") fun removeAllFrom(a: String)
     @Query("SELECT MAX(appliedAtMs) FROM receipt WHERE author = :a") fun lastReceived(a: String): Long?
+    @Query("SELECT MAX(appliedAtMs) FROM receipt WHERE author = :a") fun lastReceivedFlow(a: String): Flow<Long?>
     @Query("DELETE FROM received_object") fun deleteAll()
     @Query("DELETE FROM receipt") fun deleteAllReceipts()
     @Query("DELETE FROM sent_projection") fun deleteAllSent()

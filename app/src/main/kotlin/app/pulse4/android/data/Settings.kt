@@ -341,7 +341,10 @@ class Settings(private val dbProvider: () -> AppDatabase) {
 
     /** Uživatelem definované pořadí widgetů na obrazovce Dnes. */
     var todayWidgetOrder: List<String>
-        get() = get("todayWidgetOrder", "sleep,bb,hrv,rhr,stress,steps,weight,ecg")
+        get() = get(
+            "todayWidgetOrder",
+            "sleep,bb,hrv,rhr,stress,steps,spo2,respiration,weight,body_fat,muscle,body_water,bone,visceral_fat,pwv,vascular_age,bmr,metabolic_age,ecg"
+        )
             .split(',')
             .map { it.trim() }
             .filter { it.isNotBlank() }

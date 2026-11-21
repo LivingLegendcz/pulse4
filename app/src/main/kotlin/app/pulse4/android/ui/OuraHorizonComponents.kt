@@ -117,7 +117,7 @@ enum class OuraPillar(
         icon = PulseIcons.Hrv,
         artworkRes = R.drawable.img_nordic_wellness_hero,
         secondaryArtworkRes = R.drawable.img_motif_hrv_autonomic,
-        widgetKeys = listOf("hrv", "rhr", "bb", "stress")
+        widgetKeys = listOf("hrv", "rhr", "bb", "stress", "spo2", "respiration")
     ),
     SLEEP(
         title = "Spánek",
@@ -128,7 +128,7 @@ enum class OuraPillar(
         icon = PulseIcons.Sleep,
         artworkRes = R.drawable.img_motif_sleep_night,
         secondaryArtworkRes = R.drawable.img_nordic_wellness_hero,
-        widgetKeys = listOf("sleep", "hrv", "rhr")
+        widgetKeys = listOf("sleep", "hrv", "rhr", "spo2", "respiration")
     ),
     ACTIVITY(
         title = "Aktivita",
@@ -150,7 +150,7 @@ enum class OuraPillar(
         icon = PulseIcons.BodyComposition,
         artworkRes = R.drawable.img_motif_body_water,
         secondaryArtworkRes = R.drawable.img_motif_body_silhouette,
-        widgetKeys = listOf("weight", "ecg")
+        widgetKeys = listOf("weight", "body_fat", "muscle", "body_water", "bone", "visceral_fat", "pwv", "vascular_age", "bmr", "metabolic_age", "ecg")
     )
 }
 
@@ -1634,7 +1634,7 @@ fun OuraCirclesMeshSection(
                                 Color(0xFFF59E0B) to Color(0xFFFB7185)
                             )
                             val (c1, c2) = haloColors[idx % haloColors.size]
-                            val lastReceivedMs by io(contact.identity) { sl.db.inbox().lastReceived(contact.identity) }
+                            val lastReceivedMs by sl.db.inbox().lastReceivedFlow(contact.identity).collectAsState(initial = null)
                             val deviceTag = lastReceivedMs?.let { ts ->
                                 val mins = ((System.currentTimeMillis() - ts) / 60_000L).coerceAtLeast(0L)
                                 when {

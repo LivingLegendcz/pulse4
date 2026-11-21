@@ -1,3 +1,4 @@
+# Build outputs and local development state
 build/
 .gradle/
 .tools/
@@ -5,16 +6,34 @@ local.properties
 *.iml
 .idea/
 .kotlin/
-*.jks
-*.keystore
 *.apk
 *.aab
 *.png
 *.zip
 attachments/
-pulse4-vault
-.env
-metadata.json
-vault
+pulse4-vault/
+vault/
 .aistudio/
+metadata.json
 
+# Private configuration and signing material - never commit
+.env
+.env.*
+!.env.example
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.key
+*.asc
+*.gpg
+*.mobileprovision
+google-services.json
+service-account*.json
+*service-account*.json
+*credentials*.json
+*.sqlite
+*.sqlite3
+*.db
+*.log

@@ -1567,6 +1567,28 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
         return null
     }
 
+    /** True, pokud má uživatel zadaný alespoň jeden zdroj pro Garmin (osobní API klíč nebo přihlášení Garmin Connect). */
+    fun hasGarminCredentials(): Boolean {
+        val key = sl.secrets.getString(SecretStore.GARMIN_API_KEY)?.trim()?.removePrefix("ApiKey ")?.trim()
+        val hasExt = sl.secrets.getString(SecretStore.GARMIN_EXT_TOKENS) != null
+        return !key.isNullOrBlank() || hasExt
+    }
+
+    /**
+     * Smaže falešné chyby `Unauthorized` z `area_state` pro Garmin oblasti, pokud uživatel Garmin vůbec
+     * nemá připojený (např. po dřívější verzi, která Garmin zkoušela stahovat i bez zadaných údajů).
+     */
+    fun clearUnconfiguredGarminErrors() {
+        if (hasGarminCredentials()) return
+        for (area in SyncArea.entries) {
+            if (area == SyncArea.WEIGHT) continue
+            val row = sl.db.areaStates().get(area.name) ?: continue
+            if (row.lastSuccessMs == null && row.lastError == "Unauthorized") {
+                sl.db.areaStates().put(row.copy(lastError = null, lastAttemptMs = null, retryNotBeforeMs = null))
+            }
+        }
+    }
+
     /**
      * Spustí import všech oblastí; druhé souběžné volání se nefrontuje, ale hned vrátí `null`
      * („synchronizace již probíhá“). Vrací výsledek po oblastech.
@@ -1576,22 +1598,28 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
             PLog.i("ImportService") { "runAll skipped: another import is already running" }
             null
         }) {
+            val garminConfigured = hasGarminCredentials()
             try {
-                runAllLocked(nowMs, scope)
+                runAllLocked(nowMs, scope, garminConfigured)
             } finally {
                 // Perzistentní čas posledního importu: automatický plán po restartu procesu nezačíná od nuly.
                 val finishedAt = System.currentTimeMillis()
                 runCatching { sl.settings.lastImportAtMs = finishedAt }
-                if (scope.garmin) runCatching { sl.settings.markSynced(SyncProvider.GARMIN, finishedAt) }
+                if (scope.garmin && garminConfigured) runCatching { sl.settings.markSynced(SyncProvider.GARMIN, finishedAt) }
                 if (scope.withings) runCatching { sl.settings.markSynced(SyncProvider.WITHINGS, finishedAt) }
             }
         }
 
-    private fun runAllLocked(nowMs: Long, scope: ImportScope): Map<SyncArea, AreaResult>? = synchronized(syncLock) {
-        if (!scope.garmin) {
-            // Withings-only run (automatic per-provider schedule): skip the whole Garmin part.
-            runCatching { sl.withings.runImport(nowMs) }
-            runCatching { sl.withings.syncAndForwardChildWeights(nowMs) }
+    private fun runAllLocked(nowMs: Long, scope: ImportScope, garminConfigured: Boolean): Map<SyncArea, AreaResult>? = synchronized(syncLock) {
+        if (!scope.garmin || !garminConfigured) {
+            // Garmin není připojen nebo běží Withings-only rozvrh: Garmin vůbec nespouštíme ani nezapisujeme chyby.
+            if (!garminConfigured) {
+                runCatching { clearUnconfiguredGarminErrors() }
+            }
+            if (scope.withings) {
+                runCatching { sl.withings.runImport(nowMs) }
+                runCatching { sl.withings.syncAndForwardChildWeights(nowMs) }
+            }
             return@synchronized emptyMap()
         }
         val cfg = config()

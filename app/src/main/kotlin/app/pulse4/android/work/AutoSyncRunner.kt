@@ -26,6 +26,10 @@ class AutoSyncRunner(private val env: Env) {
         fun markKeepalive(atMs: Long)
         /** False when Withings was never connected (nothing to keep alive). */
         fun keepaliveEnabled(): Boolean
+        /** False when Garmin was never configured (neither API key nor Garmin Connect session). */
+        fun garminEnabled(): Boolean = true
+        /** False when Withings was never connected (neither web nor OAuth session). */
+        fun withingsEnabled(): Boolean = true
         fun withingsKeepalive()
         fun garminKeepalive()
         /** Runs the import for [scope]; returns false when it was skipped because another import is running. */
@@ -94,13 +98,25 @@ class AutoSyncRunner(private val env: Env) {
         return TickResult(ran, skippedBusy, next)
     }
 
-    /** Manual "sync everything now": ignores intervals, but still refreshes the schedule timestamps. */
+    /** Manual "sync everything now": ignores intervals, but still refreshes the schedule timestamps and skips unconfigured providers. */
     fun runManual() {
         val now = env.nowMs()
-        runCatching { env.garminKeepalive() }
-        runCatching { env.runImport(now, ImportScope.ALL) }
-        runCatching { env.markKeepalive(now) }
-        runCatching { env.withingsKeepalive() }
+        val garmin = env.garminEnabled()
+        val withings = env.withingsEnabled()
+        if (garmin) runCatching { env.garminKeepalive() }
+        val scope = when {
+            garmin && withings -> ImportScope.ALL
+            garmin -> ImportScope.GARMIN
+            withings -> ImportScope.WITHINGS
+            else -> null
+        }
+        if (scope != null) {
+            runCatching { env.runImport(now, scope) }
+        }
+        if (env.keepaliveEnabled()) {
+            runCatching { env.markKeepalive(now) }
+            runCatching { env.withingsKeepalive() }
+        }
         if (env.healthConnectEnabled()) runCatching { env.healthConnectSync(now) }
     }
 
@@ -114,6 +130,8 @@ class AutoSyncRunner(private val env: Env) {
         processStartMs = processStartMs,
         toleranceMs = toleranceMs,
         keepaliveEnabled = env.keepaliveEnabled(),
+        garminEnabled = env.garminEnabled(),
+        withingsEnabled = env.withingsEnabled(),
     )
 
     companion object {
@@ -126,6 +144,8 @@ class AutoSyncRunner(private val env: Env) {
             override fun keepaliveLastMs() = sl.settings.withingsKeepaliveAtMs
             override fun markKeepalive(atMs: Long) { sl.settings.withingsKeepaliveAtMs = atMs }
             override fun keepaliveEnabled() = sl.withings.hasStoredWebSession()
+            override fun garminEnabled() = sl.importService.hasGarminCredentials()
+            override fun withingsEnabled() = sl.withings.isConnected()
             override fun withingsKeepalive() { sl.withings.renewSession() }
             override fun garminKeepalive() { sl.garminExt.ensureSession() }
             override fun runImport(nowMs: Long, scope: ImportScope) = sl.importService.runAll(nowMs, scope) != null

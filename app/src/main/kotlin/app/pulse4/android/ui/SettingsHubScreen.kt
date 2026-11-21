@@ -1765,7 +1765,11 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                             TextButton(onClick = {
                                 garminLoggedInImmediate = false
                                 editingGarminLogin = false
-                                scope.launch(Dispatchers.IO) { sl.garminExt.logout(); tick++ }
+                                scope.launch(Dispatchers.IO) {
+                                    sl.garminExt.logout()
+                                    sl.importService.clearUnconfiguredGarminErrors()
+                                    tick++
+                                }
                                 notice = "Odhlášeno z Garmin Connect."
                             }) { Text("Odhlásit", color = MaterialTheme.colorScheme.error) }
                         }
@@ -1969,6 +1973,7 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                                     scope.launch(Dispatchers.IO) {
                                         sl.secrets.delete(SecretStore.GARMIN_API_KEY)
                                         sl.secrets.delete(SecretStore.GARMIN_API_KEY_EXPIRES)
+                                        sl.importService.clearUnconfiguredGarminErrors()
                                         notice = "Osobní API klíč byl odebrán."
                                         tick++
                                     }
@@ -2832,11 +2837,13 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                 SyncArea.ACTIVITIES to "Sportovní aktivity (ACTIVITIES)"
             )
         }
+        val garminConnected = hasGarminKey || garminLoggedIn == true
         val garminStatesList = garminAreas.map { area -> area to states.firstOrNull { it.area == area.name } }
         val garminLastSyncMs = garminStatesList.mapNotNull { it.second?.lastSuccessMs }.maxOrNull()
-        val garminHasError = garminStatesList.any { !it.second?.lastError.isNullOrBlank() }
-        val garminAllSynced = garminStatesList.all { it.second?.lastSuccessMs != null && it.second?.lastError.isNullOrBlank() }
+        val garminHasError = garminConnected && garminStatesList.any { !it.second?.lastError.isNullOrBlank() }
+        val garminAllSynced = garminConnected && garminStatesList.all { it.second?.lastSuccessMs != null && it.second?.lastError.isNullOrBlank() }
         val garminBarColor = when {
+            !garminConnected -> Color(0xFF64748B)
             garminHasError -> Color(0xFFEF4444)
             garminAllSynced -> Color(0xFF10B981)
             garminLastSyncMs != null -> Color(0xFFF59E0B)
@@ -2873,6 +2880,7 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                             )
                             Text(
                                 when {
+                                    !garminConnected -> "Nepřipojeno — zadejte přihlášení nebo API klíč výše"
                                     garminHasError -> "Chyba u některé oblasti – klikněte pro detail"
                                     garminAllSynced && garminLastSyncMs != null -> "Všech ${garminAreas.size} oblastí OK · ${fmt.time(garminLastSyncMs)}"
                                     garminLastSyncMs != null -> "Částečně synchronizováno · ${fmt.time(garminLastSyncMs)}"
@@ -2894,7 +2902,7 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                 if (expandGarminSync) {
                     Spacer(Modifier.height(10.dp))
                     garminStatesList.forEach { (area, st) ->
-                        val hasErr = !st?.lastError.isNullOrBlank()
+                        val hasErr = garminConnected && !st?.lastError.isNullOrBlank()
                         val isOk = st?.lastSuccessMs != null && !hasErr
                         val rowColor = when {
                             hasErr -> Color(0xFFF87171)
@@ -2915,6 +2923,7 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                                 )
                                 Text(
                                     when {
+                                        !garminConnected -> "Nepřipojeno"
                                         st?.lastSuccessMs != null -> fmt.time(st.lastSuccessMs)
                                         hasErr -> "Selhalo"
                                         else -> "Nesynchronizováno"
@@ -2935,12 +2944,17 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                     }
                     Spacer(Modifier.height(8.dp))
                     OutlinedButton(
-                        enabled = !syncing,
+                        enabled = garminConnected && !syncing,
                         onClick = {
                             scope.launch {
                                 syncing = true
                                 withContext(Dispatchers.IO) {
-                                    runCatching { sl.importService.runAll(System.currentTimeMillis()) }
+                                    runCatching {
+                                        sl.importService.runAll(
+                                            System.currentTimeMillis(),
+                                            app.pulse4.android.di.ImportScope.GARMIN,
+                                        )
+                                    }
                                 }
                                 syncing = false
                                 tick++
@@ -2948,7 +2962,13 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                         },
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text(if (syncing) "Synchronizuji Garmin…" else "Synchronizovat Garmin nyní")
+                        Text(
+                            when {
+                                !garminConnected -> "Nejprve připojte účet Garmin výše"
+                                syncing -> "Synchronizuji Garmin…"
+                                else -> "Synchronizovat Garmin nyní"
+                            }
+                        )
                     }
                 }
             }

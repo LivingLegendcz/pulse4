@@ -39,6 +39,10 @@ object AutoSyncPlanner {
         val toleranceMs: Long = 0L,
         /** False when Withings was never connected: nothing to keep alive. */
         val keepaliveEnabled: Boolean,
+        /** False when Garmin has neither API key nor Garmin Connect session: never schedule Garmin import. */
+        val garminEnabled: Boolean = true,
+        /** False when Withings has neither Web session nor OAuth session: never schedule Withings import. */
+        val withingsEnabled: Boolean = true,
     )
 
     data class Plan(
@@ -54,8 +58,12 @@ object AutoSyncPlanner {
             if (decisionRunNow) due += task else nextIn = minOf(nextIn ?: Long.MAX_VALUE, waitMs)
         }
 
-        importDecision(i, i.garminIntervalMin, i.garminLastMs)?.let { consider(SyncTask.GARMIN_IMPORT, it.runNow, it.waitMs) }
-        importDecision(i, i.withingsIntervalMin, i.withingsLastMs)?.let { consider(SyncTask.WITHINGS_IMPORT, it.runNow, it.waitMs) }
+        if (i.garminEnabled) {
+            importDecision(i, i.garminIntervalMin, i.garminLastMs)?.let { consider(SyncTask.GARMIN_IMPORT, it.runNow, it.waitMs) }
+        }
+        if (i.withingsEnabled) {
+            importDecision(i, i.withingsIntervalMin, i.withingsLastMs)?.let { consider(SyncTask.WITHINGS_IMPORT, it.runNow, it.waitMs) }
+        }
 
         if (i.keepaliveEnabled) {
             val wait = keepaliveWaitMs(i.nowMs, i.keepaliveLastMs, i.toleranceMs)

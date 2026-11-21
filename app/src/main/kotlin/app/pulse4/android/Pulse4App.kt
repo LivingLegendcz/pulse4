@@ -78,7 +78,11 @@ class Pulse4App : Application() {
             kotlinx.coroutines.delay(KEEPALIVE_DELAY_MS)
             // Gated MINOR (no verified guardian yet): no provider sessions; transport/pump above keeps running.
             if (runCatching { services.shareService.isAppGatedForGuardian() }.getOrDefault(false)) return@launch
-            runCatching { services.garminExt.ensureSession() }
+            if (services.importService.hasGarminCredentials()) {
+                runCatching { services.garminExt.ensureSession() }
+            } else {
+                runCatching { services.importService.clearUnconfiguredGarminErrors() }
+            }
             runCatching { services.withings.renewSession() }
         }
 

@@ -16,6 +16,8 @@ class AutoSyncRunnerTest {
         val last = mutableMapOf<SyncProvider, Long?>(SyncProvider.GARMIN to null, SyncProvider.WITHINGS to null)
         var keepaliveLast: Long? = null
         var hasSession = true
+        var hasGarmin = true
+        var hasWithings = true
         var hcEnabled = false
         var importResult: () -> Boolean = { true }
         val calls = mutableListOf<String>()
@@ -29,6 +31,8 @@ class AutoSyncRunnerTest {
         override fun keepaliveLastMs() = keepaliveLast
         override fun markKeepalive(atMs: Long) { keepaliveLast = atMs }
         override fun keepaliveEnabled() = hasSession
+        override fun garminEnabled() = hasGarmin
+        override fun withingsEnabled() = hasWithings
         override fun withingsKeepalive() { calls += "withingsKeepalive"; if (withingsKeepaliveThrows) error("boom") }
         override fun garminKeepalive() { calls += "garminKeepalive" }
         override fun runImport(nowMs: Long, scope: ImportScope): Boolean {
@@ -184,5 +188,38 @@ class AutoSyncRunnerTest {
         }
         AutoSyncRunner(env).runManual()
         assertEquals(listOf("garminKeepalive", "import:ALL", "withingsKeepalive"), env.calls)
+    }
+
+    @Test
+    fun `unconfigured garmin is never scheduled or called on fresh install`() {
+        val env = FakeEnv().apply {
+            hasGarmin = false
+            hasWithings = false
+            hasSession = false
+        }
+        val tick = AutoSyncRunner(env).tick(processStartMs = null, toleranceMs = 0L)
+        assertTrue(env.calls.isEmpty(), "unconfigured providers must never run: ${env.calls}")
+        assertTrue(tick.ran.isEmpty())
+        assertNull(tick.nextWakeMs)
+
+        AutoSyncRunner(env).runManual()
+        assertTrue(env.calls.isEmpty(), "manual sync must also skip unconfigured Garmin/Withings: ${env.calls}")
+    }
+
+    @Test
+    fun `withings-only user never triggers garmin import or keepalive`() {
+        val env = FakeEnv().apply {
+            hasGarmin = false
+            hasWithings = true
+            hasSession = true
+        }
+        val tick = AutoSyncRunner(env).tick(processStartMs = null, toleranceMs = 0L)
+        assertEquals(listOf("withingsKeepalive", "import:WITHINGS"), env.calls)
+        assertEquals(setOf(SyncTask.WITHINGS_KEEPALIVE, SyncTask.WITHINGS_IMPORT), tick.ran)
+        assertNull(env.last[SyncProvider.GARMIN])
+
+        env.calls.clear()
+        AutoSyncRunner(env).runManual()
+        assertEquals(listOf("import:WITHINGS", "withingsKeepalive"), env.calls)
     }
 }

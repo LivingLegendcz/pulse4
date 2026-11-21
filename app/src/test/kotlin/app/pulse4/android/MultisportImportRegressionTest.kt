@@ -440,6 +440,11 @@ class MultisportImportRegressionTest {
                 override fun all() = outboxMap.values.toList()
                 override fun recent(): Flow<List<OutboxRow>> = emptyFlow()
                 override fun purge(before: Long) {}
+                override fun deleteAcked(): Int {
+                    val ids = outboxMap.values.filter { it.state == "ACKED" }.map { it.eventId }
+                    ids.forEach { outboxMap.remove(it) }
+                    return ids.size
+                }
                 override fun deleteAll() { outboxMap.clear() }
             }
             private val inboxDao = object : InboxDao {

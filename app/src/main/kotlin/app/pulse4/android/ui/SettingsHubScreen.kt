@@ -3276,6 +3276,8 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
     var showQrImport by remember { mutableStateOf(false) }
     val nodeTestResults = remember { mutableStateMapOf<String, app.pulse4.android.reticulum.NodeTestResult>() }
     var testingNodeKey by remember { mutableStateOf<String?>(null) }
+    var syncingCircle by remember { mutableStateOf(false) }
+    var resendingAllCircle by remember { mutableStateOf(false) }
 
     val netData by io(tick) {
         listOf(
@@ -3461,13 +3463,49 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
 
                     Spacer(Modifier.height(10.dp))
                     Button(
+                        enabled = !syncingCircle && !resendingAllCircle,
                         onClick = {
-                            Scheduler.shareNow(ctx, manual = true)
-                            feedback = "Spuštěno okamžité odeslání a stažení sdílených dat."
+                            syncingCircle = true
+                            feedback = "Synchronizuji s kruhem (odesílám frontu a stahuji schránku)…"
+                            scope.launch {
+                                val res = withContext(Dispatchers.IO) {
+                                    runCatching { sl.syncCircleNow(forceResendAll = false) }
+                                }
+                                syncingCircle = false
+                                feedback = res.fold(
+                                    onSuccess = { formatCircleSyncFeedback(it, mode, forceResendAll = false) },
+                                    onFailure = { "Synchronizace s kruhem selhala: ${it.message ?: it.javaClass.simpleName}" },
+                                )
+                                tick++
+                            }
                         },
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text("Synchronizovat s kruhem hned teď")
+                        Text(if (syncingCircle) "Synchronizuji s kruhem…" else "Synchronizovat s kruhem hned teď")
+                    }
+                    if (advancedMode) {
+                        Spacer(Modifier.height(6.dp))
+                        OutlinedButton(
+                            enabled = !syncingCircle && !resendingAllCircle,
+                            onClick = {
+                                resendingAllCircle = true
+                                feedback = "Připravuji a znovu odesílám sdílená data do kruhu…"
+                                scope.launch {
+                                    val res = withContext(Dispatchers.IO) {
+                                        runCatching { sl.syncCircleNow(forceResendAll = true) }
+                                    }
+                                    resendingAllCircle = false
+                                    feedback = res.fold(
+                                        onSuccess = { formatCircleSyncFeedback(it, mode, forceResendAll = true) },
+                                        onFailure = { "Znovuodeslání do kruhu selhalo: ${it.message ?: it.javaClass.simpleName}" },
+                                    )
+                                    tick++
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(if (resendingAllCircle) "Znovu odesílám do kruhu…" else "Znovu odeslat vše do kruhu")
+                        }
                     }
                 }
             }
@@ -3717,7 +3755,30 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
                     )
                     Text("V telefonu (čeká na spojení): $localQueueCount", style = MaterialTheme.typography.bodySmall, color = Color.White)
                     Text("Na nodu (čeká na vyzvednutí): $storedOnNodeCount", style = MaterialTheme.typography.bodySmall, color = Color(0xFF38BDF8))
-                    Text("Vyzvednuto a potvrzeno: $deliveredCount", style = MaterialTheme.typography.bodySmall, color = Color(0xFF10B981))
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "Vyzvednuto a potvrzeno: $deliveredCount",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFF10B981),
+                            modifier = Modifier.weight(1f)
+                        )
+                        if (deliveredCount > 0) {
+                            TextButton(
+                                onClick = {
+                                    scope.launch {
+                                        val removed = withContext(Dispatchers.IO) { sl.shareService.clearAckedOutbox() }
+                                        feedback = if (removed > 0) "Vyčištěno $removed vyzvednutých zpráv." else "Žádné vyzvednuté zprávy k vyčištění."
+                                    }
+                                }
+                            ) {
+                                Text("Vyčistit vyzvednuté", fontSize = 11.sp)
+                            }
+                        }
+                    }
 
                     Spacer(Modifier.height(4.dp))
                     Text(
@@ -4117,7 +4178,14 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
                                 modifier = Modifier.weight(1f)
                             )
                             if (ackedRows.isNotEmpty()) {
-                                TextButton(onClick = { scope.launch(Dispatchers.IO) { sl.db.outbox().purge(System.currentTimeMillis()) } }) {
+                                TextButton(
+                                    onClick = {
+                                        scope.launch {
+                                            val removed = withContext(Dispatchers.IO) { sl.shareService.clearAckedOutbox() }
+                                            feedback = if (removed > 0) "Vyčištěno $removed vyzvednutých zpráv." else "Žádné vyzvednuté zprávy k vyčištění."
+                                        }
+                                    }
+                                ) {
                                     Text("Vyčistit vyzvednuté", fontSize = 11.sp)
                                 }
                             }
@@ -4206,6 +4274,38 @@ private fun ReticulumSettingsSection(sl: ServiceLocator) {
             },
             onDismiss = { showQrImport = false }
         )
+    }
+}
+
+internal fun formatCircleSyncFeedback(
+    res: app.pulse4.android.di.CircleSyncSummary,
+    mode: NetworkMode,
+    forceResendAll: Boolean,
+): String {
+    val prefix = if (forceResendAll) "Znovuodeslání do kruhu" else "Synchronizace s kruhem"
+    val parts = mutableListOf<String>()
+    if (res.enqueued > 0) parts += "zařazeno ${res.enqueued}"
+    if (res.sent > 0) parts += "odesláno ${res.sent}"
+    if (res.received > 0) parts += "přijato ${res.received}"
+    if (res.pendingLocal > 0) parts += "čeká v telefonu ${res.pendingLocal}"
+    if (res.storedOnNode > 0) parts += "na nodu ${res.storedOnNode}"
+
+    val offlineHint = when {
+        mode == NetworkMode.LOCAL_ONLY && res.localPeersCount == 0 && res.pendingLocal > 0 ->
+            " (na místní Wi-Fi nebyl nalezen žádný spárovaný telefon)"
+        mode != NetworkMode.LOCAL_ONLY && !res.gatewayOnline && res.localPeersCount == 0 ->
+            " (uzel je OFFLINE a na místní Wi-Fi nikdo není — zkontrolujte připojení)"
+        else -> ""
+    }
+
+    if (parts.isNotEmpty()) {
+        return "$prefix dokončena: ${parts.joinToString(" · ")}.$offlineHint"
+    }
+    return when {
+        offlineHint.isNotEmpty() -> "$prefix: nic nebylo přeneseno.$offlineHint"
+        !res.hasActiveGrants -> "$prefix dokončena: nemáte zapnuté žádné aktivní sdílení pro kruh nebo kontakty."
+        forceResendAll -> "$prefix dokončena: žádná sdílená data k odeslání v aktivním okně."
+        else -> "$prefix dokončena: vše je aktuální (žádné nové změny k odeslání ani k vyzvednutí)."
     }
 }
 

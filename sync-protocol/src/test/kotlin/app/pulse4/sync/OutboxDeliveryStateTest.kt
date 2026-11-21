@@ -133,4 +133,31 @@ class OutboxDeliveryStateTest {
         assertTrue(denied.isEmpty())
         assertTrue(ob.expireStale(200L).isEmpty())
     }
+
+    @Test
+    fun `resetBackoffForManualSync makes deferred and backed-off items immediately due`() {
+        val store = InMemoryOutboxStore()
+        val ob = OutboxManager(store)
+        val mQueued = josef.build("bob", Kinds.PROJECTION_UPSERT, "daily", "2026-11-20", 1L, "{}", 1_000L)
+        val mHanded = josef.build("bob", Kinds.PROJECTION_UPSERT, "daily", "2026-11-21", 1L, "{}", 1_010L)
+        val mStored = josef.build("bob", Kinds.PROJECTION_UPSERT, "daily", "2026-11-19", 1L, "{}", 1_020L)
+        ob.enqueue(item(mQueued, at = 1_000L))
+        ob.enqueue(item(mHanded, at = 1_010L))
+        ob.enqueue(item(mStored, at = 1_020L))
+
+        ob.onTransportResult(mQueued.envelope.eventId, TransportResult.Failed("timeout"), nowMs = 2_000L)
+        ob.deferRecipient("bob", nowMs = 2_000L, waitMs = 5 * 60_000L)
+        ob.onTransportResult(mHanded.envelope.eventId, TransportResult.Handed, nowMs = 2_000L)
+        ob.onTransportResult(mStored.envelope.eventId, TransportResult.StoredInPropagation, nowMs = 2_000L)
+
+        // Before manual reset, nothing is due at t = 3_000L
+        assertTrue(ob.due(3_000L).isEmpty())
+
+        val reset = ob.resetBackoffForManualSync(nowMs = 3_000L)
+        assertEquals(2, reset)
+        val dueIds = ob.due(3_000L).map { it.eventId }
+        assertEquals(listOf(mQueued.envelope.eventId, mHanded.envelope.eventId), dueIds)
+        // STORED_IN_PROPAGATION stays untouched until PN retry or local Wi-Fi fast-track
+        assertEquals(DeliveryState.STORED_IN_PROPAGATION, store.find(mStored.envelope.eventId)!!.state)
+    }
 }

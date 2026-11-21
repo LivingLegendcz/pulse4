@@ -179,6 +179,11 @@ class PackageBEProductionTest {
             override fun all() = outboxMap.values.toList()
             override fun recent(): Flow<List<OutboxRow>> = emptyFlow()
             override fun purge(before: Long) {}
+            override fun deleteAcked(): Int {
+                val ids = outboxMap.values.filter { it.state == "ACKED" }.map { it.eventId }
+                ids.forEach { outboxMap.remove(it) }
+                return ids.size
+            }
             override fun deleteAll() { outboxMap.clear() }
         }
 
@@ -884,5 +889,132 @@ class PackageBEProductionTest {
         )
         assertEquals(HandlerResult.Applied, respHandler.handle(mGoodResp.envelope, mGoodResp.payload, dummyReceiverStore, 4_500L))
         assertEquals(FamilyLinkStatus.VERIFIED.name, data.familyLinks().get("link-2")!!.status)
+    }
+
+    @Test
+    fun `clearAckedOutbox deletes ACKED rows while preserving pending rows and revoke tracking`() {
+        val data = FakeDataAccess()
+        val settings = FakeSettings(zoneId = "UTC")
+        val outbox = buildOutbox(data)
+        val svc = buildShareService(data, settings, outbox, selfId = "alice")
+
+        val today = LocalDate.now(ZoneId.of("UTC"))
+        val grant = ShareGrant(
+            id = "g-clear",
+            ownerId = "alice",
+            recipients = setOf("bob"),
+            fields = setOf(Field.SLEEP_DURATION),
+            scope = TimeScope.continuousFrom(today.minusDays(10)),
+            createdAtMs = 1_000L,
+        )
+        svc.saveGrantWithPolicy(grant).getOrThrow()
+
+        // Legacy ACKED row (without prior delivered_keys entry) + QUEUED row + STORED row
+        data.outbox().insert(
+            OutboxRow(
+                eventId = "ev-acked", recipient = "bob", kind = Kinds.PROJECTION_UPSERT,
+                objectType = "daily", objectId = "2026-11-20", objectVersion = 1L,
+                grantId = "g-clear", wire = ByteArray(4), createdAtMs = 2_000L,
+                state = DeliveryState.ACKED.name, attempts = 1, nextAttemptAtMs = 0L, lastError = null,
+            )
+        )
+        data.outbox().insert(
+            OutboxRow(
+                eventId = "ev-queued", recipient = "bob", kind = Kinds.PROJECTION_UPSERT,
+                objectType = "daily", objectId = "2026-11-21", objectVersion = 1L,
+                grantId = "g-clear", wire = ByteArray(4), createdAtMs = 2_100L,
+                state = DeliveryState.QUEUED.name, attempts = 0, nextAttemptAtMs = 0L, lastError = null,
+            )
+        )
+        data.outbox().insert(
+            OutboxRow(
+                eventId = "ev-stored", recipient = "bob", kind = Kinds.PROJECTION_UPSERT,
+                objectType = "daily", objectId = "2026-11-19", objectVersion = 1L,
+                grantId = "g-clear", wire = ByteArray(4), createdAtMs = 1_900L,
+                state = DeliveryState.STORED_IN_PROPAGATION.name, attempts = 1, nextAttemptAtMs = 0L, lastError = null,
+            )
+        )
+
+        val removed = svc.clearAckedOutbox()
+        assertEquals(1, removed)
+        assertNull(data.outbox().find("ev-acked"))
+        assertEquals(DeliveryState.QUEUED.name, data.outbox().find("ev-queued")?.state)
+        assertEquals(DeliveryState.STORED_IN_PROPAGATION.name, data.outbox().find("ev-stored")?.state)
+
+        // Revoking the grant after clearing ACKED must still issue PROJECTION_REMOVE for daily/2026-11-20
+        val plan = svc.revoke("g-clear", nowMs = 3_000L)
+        assertNotNull(plan)
+        val removals = data.outbox().all().filter { it.kind == Kinds.PROJECTION_REMOVE && it.recipient == "bob" }
+        assertTrue(removals.any { it.objectId == "2026-11-20" }, "Revoke must still remove previously ACKED key: $removals")
+    }
+
+    @Test
+    fun `markActiveGrantsForResend invalidates contentHash while keeping version so planAndEnqueue bumps version`() {
+        val data = FakeDataAccess()
+        val settings = FakeSettings(zoneId = "UTC")
+        val outbox = buildOutbox(data)
+        val svc = buildShareService(data, settings, outbox, selfId = "alice")
+
+        val today = LocalDate.now(ZoneId.of("UTC"))
+        val todayStr = today.toString()
+        val grant = ShareGrant(
+            id = "g-resend",
+            ownerId = "alice",
+            recipients = setOf("bob"),
+            fields = setOf(Field.SLEEP_DURATION),
+            scope = TimeScope.continuousFrom(today.minusDays(7)),
+            createdAtMs = 1_000L,
+        )
+        svc.saveGrantWithPolicy(grant).getOrThrow()
+        data.observations().upsert(listOf(obsRow("obs-1", MetricType.SLEEP_DURATION, 26_000.0, today, provider = Provider.WITHINGS_API)))
+
+        // First plan enqueues version 1
+        assertEquals(1, svc.planAndEnqueue(nowMs = 2_000L))
+        assertEquals(1L, data.inbox().sent("bob", "daily/$todayStr")?.version)
+        // Second plan without changes enqueues 0
+        assertEquals(0, svc.planAndEnqueue(nowMs = 2_500L))
+
+        // Force resend invalidates hash while preserving version=1 -> next planAndEnqueue enqueues version 2
+        val reset = svc.markActiveGrantsForResend(nowMs = 3_000L)
+        assertEquals(1, reset)
+        assertEquals(1L, data.inbox().sent("bob", "daily/$todayStr")?.version)
+        assertEquals(1, svc.planAndEnqueue(nowMs = 3_100L))
+        assertEquals(2L, data.inbox().sent("bob", "daily/$todayStr")?.version)
+    }
+
+    @Test
+    fun `formatCircleSyncFeedback reports offline node, missing grants, and concrete delivery counts`() {
+        val offlineMsg = app.pulse4.android.ui.formatCircleSyncFeedback(
+            CircleSyncSummary(
+                resetLedger = 0, enqueued = 0, retried = 0, sent = 0, received = 0, rejected = 0,
+                pendingLocal = 0, storedOnNode = 0, gatewayOnline = false, localPeersCount = 0,
+                hasActiveGrants = true, propagationConfigured = true,
+            ),
+            mode = app.pulse4.android.data.NetworkMode.AUTO,
+            forceResendAll = false,
+        )
+        assertTrue(offlineMsg.contains("OFFLINE"), offlineMsg)
+
+        val sentMsg = app.pulse4.android.ui.formatCircleSyncFeedback(
+            CircleSyncSummary(
+                resetLedger = 2, enqueued = 2, retried = 1, sent = 3, received = 1, rejected = 0,
+                pendingLocal = 0, storedOnNode = 2, gatewayOnline = true, localPeersCount = 0,
+                hasActiveGrants = true, propagationConfigured = true,
+            ),
+            mode = app.pulse4.android.data.NetworkMode.AUTO,
+            forceResendAll = true,
+        )
+        assertTrue(sentMsg.contains("zařazeno 2") && sentMsg.contains("odesláno 3") && sentMsg.contains("přijato 1") && sentMsg.contains("na nodu 2"), sentMsg)
+
+        val noGrantMsg = app.pulse4.android.ui.formatCircleSyncFeedback(
+            CircleSyncSummary(
+                resetLedger = 0, enqueued = 0, retried = 0, sent = 0, received = 0, rejected = 0,
+                pendingLocal = 0, storedOnNode = 0, gatewayOnline = true, localPeersCount = 0,
+                hasActiveGrants = false, propagationConfigured = true,
+            ),
+            mode = app.pulse4.android.data.NetworkMode.AUTO,
+            forceResendAll = false,
+        )
+        assertTrue(noGrantMsg.contains("nemáte zapnuté žádné aktivní sdílení"), noGrantMsg)
     }
 }

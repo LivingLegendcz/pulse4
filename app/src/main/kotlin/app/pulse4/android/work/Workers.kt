@@ -64,12 +64,18 @@ class ShareWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx,
         val sl = applicationContext.services
         // R4-1: poškozený nebo zamčený klíč nesmí shodit worker; zkusí se znovu podle backoffu.
         if (!sl.awaitStartupReady()) return@withContext Result.retry()
-        if (sl.settings.networkMode == NetworkMode.MANUAL && !inputData.getBoolean(KEY_MANUAL, false)) return@withContext Result.success()
+        val isManual = inputData.getBoolean(KEY_MANUAL, false)
+        if (sl.settings.networkMode == NetworkMode.MANUAL && !isManual) return@withContext Result.success()
         val now = System.currentTimeMillis()
         runCatching {
             sl.shareService.planAndEnqueue(now)
+            if (isManual) {
+                sl.outbox.resetBackoffForManualSync(now)
+            }
             sl.transport.pump(now, windowMs = 45_000)
             sl.shareService.flushPlanNotifications(System.currentTimeMillis())
+        }.onFailure { e ->
+            app.pulse4.domain.PLog.w("ShareWorker", e) { "ShareWorker pump failed" }
         }
         // Chyba transportu není chyba úlohy: nepotvrzené položky zůstávají v outboxu a stav je vidět v UI.
         Result.success()

@@ -442,7 +442,65 @@ class ServiceLocator internal constructor(
     val withings by lazy { WithingsService(context, this) }
     val healthConnect by lazy { HealthConnectSource(context, this) }
     val backupService by lazy { BackupService(this) }
+
+    /**
+     * Okamžitá ruční synchronizace s kruhem: naplánuje změny (volitelně vynutí znovuodeslání všech aktivně
+     * sdílených dat), zruší backoff čekajících položek ve frontě, provede pump (odeslání + stažení schránky)
+     * a vrátí přesný souhrn pro zobrazení v UI.
+     */
+    fun syncCircleNow(
+        forceResendAll: Boolean = false,
+        nowMs: Long = System.currentTimeMillis(),
+        windowMs: Long = 10_000L,
+    ): CircleSyncSummary {
+        if (!isMigrationsCompleted()) {
+            runBlocking { awaitMigrations() }
+        }
+        bridge.ensureStarted()
+        val resetLedger = if (forceResendAll) shareService.markActiveGrantsForResend(nowMs) else 0
+        val enqueued = shareService.planAndEnqueue(nowMs)
+        val retried = outbox.resetBackoffForManualSync(nowMs)
+        val stats = transport.pump(nowMs, windowMs = windowMs)
+        shareService.flushPlanNotifications(System.currentTimeMillis())
+        val allRows = db.outbox().all()
+        val pendingLocal = allRows.count {
+            val st = runCatching { app.pulse4.sync.DeliveryState.valueOf(it.state) }.getOrNull()
+            st == app.pulse4.sync.DeliveryState.QUEUED || st == app.pulse4.sync.DeliveryState.HANDED_TO_TRANSPORT
+        }
+        val storedOnNode = allRows.count {
+            runCatching { app.pulse4.sync.DeliveryState.valueOf(it.state) }.getOrNull() == app.pulse4.sync.DeliveryState.STORED_IN_PROPAGATION
+        }
+        return CircleSyncSummary(
+            resetLedger = resetLedger,
+            enqueued = enqueued,
+            retried = retried,
+            sent = stats.sent,
+            received = stats.received,
+            rejected = stats.rejected,
+            pendingLocal = pendingLocal,
+            storedOnNode = storedOnNode,
+            gatewayOnline = bridge.isGatewayOnline,
+            localPeersCount = bridge.localPeerHashes().size,
+            hasActiveGrants = shareService.hasEffectiveSharingGrants(nowMs),
+            propagationConfigured = settings.propagationNode.isNotBlank(),
+        )
+    }
 }
+
+data class CircleSyncSummary(
+    val resetLedger: Int,
+    val enqueued: Int,
+    val retried: Int,
+    val sent: Int,
+    val received: Int,
+    val rejected: Int,
+    val pendingLocal: Int,
+    val storedOnNode: Int,
+    val gatewayOnline: Boolean,
+    val localPeersCount: Int,
+    val hasActiveGrants: Boolean,
+    val propagationConfigured: Boolean,
+)
 
 /** Import z oficiálního Garmin Personal API (a záložně z přihlášené relace Garmin Connect) a ruční import FIT. */
 internal interface ActivityImportStore {
@@ -2918,6 +2976,57 @@ class ShareService internal constructor(
         return settings.getRaw(k)?.let {
             runCatching { json.decodeFromString(deliveredKeysSerializer, it) }.getOrNull()
         }.orEmpty()
+    }
+
+    /**
+     * Bezpečně vyčistí již vyzvednuté a potvrzené (`ACKED`) položky z odchozí fronty.
+     * Před smazáním pro jistotu zálohuje případné dřívější vazby na granty do `delivered_keys.$grantId`,
+     * aby při budoucím odvolání sdílení (`revoke`) nezmizela evidence doručených klíčů.
+     */
+    fun clearAckedOutbox(): Int = synchronized(planLock) {
+        val acked = data.outbox().all().filter { it.state == app.pulse4.sync.DeliveryState.ACKED.name }
+        for (row in acked) {
+            val key = "${row.objectType}/${row.objectId}"
+            for (gid in parseGrantRefs(row.grantId)) {
+                recordDeliveredKey(gid, row.recipient, key)
+            }
+        }
+        data.outbox().deleteAcked()
+    }
+
+    /**
+     * Ruční vynucení znovuodeslání aktivně sdílených dat do kruhů / kontaktů:
+     * zneplatní uložený `contentHash` v `sent_projection` pro příjemce aktivních grantů, ale ZACHOVÁ
+     * `version`, takže následné `planAndEnqueue()` zvýší verzi (`version + 1`) a příjemce data bezpečně přijme.
+     */
+    fun markActiveGrantsForResend(nowMs: Long = System.currentTimeMillis()): Int = synchronized(planLock) {
+        runMigrations()
+        val self = selfIdProvider()
+        val allGroups = groups()
+        val activeRecipients = effectiveGrants(nowMs)
+            .filter { it.active && it.ownerId == self }
+            .flatMap { g -> app.pulse4.sharing.MembershipPolicy.effectiveRecipients(g, g.groupId?.let(allGroups::get)) }
+            .toSet()
+        if (activeRecipients.isEmpty()) return@synchronized 0
+        var resetCount = 0
+        val marker = "manual_resend_$nowMs"
+        for (row in data.inbox().allSentNow()) {
+            if (row.recipient in activeRecipients && (row.objectKey.startsWith("daily/") || row.objectKey.startsWith("activity/"))) {
+                recordSent(row.recipient, row.objectKey, row.version, marker)
+                resetCount++
+            }
+        }
+        resetCount
+    }
+
+    /** True, pokud existuje alespoň jeden účinný aktivní grant s reálným příjemcem. */
+    fun hasEffectiveSharingGrants(nowMs: Long = System.currentTimeMillis()): Boolean = synchronized(planLock) {
+        val self = selfIdProvider()
+        val allGroups = groups()
+        effectiveGrants(nowMs).any { g ->
+            g.active && g.ownerId == self &&
+                app.pulse4.sharing.MembershipPolicy.effectiveRecipients(g, g.groupId?.let(allGroups::get)).isNotEmpty()
+        }
     }
 
     /**

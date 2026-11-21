@@ -123,6 +123,23 @@ class OutboxManager(
         count
     }
 
+    /**
+     * Ruční synchronizace: okamžitě zruší backoff a dočasné odložení u čekajících položek v telefonu,
+     * aby se fronta při stisku tlačítka „Synchronizovat s kruhem hned teď“ skutečně pokusila odeslat.
+     */
+    fun resetBackoffForManualSync(nowMs: Long): Int = synchronized(this) {
+        inFlightLocalFastTrackUntil.clear()
+        var count = 0
+        store.all().filter {
+            (it.state == DeliveryState.QUEUED || it.state == DeliveryState.HANDED_TO_TRANSPORT) &&
+                it.nextAttemptAtMs > nowMs
+        }.forEach {
+            store.update(it.copy(nextAttemptAtMs = 0L))
+            count++
+        }
+        count
+    }
+
     fun enqueue(item: OutboxItem): EnqueueResult = synchronized(this) {
         if (item.sizeBytes > limits.maxEventBytes) return@synchronized EnqueueResult.OverQuota
         if (queuedBytes() + item.sizeBytes > limits.maxQueueBytes) return@synchronized EnqueueResult.OverQuota

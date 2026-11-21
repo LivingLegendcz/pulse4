@@ -82,8 +82,6 @@ import app.pulse4.android.di.ServiceLocator
 import app.pulse4.domain.MetricObservation
 import app.pulse4.domain.MetricType
 import app.pulse4.domain.Sport
-import app.pulse4.ui.ChartInfoTexts
-import app.pulse4.ui.ChartKey
 import app.pulse4.ui.Fmt
 import app.pulse4.ui.MetricSeries
 import java.time.LocalTime
@@ -1157,27 +1155,6 @@ fun Oura24hBiometricHorizon(
             .border(BorderStroke(1.dp, Color(0xFF1E293B)), RoundedCornerShape(14.dp))
             .padding(10.dp)
     ) {
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                "Schéma dne (nevychází z vašich měření)",
-                style = MaterialTheme.typography.labelSmall,
-                color = Color(0xFF94A3B8),
-                modifier = Modifier.weight(1f)
-            )
-            ChartInfoAction(
-                remember { ChartInfoTexts.build(ChartKey.OURA_24H_HORIZON) },
-                seriesColors = mapOf(
-                    "sleep" to Color(0xFF818CF8),
-                    "hrv" to Color(0xFF2DD4BF),
-                    "activity" to Color(0xFFF59E0B),
-                    "wind_down" to Color(0xFF475569),
-                )
-            )
-        }
         Box(
             Modifier
                 .fillMaxWidth()

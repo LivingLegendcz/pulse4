@@ -351,6 +351,7 @@ private fun GeneralAndUnitsSection(sl: ServiceLocator) {
     var tick by remember { mutableStateOf(0) }
     val currentUnits by sl.settings.unitSystemFlow.collectAsState()
     val currentMapProvider by sl.settings.mapProviderFlow.collectAsState()
+    val currentShowChartPoints by sl.settings.showChartPointsFlow.collectAsState()
     val profileData by io(tick) {
         Triple(sl.settings.displayName, sl.settings.zoneId, sl.settings.mapStyleUrl)
     }
@@ -439,6 +440,49 @@ private fun GeneralAndUnitsSection(sl: ServiceLocator) {
                     LabeledRow("Nadmořská výška", if (currentUnits == UnitSystem.IMPERIAL) "Stopy (ft)" else "Metry (m)")
                     LabeledRow("Tělesná hmotnost", if (currentUnits == UnitSystem.IMPERIAL) "Libry (lb)" else "Kilogramy (kg)")
                 }
+            }
+        }
+
+        Spacer(Modifier.height(14.dp))
+
+        // Zobrazení bodů naměřených hodnot v grafech
+        Card(
+            shape = RoundedCornerShape(22.dp),
+            border = BorderStroke(1.dp, Color(0xFF38BDF8).copy(alpha = 0.28f)),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF0A101B)),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                    Text(
+                        "BODY MĚŘENÍ V GRAFECH",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Color(0xFF38BDF8),
+                        letterSpacing = 0.8.sp
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "Vykreslí na křivkách grafů malé puntíky v místech, kde byla hodnota skutečně naměřená.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFFCBD5E1)
+                    )
+                }
+                Switch(
+                    checked = currentShowChartPoints,
+                    onCheckedChange = { enabled ->
+                        showChartPointsState = enabled
+                        scope.launch(Dispatchers.IO) {
+                            sl.settings.showChartPoints = enabled
+                        }
+                    }
+                )
             }
         }
 

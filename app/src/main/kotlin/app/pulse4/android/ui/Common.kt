@@ -5,6 +5,7 @@ package app.pulse4.android.ui
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
@@ -12,6 +13,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -67,11 +69,9 @@ import app.pulse4.domain.PLog
 import app.pulse4.domain.Reading
 import app.pulse4.provider.AreaStatus
 import app.pulse4.sync.DeliveryState
-import app.pulse4.domain.MetricType
 import app.pulse4.ui.Channel
 import app.pulse4.ui.ChartInfo
 import app.pulse4.ui.ChartInfoOptions
-import app.pulse4.ui.ChartInfoSeries
 import app.pulse4.ui.ChartInfoTexts
 import app.pulse4.ui.ChartKey
 import app.pulse4.ui.Fmt
@@ -115,6 +115,51 @@ fun <K : Any, V : Any> ioCached(
 var activeFmt: Fmt = Fmt.default
 
 val fmt: Fmt get() = activeFmt
+
+/** Zda na křivkách grafů vykreslovat malé puntíky v místech skutečně naměřených hodnot. */
+var showChartPointsState by mutableStateOf(true)
+
+/** Kompaktní přepínač zobrazení bodů měření na křivkách grafů. */
+@Composable
+fun ChartPointsTogglePill(
+    enabled: Boolean,
+    onToggle: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val accent = Color(0xFF38BDF8)
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (enabled) accent.copy(alpha = 0.18f) else Color(0xCC0B1322))
+            .border(
+                1.dp,
+                if (enabled) accent.copy(alpha = 0.55f) else Color(0xFF334155),
+                RoundedCornerShape(10.dp)
+            )
+            .clickable(onClick = onToggle)
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .size(7.dp)
+                .clip(CircleShape)
+                .then(
+                    if (enabled) Modifier.background(accent)
+                    else Modifier.border(1.4.dp, Color(0xFF64748B), CircleShape)
+                )
+        )
+        Text(
+            "Body",
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.Bold,
+            color = if (enabled) accent else Color(0xFF94A3B8),
+            maxLines = 1,
+            softWrap = false
+        )
+    }
+}
 
 /** Stavy doručení tak, jak je vidí uživatel; jen ACKED znamená, že příjemcova aplikace změnu uložila. */
 fun DeliveryState.label(): String = app.pulse4.ui.Labels.delivery(this)
@@ -175,7 +220,7 @@ fun SinglestatCard(
                     contentScale = ContentScale.Crop,
                     modifier = Modifier
                         .matchParentSize()
-                        .alpha(0.82f)
+                        .alpha(0.56f)
                 )
             }
 
@@ -184,13 +229,24 @@ fun SinglestatCard(
                 val w = size.width
                 val h = size.height
 
-                // Jemný gradient zleva doprava — vlevo čitelný text, vpravo naplno prosvítá fotografie a motiv!
+                // Ztmavení pod texty na levé i pravé straně, uprostřed prosvítá ilustrace
                 drawRect(
                     brush = Brush.horizontalGradient(
                         colors = listOf(
-                            Color(0xD9050911),
-                            cardBg.copy(alpha = 0.52f),
-                            Color(0x1A050911)
+                            Color(0xE0050911),
+                            cardBg.copy(alpha = 0.56f),
+                            Color(0xA6050911)
+                        )
+                    )
+                )
+
+                // Spodní ztmavení pro čitelnost řádku Měřeno / Min · Max
+                drawRect(
+                    brush = Brush.verticalGradient(
+                        colors = listOf(
+                            Color.Transparent,
+                            Color(0x33050911),
+                            Color(0xBF050911)
                         )
                     )
                 )
@@ -330,12 +386,6 @@ fun SinglestatCard(
                     }
 
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(start = 6.dp)) {
-                        if (finite.size >= 2) {
-                            val sparkInfo = remember(windowLabel) {
-                                ChartInfoTexts.build(ChartKey.SINGLESTAT_SPARKLINE, options = ChartInfoOptions(windowLabel = windowLabel))
-                            }
-                            ChartInfoAction(sparkInfo)
-                        }
                         val badgeText = statusLabel ?: when (reading) {
                             is Reading.Value -> "Aktuální"
                             Reading.NotSyncedYet -> "Čeká"
@@ -352,7 +402,12 @@ fun SinglestatCard(
                                 softWrap = false,
                                 modifier = Modifier
                                     .background(
-                                        badgeCol.copy(alpha = 0.14f),
+                                        Color(0xCC060B14),
+                                        RoundedCornerShape(8.dp)
+                                    )
+                                    .border(
+                                        1.dp,
+                                        badgeCol.copy(alpha = 0.45f),
                                         RoundedCornerShape(8.dp)
                                     )
                                     .padding(horizontal = 8.dp, vertical = 3.dp)
@@ -361,7 +416,7 @@ fun SinglestatCard(
                         Text(
                             " ›",
                             style = MaterialTheme.typography.titleLarge,
-                            color = Color(0xFF64748B),
+                            color = Color(0xFFCBD5E1),
                             maxLines = 1,
                             softWrap = false,
                             modifier = Modifier.padding(start = 4.dp)
@@ -398,7 +453,10 @@ fun SinglestatCard(
                                     color = deltaColor ?: accentColor,
                                     maxLines = 1,
                                     softWrap = false,
-                                    modifier = Modifier.padding(bottom = 3.dp, start = 6.dp)
+                                    modifier = Modifier
+                                        .padding(bottom = 2.dp, start = 6.dp)
+                                        .background(Color(0xC0050911), RoundedCornerShape(8.dp))
+                                        .padding(horizontal = 7.dp, vertical = 2.dp)
                                 )
                             }
                         }
@@ -408,7 +466,7 @@ fun SinglestatCard(
                                 subtitle,
                                 style = MaterialTheme.typography.labelSmall,
                                 fontWeight = FontWeight.Medium,
-                                color = Color(0xFFCBD5E1),
+                                color = Color(0xFFE2E8F0),
                                 maxLines = 2,
                                 overflow = TextOverflow.Ellipsis
                             )
@@ -421,7 +479,7 @@ fun SinglestatCard(
                             Text(
                                 "Měřeno ${fmt.time(reading.measuredAtUtcMs)}",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = Color(0xFF94A3B8)
+                                color = Color(0xFFCBD5E1)
                             )
                             if (finite.size >= 2) {
                                 val minMaxDecimals = if (reading.value.contains("kg") || reading.value.contains("lb") || (finite.max() - finite.min()) < 3.0) 2
@@ -429,7 +487,7 @@ fun SinglestatCard(
                                 Text(
                                     "Min ${fmt.number(finite.min(), minMaxDecimals)} · Max ${fmt.number(finite.max(), minMaxDecimals)}",
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = Color(0xFF94A3B8)
+                                    color = Color(0xFFCBD5E1)
                                 )
                             }
                         }
@@ -559,6 +617,81 @@ private fun inferChartMotifKind(unit: String, title: String = ""): MetricMotifKi
     }
 }
 
+@Composable
+private fun ChartCardFrame(
+    embedded: Boolean,
+    accentColor: Color,
+    artworkRes: Int,
+    motifKind: MetricMotifKind,
+    artworkAlpha: Float,
+    glowCenterXFraction: Float,
+    glowCenterYFraction: Float,
+    modifier: Modifier = Modifier,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    if (embedded) {
+        Column(modifier = modifier.fillMaxWidth().padding(top = 4.dp), content = content)
+    } else {
+        Card(
+            modifier = modifier.fillMaxWidth().padding(vertical = 6.dp),
+            shape = RoundedCornerShape(22.dp),
+            border = BorderStroke(
+                1.dp,
+                Brush.horizontalGradient(
+                    listOf(
+                        accentColor.copy(alpha = 0.54f),
+                        Color.White.copy(alpha = 0.16f),
+                        accentColor.copy(alpha = 0.26f)
+                    )
+                )
+            ),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF070C15))
+        ) {
+            Box(Modifier.fillMaxWidth()) {
+                Image(
+                    painter = painterResource(id = artworkRes),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .matchParentSize()
+                        .alpha(artworkAlpha)
+                )
+                Canvas(modifier = Modifier.matchParentSize()) {
+                    drawRect(
+                        brush = Brush.verticalGradient(
+                            colors = listOf(
+                                Color(0xCC060B14),
+                                Color(0x99060B14),
+                                Color(0xE6050911)
+                            )
+                        )
+                    )
+                    drawCircle(
+                        brush = Brush.radialGradient(
+                            colors = listOf(
+                                accentColor.copy(alpha = 0.22f),
+                                accentColor.copy(alpha = 0.04f),
+                                Color.Transparent
+                            ),
+                            center = Offset(size.width * glowCenterXFraction, size.height * glowCenterYFraction),
+                            radius = size.width * 0.55f
+                        ),
+                        center = Offset(size.width * glowCenterXFraction, size.height * glowCenterYFraction),
+                        radius = size.width * 0.55f
+                    )
+                    drawMetricMotifIllustration(
+                        motifKind = motifKind,
+                        primaryColor = accentColor,
+                        secondaryColor = Color.White,
+                        alphaMultiplier = 0.65f
+                    )
+                }
+                Column(Modifier.padding(15.dp), content = content)
+            }
+        }
+    }
+}
+
 /**
  * Vícenásobný srovnávací graf (Grafana / Oura Biometric Observatory styl) pro Skupinový Dashboard,
  * Korelace metrik i Porovnání aktivit (Compare).
@@ -576,6 +709,7 @@ fun MultiSeriesLineChart(
     infoOptions: ChartInfoOptions = ChartInfoOptions(),
     info: ChartInfo? = null,
     showInfo: Boolean = true,
+    embedded: Boolean = false,
 ) {
     var hiddenIds by remember { mutableStateOf(setOf<String>()) }
     var selectedIdx by remember { mutableStateOf<Int?>(null) }
@@ -648,66 +782,18 @@ fun MultiSeriesLineChart(
 
     val gridColor = Color.White.copy(alpha = 0.09f)
     val cursorColor = Color(0xFFE2E8F0)
+    val showMeasuredPoints = showChartPointsState
 
-    Card(
-        modifier = modifier.fillMaxWidth().padding(vertical = 6.dp),
-        shape = RoundedCornerShape(22.dp),
-        border = BorderStroke(
-            1.dp,
-            Brush.horizontalGradient(
-                listOf(
-                    leadColor.copy(alpha = 0.55f),
-                    Color.White.copy(alpha = 0.16f),
-                    leadColor.copy(alpha = 0.28f)
-                )
-            )
-        ),
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF070C15))
+    ChartCardFrame(
+        embedded = embedded,
+        accentColor = leadColor,
+        artworkRes = effectiveArtwork,
+        motifKind = effectiveMotif,
+        artworkAlpha = 0.64f,
+        glowCenterXFraction = 0.82f,
+        glowCenterYFraction = 0.25f,
+        modifier = modifier,
     ) {
-        Box(Modifier.fillMaxWidth()) {
-            // 1. Fotografické pozadí
-            Image(
-                painter = painterResource(id = effectiveArtwork),
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier
-                    .matchParentSize()
-                    .alpha(0.64f)
-            )
-
-            // 2. Atmosférický závoj a procedurální motiv
-            Canvas(modifier = Modifier.matchParentSize()) {
-                drawRect(
-                    brush = Brush.verticalGradient(
-                        colors = listOf(
-                            Color(0xCC060B14),
-                            Color(0x99060B14),
-                            Color(0xE6050911)
-                        )
-                    )
-                )
-                drawCircle(
-                    brush = Brush.radialGradient(
-                        colors = listOf(
-                            leadColor.copy(alpha = 0.22f),
-                            leadColor.copy(alpha = 0.04f),
-                            Color.Transparent
-                        ),
-                        center = Offset(size.width * 0.82f, size.height * 0.25f),
-                        radius = size.width * 0.55f
-                    ),
-                    center = Offset(size.width * 0.82f, size.height * 0.25f),
-                    radius = size.width * 0.55f
-                )
-                drawMetricMotifIllustration(
-                    motifKind = effectiveMotif,
-                    primaryColor = leadColor,
-                    secondaryColor = Color.White,
-                    alphaMultiplier = 0.65f
-                )
-            }
-
-            Column(Modifier.padding(15.dp)) {
                 // FlowRow: on narrow screens (320 dp) the scale toggle wraps under the title instead of squeezing it.
                 FlowRow(
                     Modifier.fillMaxWidth(),
@@ -736,18 +822,10 @@ fun MultiSeriesLineChart(
                             }
                         }
                         if (showInfo) {
-                            val effectiveInfo = remember(info, infoKey, infoOptions, series) {
-                                info ?: ChartInfoTexts.build(
-                                    infoKey,
-                                    series.map { ChartInfoTexts.metricSeries(it.id, it.label, it.unit) },
-                                    infoOptions
-                                )
+                            val effectiveInfo = remember(info, infoKey, infoOptions) {
+                                info ?: ChartInfoTexts.build(infoKey, infoOptions)
                             }
-                            ChartInfoAction(
-                                effectiveInfo,
-                                seriesColors = series.associate { it.id to it.color },
-                                seriesStyles = seriesStyles.mapNotNull { (k, v) -> v?.let { k to it } }.toMap()
-                            )
+                            ChartInfoAction(effectiveInfo)
                         }
                     }
 
@@ -760,7 +838,7 @@ fun MultiSeriesLineChart(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            if (independentScale) "Detail křivek (±100g)" else "Společná osa Y",
+                            if (independentScale) "Jen tvar změn" else "Společná osa",
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.Bold,
                             color = if (independentScale) Color(0xFF2DD4BF) else Color(0xFF94A3B8)
@@ -954,11 +1032,16 @@ fun MultiSeriesLineChart(
                                         pathEffect = style?.lineStyle?.pathEffect()
                                     )
                                 )
-                                if (pts.size <= 35) {
+                                if (showMeasuredPoints && pts.size <= 100) {
+                                    val dense = pts.size > 45
+                                    val ringR = if (dense) 5.0f else 6.6f
+                                    val dotR = if (dense) 3.6f else 4.8f
+                                    val coreR = if (dense) 1.3f else 1.9f
                                     for (pt in pts) {
                                         val ptCenter = Offset(x(pt.first, count), yVal(pt.second))
-                                        drawSeriesMarker(marker, s.color.copy(alpha = 0.30f), ptCenter, 7f)
-                                        drawSeriesMarker(marker, s.color, ptCenter, 4f)
+                                        drawCircle(Color(0xFF070C15), radius = ringR, center = ptCenter)
+                                        drawSeriesMarker(marker, s.color, ptCenter, dotR)
+                                        drawCircle(Color.White.copy(alpha = 0.92f), radius = coreR, center = ptCenter)
                                     }
                                 }
                             }
@@ -994,14 +1077,12 @@ fun MultiSeriesLineChart(
                         }
                     }
                 }
-            }
-        }
     }
 }
 
 /** Legend swatch: short line in the series' color + line style with its point marker. */
 @Composable
-internal fun SeriesLegendSample(style: SeriesStyle?, color: Color) {
+private fun SeriesLegendSample(style: SeriesStyle?, color: Color) {
     Canvas(Modifier.size(width = 20.dp, height = 10.dp)) {
         val y = size.height / 2f
         drawLine(
@@ -1044,12 +1125,12 @@ fun LineChart(
     channel: Channel? = null,
     artworkRes: Int? = null,
     motifKind: MetricMotifKind? = null,
-    /** Metric drawn by the chart; lets the (i) dialog name its daily aggregation. */
-    infoMetric: MetricType? = null,
     /** Custom explanation; when null one is derived from this chart's own parameters. */
     info: ChartInfo? = null,
     /** False where the surrounding card already carries its own (i) for this chart. */
     showInfo: Boolean = true,
+    /** True when already nested inside a parent Card so no double border/backdrop is drawn. */
+    embedded: Boolean = false,
     onCursor: (Int) -> Unit = {},
     onRange: (IntRange?) -> Unit = {},
 ) {
@@ -1057,6 +1138,7 @@ fun LineChart(
     val selColor = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.22f)
     val cursorColor = Color(0xFFFF5252)
     val gridColor = Color.White.copy(alpha = 0.09f)
+    val showMeasuredPoints = showChartPointsState
     var selectedIndex by remember { mutableStateOf<Int?>(null) }
 
     val effectiveArtwork = remember(artworkRes, unit, secondaryLabel) {
@@ -1127,65 +1209,16 @@ fun LineChart(
     val hi = if ((dataHi - dataLo) < minSpan) ((dataHi + dataLo) / 2.0 + minSpan / 2.0) else dataHi
     val unitSuffix = if (unit.isNotBlank()) " $unit" else ""
 
-    Card(
-        modifier = modifier.fillMaxWidth().padding(vertical = 6.dp),
-        shape = RoundedCornerShape(22.dp),
-        border = BorderStroke(
-            1.dp,
-            Brush.horizontalGradient(
-                listOf(
-                    color.copy(alpha = 0.52f),
-                    Color.White.copy(alpha = 0.15f),
-                    color.copy(alpha = 0.25f)
-                )
-            )
-        ),
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF070C15))
+    ChartCardFrame(
+        embedded = embedded,
+        accentColor = color,
+        artworkRes = effectiveArtwork,
+        motifKind = effectiveMotif,
+        artworkAlpha = 0.62f,
+        glowCenterXFraction = 0.85f,
+        glowCenterYFraction = 0.28f,
+        modifier = modifier,
     ) {
-        Box(Modifier.fillMaxWidth()) {
-            // 1. Fotografické pozadí
-            Image(
-                painter = painterResource(id = effectiveArtwork),
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier
-                    .matchParentSize()
-                    .alpha(0.62f)
-            )
-
-            // 2. Atmosférický závoj a procedurální motiv
-            Canvas(modifier = Modifier.matchParentSize()) {
-                drawRect(
-                    brush = Brush.verticalGradient(
-                        colors = listOf(
-                            Color(0xCC060B14),
-                            Color(0x99060B14),
-                            Color(0xE6050911)
-                        )
-                    )
-                )
-                drawCircle(
-                    brush = Brush.radialGradient(
-                        colors = listOf(
-                            color.copy(alpha = 0.22f),
-                            color.copy(alpha = 0.04f),
-                            Color.Transparent
-                        ),
-                        center = Offset(size.width * 0.85f, size.height * 0.28f),
-                        radius = size.width * 0.55f
-                    ),
-                    center = Offset(size.width * 0.85f, size.height * 0.28f),
-                    radius = size.width * 0.55f
-                )
-                drawMetricMotifIllustration(
-                    motifKind = effectiveMotif,
-                    primaryColor = color,
-                    secondaryColor = Color.White,
-                    alphaMultiplier = 0.65f
-                )
-            }
-
-            Column(Modifier.padding(15.dp)) {
                 Row(
                     Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -1257,16 +1290,14 @@ fun LineChart(
                     if (showInfo) {
                         val hasBand = band != null
                         val hasSecondary = secondaryValues != null
-                        val lineInfo = remember(info, unit, hasBand, hasSecondary, secondaryLabel, isScatter, infoMetric) {
+                        val lineInfo = remember(info, hasBand, hasSecondary, secondaryLabel, isScatter) {
                             info ?: ChartInfoTexts.build(
                                 ChartKey.METRIC_HISTORY_LINE,
                                 options = ChartInfoOptions(
-                                    unit = unit,
                                     hasBand = hasBand,
                                     hasSecondary = hasSecondary,
                                     secondaryLabel = secondaryLabel,
                                     isScatter = isScatter,
-                                    metric = infoMetric,
                                 )
                             )
                         }
@@ -1483,11 +1514,16 @@ fun LineChart(
                                 style = Stroke(width = 4.5f, cap = StrokeCap.Round, join = StrokeJoin.Round)
                             )
 
-                            if (ptsCount <= 45) {
+                            if (showMeasuredPoints && channel == null && ptsCount <= 120) {
+                                val dense = ptsCount > 45
+                                val ringR = if (dense) 5.2f else 6.8f
+                                val dotR = if (dense) 3.7f else 4.8f
+                                val coreR = if (dense) 1.4f else 2.0f
                                 for (p in 0 until ptsCount) {
                                     val ptCenter = Offset(x(series.indices[p]), y(series.values[p]))
-                                    drawCircle(color.copy(alpha = 0.30f), radius = 7.5f, center = ptCenter)
-                                    drawCircle(color, radius = 4.5f, center = ptCenter)
+                                    drawCircle(Color(0xFF070C15), radius = ringR, center = ptCenter)
+                                    drawCircle(color, radius = dotR, center = ptCenter)
+                                    drawCircle(Color.White.copy(alpha = 0.92f), radius = coreR, center = ptCenter)
                                 }
                             }
                         }
@@ -1582,8 +1618,6 @@ fun LineChart(
                         }
                     }
                 }
-            }
-        }
     }
 }
 
@@ -1678,6 +1712,7 @@ fun WeightCompositionStackedAreaChart(
 
     var selectedIndex by remember(weightValues) { mutableStateOf<Int?>(null) }
     var absoluteZeroScale by remember { mutableStateOf(false) }
+    val showMeasuredPoints = showChartPointsState
 
     val finiteWeights = weightValues.filterNotNull().filter { it.isFinite() }
     val rawMinW = finiteWeights.minOrNull() ?: 0.0
@@ -1739,28 +1774,17 @@ fun WeightCompositionStackedAreaChart(
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        text = if (curDate != null) "SLOŽENÍ VÁHY ($curDate)" else "VÁHA + SKLÁDANÁ PLOCHA SVALŮ A TUKU",
+                        text = if (curDate != null) "Z ČEHO SE SKLÁDÁ VÁHA ($curDate)" else "Z ČEHO SE SKLÁDÁ VÁHA",
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.Bold,
                         color = Color(0xFF94A3B8),
                         modifier = Modifier.weight(1f, fill = false),
                         maxLines = 1
                     )
-                    val compositionInfo = remember(unit, band) {
-                        ChartInfoTexts.build(
-                            ChartKey.WEIGHT_COMPOSITION_STACKED_AREA,
-                            options = ChartInfoOptions(unit = unit, hasBand = band != null)
-                        )
+                    val compositionInfo = remember {
+                        ChartInfoTexts.build(ChartKey.WEIGHT_COMPOSITION_STACKED_AREA)
                     }
-                    ChartInfoAction(
-                        compositionInfo,
-                        seriesColors = mapOf(
-                            "weight" to weightColor,
-                            "muscle" to muscleColor,
-                            "fat" to fatColor,
-                            "rest" to weightColor.copy(alpha = 0.45f),
-                        )
-                    )
+                    ChartInfoAction(compositionInfo)
                 }
                 Row(
                     modifier = Modifier
@@ -1771,7 +1795,7 @@ fun WeightCompositionStackedAreaChart(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = if (absoluteZeroScale) "Měřítko: 0–${fmtVal(maxY)} $unit" else "Měřítko: Detail váhy",
+                        text = if (absoluteZeroScale) "Od nuly (0–${fmtVal(maxY)} $unit)" else "Detail změn",
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.SemiBold,
                         color = weightColor,
@@ -1856,22 +1880,33 @@ fun WeightCompositionStackedAreaChart(
                         .clip(RoundedCornerShape(12.dp))
                         .background(MineralBackgroundDark)
                         .pointerInput(weightValues) {
+                            fun nearestMeasuredIdx(rawIdx: Int): Int =
+                                weightValues.indices
+                                    .filter { weightValues[it]?.isFinite() == true }
+                                    .minByOrNull { kotlin.math.abs(it - rawIdx) }
+                                    ?: rawIdx
                             detectTapGestures { offset ->
                                 if (weightValues.isNotEmpty() && size.width > 0) {
-                                    val idx = ((offset.x / size.width) * (weightValues.size - 1)).toInt()
+                                    val raw = ((offset.x / size.width) * (weightValues.size - 1)).toInt()
                                         .coerceIn(0, weightValues.lastIndex)
+                                    val idx = nearestMeasuredIdx(raw)
                                     selectedIndex = if (selectedIndex == idx) null else idx
                                 }
                             }
                         }
                         .pointerInput(weightValues) {
+                            fun nearestMeasuredIdx(rawIdx: Int): Int =
+                                weightValues.indices
+                                    .filter { weightValues[it]?.isFinite() == true }
+                                    .minByOrNull { kotlin.math.abs(it - rawIdx) }
+                                    ?: rawIdx
                             detectDragGestures(
                                 onDragEnd = { },
                                 onDrag = { change, _ ->
                                     if (weightValues.isNotEmpty() && size.width > 0) {
-                                        val idx = ((change.position.x / size.width) * (weightValues.size - 1)).toInt()
+                                        val raw = ((change.position.x / size.width) * (weightValues.size - 1)).toInt()
                                             .coerceIn(0, weightValues.lastIndex)
-                                        selectedIndex = idx
+                                        selectedIndex = nearestMeasuredIdx(raw)
                                     }
                                 }
                             )
@@ -1995,6 +2030,7 @@ fun WeightCompositionStackedAreaChart(
                                 val midX = (prev.xPos + curr.xPos) * 0.5f
                                 cubicTo(midX, prev.fatTopY, midX, curr.fatTopY, curr.xPos, curr.fatTopY)
                             }
+                            lineTo(pts.last().xPos, pts.last().muscleTopY)
                             for (i in pts.lastIndex downTo 1) {
                                 val curr = pts[i]
                                 val prev = pts[i - 1]
@@ -2022,6 +2058,7 @@ fun WeightCompositionStackedAreaChart(
                                 val midX = (prev.xPos + curr.xPos) * 0.5f
                                 cubicTo(midX, prev.weightY, midX, curr.weightY, curr.xPos, curr.weightY)
                             }
+                            lineTo(pts.last().xPos, pts.last().fatTopY)
                             for (i in pts.lastIndex downTo 1) {
                                 val curr = pts[i]
                                 val prev = pts[i - 1]
@@ -2084,11 +2121,31 @@ fun WeightCompositionStackedAreaChart(
                             style = Stroke(width = 4.8f, cap = StrokeCap.Round, join = StrokeJoin.Round)
                         )
 
-                        if (pts.size <= 45) {
+                        if (showMeasuredPoints && pts.size <= 100) {
+                            val dense = pts.size > 45
+                            val wRing = if (dense) 5.0f else 6.5f
+                            val wDot = if (dense) 3.6f else 4.7f
+                            val wCore = if (dense) 1.4f else 2.0f
+                            val sRing = if (dense) 4.4f else 5.5f
+                            val sDot = if (dense) 3.1f else 3.9f
+                            val sCore = if (dense) 1.2f else 1.5f
                             for (pt in pts) {
-                                drawCircle(weightColor, radius = 4.5f, center = Offset(pt.xPos, pt.weightY))
-                                drawCircle(fatColor, radius = 3.5f, center = Offset(pt.xPos, pt.fatTopY))
-                                drawCircle(muscleColor, radius = 3.5f, center = Offset(pt.xPos, pt.muscleTopY))
+                                val wCenter = Offset(pt.xPos, pt.weightY)
+                                drawCircle(Color(0xFF070C15), radius = wRing, center = wCenter)
+                                drawCircle(weightColor, radius = wDot, center = wCenter)
+                                drawCircle(Color.White.copy(alpha = 0.95f), radius = wCore, center = wCenter)
+                                if (fatValues.getOrNull(pt.idx)?.isFinite() == true) {
+                                    val fCenter = Offset(pt.xPos, pt.fatTopY)
+                                    drawCircle(Color(0xFF070C15), radius = sRing, center = fCenter)
+                                    drawCircle(fatColor, radius = sDot, center = fCenter)
+                                    drawCircle(Color.White.copy(alpha = 0.90f), radius = sCore, center = fCenter)
+                                }
+                                if (muscleValues.getOrNull(pt.idx)?.isFinite() == true) {
+                                    val mCenter = Offset(pt.xPos, pt.muscleTopY)
+                                    drawCircle(Color(0xFF070C15), radius = sRing, center = mCenter)
+                                    drawCircle(muscleColor, radius = sDot, center = mCenter)
+                                    drawCircle(Color.White.copy(alpha = 0.90f), radius = sCore, center = mCenter)
+                                }
                             }
                         }
                     }

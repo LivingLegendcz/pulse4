@@ -364,6 +364,8 @@ private fun Root(sl: app.pulse4.android.di.ServiceLocator, onCompletePlayUpdate:
     val units by sl.settings.unitSystemFlow.collectAsState()
     val mapProv by sl.settings.mapProviderFlow.collectAsState()
     val networkMode by sl.settings.networkModeFlow.collectAsState()
+    val showChartPts by sl.settings.showChartPointsFlow.collectAsState()
+    LaunchedEffect(showChartPts) { showChartPointsState = showChartPts }
     val currentFmt by activeFmtFlow.collectAsState()
     val navReq by navRequestFlow.collectAsState()
 

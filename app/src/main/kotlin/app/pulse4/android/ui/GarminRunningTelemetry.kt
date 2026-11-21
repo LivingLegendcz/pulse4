@@ -249,7 +249,7 @@ fun Channel.toTelemetryTopic(): TelemetryTopic? = when (this) {
 
 /**
  * Round (i) badge. The visible badge is always 24 dp; [touchTarget] enlarges only the tappable area
- * (charts use 48 dp, see [ChartInfoButton]).
+ * (charts use 32 dp, see [ChartInfoButton]).
  */
 @Composable
 fun InfoBadgeButton(

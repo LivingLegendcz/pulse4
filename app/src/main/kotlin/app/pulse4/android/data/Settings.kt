@@ -147,6 +147,7 @@ class Settings(private val dbProvider: () -> AppDatabase) {
         _networkModeFlow.value = runCatching { NetworkMode.valueOf(get("networkMode", NetworkMode.AUTO.name)) }.getOrDefault(NetworkMode.AUTO)
         _backgroundServiceEnabledFlow.value = get("backgroundServiceEnabled", "true").toBoolean()
         _showChartPointsFlow.value = get("showChartPoints", "true").toBoolean()
+        _showAllTodayWidgetsFlow.value = get("showAllTodayWidgets", "true").toBoolean()
         refreshAgeFlows()
         _zoneIdFlow.value = get("zoneId", java.time.ZoneId.systemDefault().id)
     }
@@ -165,6 +166,9 @@ class Settings(private val dbProvider: () -> AppDatabase) {
 
     private val _showChartPointsFlow = MutableStateFlow(true)
     val showChartPointsFlow: StateFlow<Boolean> get() = _showChartPointsFlow
+
+    private val _showAllTodayWidgetsFlow = MutableStateFlow(true)
+    val showAllTodayWidgetsFlow: StateFlow<Boolean> get() = _showAllTodayWidgetsFlow
 
     private val _ageStateFlow = MutableStateFlow(AgeState.UNKNOWN)
     /** Local age state (UNKNOWN until the first-run choice / migration). Written only by [AgeProfileManager]. */
@@ -205,6 +209,13 @@ class Settings(private val dbProvider: () -> AppDatabase) {
         set(v) {
             put("showChartPoints", v.toString())
             _showChartPointsFlow.value = v
+        }
+
+    var showAllTodayWidgets: Boolean
+        get() = get("showAllTodayWidgets", "true").toBoolean().also { _showAllTodayWidgetsFlow.value = it }
+        set(v) {
+            put("showAllTodayWidgets", v.toString())
+            _showAllTodayWidgetsFlow.value = v
         }
 
     var displayName: String get() = get("displayName", "Já"); set(v) = put("displayName", v)

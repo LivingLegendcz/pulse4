@@ -352,6 +352,7 @@ private fun GeneralAndUnitsSection(sl: ServiceLocator) {
     val currentUnits by sl.settings.unitSystemFlow.collectAsState()
     val currentMapProvider by sl.settings.mapProviderFlow.collectAsState()
     val currentShowChartPoints by sl.settings.showChartPointsFlow.collectAsState()
+    val currentShowAllTodayWidgets by sl.settings.showAllTodayWidgetsFlow.collectAsState()
     val profileData by io(tick) {
         Triple(sl.settings.displayName, sl.settings.zoneId, sl.settings.mapStyleUrl)
     }
@@ -445,44 +446,82 @@ private fun GeneralAndUnitsSection(sl: ServiceLocator) {
 
         Spacer(Modifier.height(14.dp))
 
-        // Zobrazení bodů naměřených hodnot v grafech
+        // Zobrazení karet na Dnes a bodů v grafech
         Card(
             shape = RoundedCornerShape(22.dp),
             border = BorderStroke(1.dp, Color(0xFF38BDF8).copy(alpha = 0.28f)),
             colors = CardDefaults.cardColors(containerColor = Color(0xFF0A101B)),
             modifier = Modifier.fillMaxWidth()
         ) {
-            Row(
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(16.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                Column(Modifier.weight(1f).padding(end = 12.dp)) {
-                    Text(
-                        "BODY MĚŘENÍ V GRAFECH",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = Color(0xFF38BDF8),
-                        letterSpacing = 0.8.sp
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        "Vykreslí na křivkách grafů malé puntíky v místech, kde byla hodnota skutečně naměřená.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color(0xFFCBD5E1)
+                Text(
+                    "ZOBRAZENÍ DNES A GRAFŮ",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = Color(0xFF38BDF8),
+                    letterSpacing = 0.8.sp
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                        Text(
+                            "Všechny biometrické karty na Dnes",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color.White
+                        )
+                        Text(
+                            "Zobrazí na domovské obrazovce všechny karty najednou (vypnutím se filtrují podle vybraného pilíře).",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFFCBD5E1)
+                        )
+                    }
+                    Switch(
+                        checked = currentShowAllTodayWidgets,
+                        onCheckedChange = { enabled ->
+                            scope.launch(Dispatchers.IO) {
+                                sl.settings.showAllTodayWidgets = enabled
+                            }
+                        }
                     )
                 }
-                Switch(
-                    checked = currentShowChartPoints,
-                    onCheckedChange = { enabled ->
-                        showChartPointsState = enabled
-                        scope.launch(Dispatchers.IO) {
-                            sl.settings.showChartPoints = enabled
-                        }
+                Box(Modifier.fillMaxWidth().height(1.dp).background(Color(0xFF1E293B)))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                        Text(
+                            "Body měření v grafech",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color.White
+                        )
+                        Text(
+                            "Vykreslí na křivkách grafů malé puntíky v místech, kde byla hodnota skutečně naměřená.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFFCBD5E1)
+                        )
                     }
-                )
+                    Switch(
+                        checked = currentShowChartPoints,
+                        onCheckedChange = { enabled ->
+                            showChartPointsState = enabled
+                            scope.launch(Dispatchers.IO) {
+                                sl.settings.showChartPoints = enabled
+                            }
+                        }
+                    )
+                }
             }
         }
 

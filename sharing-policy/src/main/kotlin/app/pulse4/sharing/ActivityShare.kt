@@ -89,7 +89,7 @@ object ActivityProjector {
             localDate = date.toString(),
             startUtcMs = if (grant.allows(Field.ACT_EXACT_TIME)) activity.startUtcMs else null,
             totalTimeS = activity.totalTimeS.takeIf { wantsSummary },
-            movingTimeS = activity.movingTimeS.takeIf { wantsSummary },
+            movingTimeS = (activity.movingTimeS?.takeIf { it > 0.0 } ?: activity.totalTimeS).takeIf { wantsSummary },
             distanceM = activity.distanceM.takeIf { wantsSummary },
             ascentM = activity.ascentM.takeIf { wantsSummary },
             avgHeartRate = activity.avgHeartRate.takeIf { wantsSummary },

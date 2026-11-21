@@ -710,15 +710,16 @@ fun MultiSeriesLineChart(
     info: ChartInfo? = null,
     showInfo: Boolean = true,
     embedded: Boolean = false,
+    defaultIndependentScale: Boolean = true,
 ) {
     var hiddenIds by remember { mutableStateOf(setOf<String>()) }
-    var selectedIdx by remember { mutableStateOf<Int?>(null) }
-    var independentScale by remember { mutableStateOf(true) }
+    val maxPoints = remember(series) { series.maxOfOrNull { it.values.size } ?: 0 }
+    var selectedIdx by remember(maxPoints) { mutableStateOf<Int?>(null) }
+    var independentScale by remember(defaultIndependentScale) { mutableStateOf(defaultIndependentScale) }
 
     val visibleSeries = remember(series, hiddenIds) {
         series.filter { it.id !in hiddenIds && it.values.any { v -> v != null } }
     }
-    val maxPoints = remember(series) { series.maxOfOrNull { it.values.size } ?: 0 }
     // Styles depend on all series (not only visible ones) so toggling the legend never restyles lines.
     val seriesStyles = remember(series) {
         val styles = SeriesColorAllocator.assignStylesOnly(series.map { it.color })
@@ -741,13 +742,27 @@ fun MultiSeriesLineChart(
         motifKind ?: inferChartMotifKind(primaryUnit, visibleSeries.firstOrNull()?.label ?: title)
     }
 
-    // Výpočet rozsahů pro každou řadu zvlášť pro vysoké rozlišení změn (±100g až 500g)
+    // Výpočet rozsahů pro společnou osu (skutečné naměřené hodnoty) i nezávislou osu (tvar změn)
     data class SeriesScale(val lo: Double, val hi: Double, val span: Double)
-    val seriesScales = remember(visibleSeries, independentScale, rawLo, rawHi) {
+    val sharedScale = remember(rawLo, rawHi, primaryUnit) {
+        val rawSpan = (rawHi - rawLo).coerceAtLeast(0.0)
+        val minSpan = when (primaryUnit) {
+            "kg", "lb" -> 1.0
+            "%" -> 2.0
+            "bpm", "ms" -> 6.0
+            "h" -> 1.0
+            else -> 2.0
+        }
+        val pad = maxOf(rawSpan * 0.14, minSpan / 2.0)
+        val nonNegative = primaryUnit in setOf("%", "h", "kg", "lb", "bpm", "ms", "b.")
+        val lo = (rawLo - pad).coerceAtLeast(if (nonNegative) 0.0 else -10000.0)
+        val hi = rawHi + pad
+        SeriesScale(lo, hi, (hi - lo).takeIf { it > 1e-9 } ?: 1.0)
+    }
+    val seriesScales = remember(visibleSeries, independentScale, sharedScale) {
         visibleSeries.associate { s ->
             if (!independentScale) {
-                val span = (rawHi - rawLo).takeIf { it > 1e-9 } ?: 1.0
-                s.id to SeriesScale(rawLo, rawHi, span)
+                s.id to sharedScale
             } else {
                 val f = s.values.filterNotNull().filter { it.isFinite() }
                 val sMin = f.minOrNull() ?: 0.0
@@ -769,16 +784,21 @@ fun MultiSeriesLineChart(
         }
     }
 
-    val primaryScale = remember(visibleSeries, seriesScales, rawLo, rawHi) {
+    val primaryScale = remember(visibleSeries, seriesScales, sharedScale) {
         visibleSeries.firstOrNull { it.unit == "kg" }?.let { seriesScales[it.id] }
             ?: seriesScales.values.firstOrNull()
-            ?: SeriesScale(rawLo, rawHi, (rawHi - rawLo).takeIf { it > 1e-9 } ?: 1.0)
+            ?: sharedScale
     }
 
-    val yTicksLo = if (independentScale) primaryScale.lo else rawLo
-    val yTicksHi = if (independentScale) primaryScale.hi else rawHi
+    val yTicksLo = if (independentScale) primaryScale.lo else sharedScale.lo
+    val yTicksHi = if (independentScale) primaryScale.hi else sharedScale.hi
     val yTicksSpan = (yTicksHi - yTicksLo).takeIf { it > 1e-9 } ?: 1.0
-    val yDecimals = if (primaryUnit == "kg" || primaryUnit == "lb" || yTicksSpan <= 4.0) 2 else 1
+    val yDecimals = when {
+        primaryUnit == "kg" || primaryUnit == "lb" -> if (yTicksSpan <= 5.0) 2 else 1
+        yTicksSpan <= 4.0 -> 2
+        primaryUnit == "bpm" || primaryUnit == "ms" || primaryUnit == "b." -> 0
+        else -> 1
+    }
 
     val gridColor = Color.White.copy(alpha = 0.09f)
     val cursorColor = Color(0xFFE2E8F0)
@@ -899,7 +919,7 @@ fun MultiSeriesLineChart(
                     }
                 }
 
-                if (allFinite.size < 2 || maxPoints < 2) {
+                if (allFinite.isEmpty() || maxPoints < 1) {
                     Box(
                         Modifier
                             .fillMaxWidth()
@@ -907,7 +927,7 @@ fun MultiSeriesLineChart(
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            "Pro zobrazení křivek jsou potřeba alespoň 2 datové body.",
+                            "Zatím bez naměřených dat ve zvoleném období.",
                             style = MaterialTheme.typography.bodySmall,
                             color = Color(0xFF94A3B8)
                         )
@@ -945,24 +965,39 @@ fun MultiSeriesLineChart(
                                 .height(195.dp)
                                 .padding(vertical = 6.dp)
                                 .pointerInput(maxPoints) {
-                                    fun idx(x: Float) = ((x / size.width) * (maxPoints - 1)).toInt().coerceIn(0, maxPoints - 1)
+                                    fun idx(xPx: Float): Int {
+                                        if (maxPoints <= 1) return 0
+                                        val padX = 12f
+                                        val chartW = (size.width - padX * 2).coerceAtLeast(10f)
+                                        val frac = ((xPx - padX) / chartW).coerceIn(0f, 1f)
+                                        return kotlin.math.round(frac * (maxPoints - 1)).toInt().coerceIn(0, maxPoints - 1)
+                                    }
                                     detectTapGestures { offset ->
                                         val tapped = idx(offset.x)
                                         selectedIdx = if (selectedIdx == tapped) null else tapped
                                     }
                                 }
                                 .pointerInput(maxPoints) {
-                                    fun idx(x: Float) = ((x / size.width) * (maxPoints - 1)).toInt().coerceIn(0, maxPoints - 1)
+                                    fun idx(xPx: Float): Int {
+                                        if (maxPoints <= 1) return 0
+                                        val padX = 12f
+                                        val chartW = (size.width - padX * 2).coerceAtLeast(10f)
+                                        val frac = ((xPx - padX) / chartW).coerceIn(0f, 1f)
+                                        return kotlin.math.round(frac * (maxPoints - 1)).toInt().coerceIn(0, maxPoints - 1)
+                                    }
                                     detectDragGestures(
                                         onDragStart = { o -> selectedIdx = idx(o.x) },
                                         onDrag = { change, _ -> selectedIdx = idx(change.position.x) }
                                     )
                                 }
                         ) {
+                            val padX = 12f
                             val padY = 10f
+                            val chartW = (size.width - padX * 2).coerceAtLeast(10f)
                             val chartH = (size.height - padY * 2).coerceAtLeast(10f)
 
-                            fun x(i: Int, count: Int) = size.width * i / (count - 1).coerceAtLeast(1)
+                            fun x(i: Int, count: Int) =
+                                if (count <= 1) padX + chartW / 2f else padX + chartW * i / (count - 1)
 
                             // Mřížka (5 úrovní zarovnaných s osou Y)
                             for (step in 0..4) {
@@ -982,7 +1017,19 @@ fun MultiSeriesLineChart(
                                 val style = seriesStyles[s.id]
                                 val marker = style?.marker ?: SeriesMarker.CIRCLE
                                 if (pts.size == 1) {
-                                    drawSeriesMarker(marker, s.color, Offset(x(pts[0].first, count), yVal(pts[0].second)), 6f)
+                                    val ptCenter = Offset(x(pts[0].first, count), yVal(pts[0].second))
+                                    // Jemná vodorovná vodící čára, aby šla hodnota jediného měření snadno odečíst na ose Y
+                                    drawLine(
+                                        color = s.color.copy(alpha = 0.28f),
+                                        start = Offset(padX, ptCenter.y),
+                                        end = Offset(size.width - padX, ptCenter.y),
+                                        strokeWidth = 2f,
+                                        pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(10f, 8f), 0f)
+                                    )
+                                    drawCircle(s.color.copy(alpha = 0.30f), radius = 15f, center = ptCenter)
+                                    drawCircle(Color(0xFF070C15), radius = 9.5f, center = ptCenter)
+                                    drawSeriesMarker(marker, s.color, ptCenter, 7f)
+                                    drawCircle(Color.White.copy(alpha = 0.94f), radius = 2.6f, center = ptCenter)
                                     continue
                                 }
 

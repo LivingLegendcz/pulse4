@@ -125,6 +125,7 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import app.pulse4.android.data.MapProvider
+import app.pulse4.android.data.effectiveMovingTimeS
 import app.pulse4.android.data.toRow
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -484,7 +485,8 @@ data class TodayDashboardBundle(
 @Composable
 private fun WidgetOrderReorderDialog(
     initialOrder: List<String>,
-    onSave: (List<String>) -> Unit,
+    initialShowAll: Boolean,
+    onSave: (List<String>, Boolean) -> Unit,
     onDismiss: () -> Unit
 ) {
     val defaultOrder = listOf("sleep", "bb", "hrv", "rhr", "stress", "steps", "weight", "ecg")
@@ -503,6 +505,7 @@ private fun WidgetOrderReorderDialog(
         defaultOrder.forEach { if (!complete.contains(it)) complete.add(it) }
         mutableStateOf(complete.toList())
     }
+    var showAll by remember { mutableStateOf(initialShowAll) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -513,7 +516,7 @@ private fun WidgetOrderReorderDialog(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Outlined.Tune, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(20.dp))
                 Spacer(Modifier.width(8.dp))
-                Text("Pořadí widgetů na Dnes", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
+                Text("Nastavení widgetů na Dnes", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
             }
         },
         text = {
@@ -522,11 +525,45 @@ private fun WidgetOrderReorderDialog(
                     .fillMaxWidth()
                     .verticalScroll(rememberScrollState())
             ) {
+                Card(
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, Color(0xFF38BDF8).copy(alpha = 0.35f)),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF131722)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 12.dp)
+                ) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(Modifier.weight(1f).padding(end = 10.dp)) {
+                            Text(
+                                "Zobrazit všechny karty",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                            Text(
+                                "Když je vypnuto, zobrazují se jen karty vybraného pilíře.",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFF94A3B8)
+                            )
+                        }
+                        androidx.compose.material3.Switch(
+                            checked = showAll,
+                            onCheckedChange = { showAll = it }
+                        )
+                    }
+                }
                 Text(
                     "Měňte pořadí karet pomocí šipek nahoru a dolů. Změny se okamžitě projeví na obrazovce Dnes.",
                     style = MaterialTheme.typography.bodySmall,
                     color = Color(0xFF94A3B8),
-                    modifier = Modifier.padding(bottom = 12.dp)
+                    modifier = Modifier.padding(bottom = 10.dp)
                 )
                 currentOrder.forEachIndexed { idx, key ->
                     val meta = widgetMeta[key] ?: (key to "")
@@ -623,13 +660,13 @@ private fun WidgetOrderReorderDialog(
             }
         },
         confirmButton = {
-            Button(onClick = { onSave(currentOrder); onDismiss() }) {
-                Text("Uložit pořadí")
+            Button(onClick = { onSave(currentOrder, showAll); onDismiss() }) {
+                Text("Uložit")
             }
         },
         dismissButton = {
             Row {
-                TextButton(onClick = { currentOrder = defaultOrder }) {
+                TextButton(onClick = { currentOrder = defaultOrder; showAll = true }) {
                     Text("Obnovit výchozí", color = Color(0xFF94A3B8))
                 }
                 TextButton(onClick = onDismiss) {
@@ -662,7 +699,7 @@ fun TodayScreen(
     var showReorderDialog by remember { mutableStateOf(false) }
     var currentWidgetOrder by remember { mutableStateOf(sl.settings.todayWidgetOrder) }
     var selectedPillar by remember { mutableStateOf(OuraPillar.READINESS) }
-    var showAllWidgets by remember { mutableStateOf(false) }
+    val showAllWidgets by sl.settings.showAllTodayWidgetsFlow.collectAsState()
 
     // `null` until Room delivers the first emission, so the dashboard is not recomputed once for the empty
     // placeholder and again for the real list.
@@ -972,8 +1009,12 @@ fun TodayScreen(
         if (showReorderDialog) {
             WidgetOrderReorderDialog(
                 initialOrder = currentWidgetOrder,
-                onSave = { newOrder ->
-                    scope.launch(Dispatchers.IO) { sl.settings.todayWidgetOrder = newOrder }
+                initialShowAll = showAllWidgets,
+                onSave = { newOrder, newShowAll ->
+                    scope.launch(Dispatchers.IO) {
+                        sl.settings.todayWidgetOrder = newOrder
+                        sl.settings.showAllTodayWidgets = newShowAll
+                    }
                     currentWidgetOrder = newOrder
                 },
                 onDismiss = { showReorderDialog = false }
@@ -996,13 +1037,21 @@ fun TodayScreen(
             }
         }
 
-        val ouraPillarStates = remember(seriesByType, sleepScore, loaded.latestWeightObs, loaded.latestEcgObs) {
+        val todayActivities = remember(recentActs, today, sl.settings.zoneId) {
+            val z = runCatching { ZoneId.of(sl.settings.zoneId) }.getOrDefault(ZoneId.systemDefault())
+            filterTopLevelActivities(recentActs).filter { act ->
+                java.time.Instant.ofEpochMilli(act.startUtcMs).atZone(z).toLocalDate() == today
+            }
+        }
+
+        val ouraPillarStates = remember(seriesByType, sleepScore, loaded.latestWeightObs, loaded.latestEcgObs, todayActivities) {
             OuraScoreCalculator.calculate(
                 seriesByType = seriesByType,
                 todaySleepScore = sleepScore,
                 latestWeightObs = loaded.latestWeightObs,
                 latestEcgObs = loaded.latestEcgObs,
-                fmt = fmt
+                fmt = fmt,
+                todayActivities = todayActivities
             )
         }
 
@@ -1105,7 +1154,10 @@ fun TodayScreen(
                     modifier = Modifier
                         .clip(RoundedCornerShape(10.dp))
                         .background(if (showAllWidgets) selectedPillar.primaryColor.copy(alpha = 0.20f) else Color(0xFF101A28))
-                        .clickable { showAllWidgets = !showAllWidgets }
+                        .clickable {
+                            val next = !showAllWidgets
+                            scope.launch(Dispatchers.IO) { sl.settings.showAllTodayWidgets = next }
+                        }
                         .padding(horizontal = 10.dp, vertical = 5.dp)
                 ) {
                     Text(
@@ -6188,7 +6240,7 @@ fun ActivitiesScreen(
                     startUtcMs = row.startUtcMs,
                     localDate = localDateStr,
                     distanceM = row.distanceM,
-                    movingTimeS = row.movingTimeS,
+                    movingTimeS = row.effectiveMovingTimeS(),
                     ascentM = row.ascentM,
                     avgHeartRate = row.avgHeartRate,
                     maxHeartRate = row.maxHeartRate,
@@ -6214,7 +6266,7 @@ fun ActivitiesScreen(
                     startUtcMs = p.startUtcMs,
                     localDate = p.localDate,
                     distanceM = p.distanceM,
-                    movingTimeS = p.movingTimeS ?: p.totalTimeS,
+                    movingTimeS = p.movingTimeS?.takeIf { it > 0.0 } ?: p.totalTimeS,
                     ascentM = p.ascentM,
                     avgHeartRate = p.avgHeartRate,
                     maxHeartRate = null
@@ -7556,8 +7608,8 @@ fun loadUnifiedActivity(sl: ServiceLocator, key: String): LoadedActivityDetail? 
             isShared = true,
             startUtcMs = p.startUtcMs,
             localDate = p.localDate,
-            totalTimeS = p.totalTimeS ?: p.movingTimeS ?: 0.0,
-            movingTimeS = p.movingTimeS ?: p.totalTimeS ?: 0.0,
+            totalTimeS = p.totalTimeS?.takeIf { it > 0.0 } ?: p.movingTimeS ?: 0.0,
+            movingTimeS = p.movingTimeS?.takeIf { it > 0.0 } ?: p.totalTimeS ?: 0.0,
             distanceM = p.distanceM,
             ascentM = p.ascentM,
             avgHeartRate = p.avgHeartRate,
@@ -7621,7 +7673,7 @@ fun loadUnifiedActivity(sl: ServiceLocator, key: String): LoadedActivityDetail? 
             startUtcMs = a.startUtcMs,
             localDate = java.time.Instant.ofEpochMilli(a.startUtcMs).atZone(ZoneId.of(a.zoneId)).toLocalDate().toString(),
             totalTimeS = a.totalTimeS,
-            movingTimeS = a.movingTimeS ?: a.totalTimeS,
+            movingTimeS = a.movingTimeS?.takeIf { it > 0.0 } ?: a.totalTimeS,
             distanceM = a.distanceM,
             ascentM = a.ascentM,
             avgHeartRate = a.avgHeartRate,
@@ -8349,7 +8401,7 @@ fun ActivityDetailScreen(sl: ServiceLocator, id: String, onBack: () -> Unit = {}
                             val legTitle = leg.title?.takeIf { it.isNotBlank() } ?: legSport.czechName()
                             val legDetails = buildList {
                                 leg.distanceM?.takeIf { it > 0 }?.let { add(fmt.km(it)) }
-                                leg.movingTimeS?.takeIf { it > 0 }?.let { add(fmt.duration(it)) }
+                                leg.effectiveMovingTimeS()?.takeIf { it > 0 }?.let { add(fmt.duration(it)) }
                                 leg.avgHeartRate?.let { add("$it bpm") }
                                 leg.ascentM?.takeIf { it > 0 }?.let { add("+${fmt.elevation(it)}") }
                             }.joinToString(" · ")

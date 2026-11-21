@@ -42,24 +42,37 @@ object ActivityMath {
         if (points.size < 2) return ActivitySummary(0.0, 0.0, 0.0, 0.0, 0.0, null)
         val total = (points.last().tMs - points.first().tMs) / 1000.0
         var moving = 0.0
+        var activeNoMotion = 0.0
+        var hasGps = false
+        var hasPositiveMotion = false
         var movingWithDistance = 0.0
         var dist = 0.0
         var prev = points.first()
+        if (prev.lat != null && prev.lon != null) hasGps = true
         for (i in 1 until points.size) {
             val p = points[i]
+            if (p.lat != null && p.lon != null) hasGps = true
             val dt = (p.tMs - prev.tMs) / 1000.0
             if (dt <= 0.0) { prev = p; continue }
             val d = segmentDistance(prev, p)
+            if (d != null && d > 0.0) hasPositiveMotion = true
             // Mezera nad limitem je pauza (zastavení záznamu), nepočítá se ani do pohybu, ani do vzdálenosti.
             if (dt <= def.maxGapS) {
+                activeNoMotion += dt
                 val speed = p.speedMps ?: (d?.let { it / dt })
-                if (speed != null && speed >= def.movingSpeedMps) {
-                    moving += dt
-                    if (d != null) { dist += d; movingWithDistance += dt }
+                if (speed != null) {
+                    if (speed > 0.0) hasPositiveMotion = true
+                    if (speed >= def.movingSpeedMps) {
+                        moving += dt
+                        if (d != null) { dist += d; movingWithDistance += dt }
+                    }
                 }
             }
             prev = p
         }
+        // Indoor aktivity bez GPS a bez jakéhokoli signálu rychlosti/vzdálenosti (kardio, silový trénink, HIIT…) –
+        // hodinky často zapisují distance=0 a speed=0 na každý bod; aktivní čas bez pauz pak odpovídá času pohybu.
+        if (!hasGps && !hasPositiveMotion) moving = activeNoMotion
         val (asc, desc) = elevationChange(points.mapNotNull { it.elevationM }, def.ascentHysteresisM)
         // Tempo jen z úseků, které mají známou vzdálenost; pohyb bez polohy ho nezkresluje.
         val pace = if (movingWithDistance > 0 && dist > 0) movingWithDistance / (dist / 1000.0) else null

@@ -74,7 +74,7 @@ fun app.pulse4.domain.Activity.toRow(jsonString: String): ActivityRow = Activity
     json = jsonString,
     title = this.title?.takeIf { it.isNotBlank() } ?: this.sport.czechName(),
     distanceM = this.distanceM,
-    movingTimeS = this.movingTimeS ?: this.totalTimeS,
+    movingTimeS = this.movingTimeS?.takeIf { it > 0.0 } ?: this.totalTimeS,
     ascentM = this.ascentM,
     avgHeartRate = this.avgHeartRate,
     maxHeartRate = this.maxHeartRate,
@@ -86,6 +86,20 @@ fun app.pulse4.domain.Activity.toRow(jsonString: String): ActivityRow = Activity
     avgCadence = this.avgCadence,
     zoneId = this.zoneId
 )
+
+/**
+ * Vrátí reálný čas pohybu aktivity. U dříve naimportovaných indoor aktivit (kardio, silový trénink, HIIT),
+ * kde Garmin poslal `movingDuration = 0.0`, doplní celkový čas tréninku z uloženého JSONu.
+ */
+fun ActivitySummaryRow.effectiveMovingTimeS(): Double? {
+    val direct = movingTimeS
+    if (direct != null && direct > 0.0) return direct
+    val raw = json ?: return direct
+    val dom = runCatching {
+        app.pulse4.sync.Wire.json.decodeFromString(app.pulse4.domain.Activity.serializer(), raw)
+    }.getOrNull() ?: return direct
+    return dom.movingTimeS?.takeIf { it > 0.0 } ?: dom.totalTimeS.takeIf { it > 0.0 } ?: direct
+}
 
 @Entity(tableName = "track")
 data class TrackRow(@PrimaryKey val activityId: String, val json: String)

@@ -104,6 +104,7 @@ import app.pulse4.android.R
 import app.pulse4.android.ui.theme.JetBrainsMonoFamily
 import app.pulse4.android.data.ContactRow
 import app.pulse4.android.data.ReceivedRow
+import app.pulse4.android.data.effectiveMovingTimeS
 import app.pulse4.android.data.toDomain
 import app.pulse4.android.di.ConsentUiState
 import app.pulse4.android.di.ServiceLocator
@@ -1312,13 +1313,19 @@ private fun GroupMetricsComparisonSection(
                 }
             } else {
                 val memberRows = receivedDaily.filter { it.author == memberId }
-                val byDate = memberRows.mapNotNull { r ->
-                    runCatching { Wire.json.decodeFromString(SharedProjection.serializer(), r.payload) }.getOrNull()
-                }.associateBy { it.date }
+                // Sloučení více projekcí téhož dne (např. z různých grantů), aby novější nepřepsala pole starší.
+                val byDateFields = HashMap<String, MutableMap<Field, Double>>()
+                for (r in memberRows) {
+                    val sp = runCatching { Wire.json.decodeFromString(SharedProjection.serializer(), r.payload) }.getOrNull() ?: continue
+                    val dayMap = byDateFields.getOrPut(sp.date) { HashMap() }
+                    for ((field, elem) in sp.fields) {
+                        val v = (elem as? JsonPrimitive)?.doubleOrNull ?: continue
+                        if (v.isFinite()) dayMap[field] = v
+                    }
+                }
 
                 datesAxis.map { d ->
-                    val sp = byDate[d]
-                    val raw = (sp?.fields?.get(activeField) as? JsonPrimitive)?.doubleOrNull
+                    val raw = byDateFields[d]?.get(activeField)
                     when (activeField) {
                         Field.SLEEP_DURATION -> raw?.div(3600.0)
                         Field.WEIGHT -> raw?.let(fmt::convertWeight)
@@ -1390,36 +1397,55 @@ private fun GroupMetricsComparisonSection(
             }
         }
 
-        // Společný Grafana MultiSeries graf členů skupiny
+        // Společný Grafana MultiSeries graf členů skupiny – výchozí je společná osa (skutečné naměřené hodnoty)
         MultiSeriesLineChart(
             series = multiSeries,
             xLabels = datesAxis.map { it.takeLast(5) },
             title = "$groupTitle · ${windowDays} dní",
-            infoKey = ChartKey.GROUP_COMPARE
+            infoKey = ChartKey.GROUP_COMPARE,
+            defaultIndependentScale = false
         )
 
         Spacer(Modifier.height(10.dp))
-        SectionTitle("Žebříček a statistiky členů kruhu (${participantIds.size})", icon = Icons.Outlined.EmojiEvents)
+        val isRanked = isRankedGroupField(activeField)
+        SectionTitle(
+            if (isRanked) "Žebříček a statistiky členů kruhu (${participantIds.size})"
+            else "Přehled hodnot členů kruhu (${participantIds.size})",
+            icon = if (isRanked) Icons.Outlined.EmojiEvents else Icons.Outlined.People
+        )
 
-        val rankedParticipants = remember(participantIds, multiSeries, activeField) {
-            participantIds.mapIndexed { idx, memberId ->
+        val orderedParticipants = remember(participantIds, multiSeries, activeField, contacts, meId, isRanked) {
+            val items = participantIds.mapIndexed { idx, memberId ->
                 val seriesItem = multiSeries.firstOrNull { it.id == memberId }
                 val finiteVals = seriesItem?.values?.filterNotNull().orEmpty()
                 val latestVal = finiteVals.lastOrNull()
                 val avgVal = if (finiteVals.isNotEmpty()) finiteVals.average() else null
                 Triple(idx, memberId, Pair(latestVal, avgVal))
-            }.sortedWith(
-                compareByDescending<Triple<Int, String, Pair<Double?, Double?>>> { it.third.first != null }
-                    .thenBy {
-                        val v = it.third.first ?: 0.0
-                        if (activeField == Field.HR_DAILY) v else -v
-                    }
-            )
+            }
+            if (isRanked) {
+                items.sortedWith(
+                    compareByDescending<Triple<Int, String, Pair<Double?, Double?>>> { it.third.first != null }
+                        .thenBy {
+                            val v = it.third.first ?: 0.0
+                            if (activeField == Field.HR_DAILY) v else -v
+                        }
+                )
+            } else {
+                // U tělesných / individuálních metrik (např. váha) bez pořadí: nejdřív Já, pak podle jména.
+                items.sortedWith(
+                    compareByDescending<Triple<Int, String, Pair<Double?, Double?>>> { it.second == meId }
+                        .thenByDescending { it.third.first != null }
+                        .thenBy { (_, id, _) ->
+                            (contacts.firstOrNull { it.identity == id }?.displayName ?: id).lowercase()
+                        }
+                )
+            }
         }
 
-        rankedParticipants.forEachIndexed { rankIdx, (origIdx, memberId, stats) ->
+        orderedParticipants.forEachIndexed { rankIdx, (origIdx, memberId, stats) ->
             val isMe = memberId == meId
             val contact = contacts.firstOrNull { it.identity == memberId }
+            val displayShort = if (isMe) "Já" else contact?.displayName ?: memberId.take(8)
             val memberName = if (isMe) "Já (vlastník)" else contact?.displayName ?: (memberId.take(8) + "…")
             val memberColor = palette[origIdx % palette.size]
             val seriesItem = multiSeries.firstOrNull { it.id == memberId }
@@ -1455,6 +1481,11 @@ private fun GroupMetricsComparisonSection(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                            val badgeText = when {
+                                isRanked -> if (latestVal != null) "#${rankIdx + 1}" else "—"
+                                isMe -> "Já"
+                                else -> memberInitials(displayShort)
+                            }
                             Box(
                                 modifier = Modifier
                                     .size(34.dp)
@@ -1462,7 +1493,7 @@ private fun GroupMetricsComparisonSection(
                                 contentAlignment = Alignment.Center
                             ) {
                                 Text(
-                                    "#${rankIdx + 1}",
+                                    badgeText,
                                     style = MaterialTheme.typography.labelMedium,
                                     fontFamily = JetBrainsMonoFamily,
                                     fontWeight = FontWeight.ExtraBold,
@@ -1503,8 +1534,9 @@ private fun GroupMetricsComparisonSection(
                                 color = if (latestVal != null) memberColor else Color(0xFF64748B)
                             )
                             if (avgVal != null && finiteVals.size >= 2) {
+                                val rangeDecimals = if (activeField == Field.WEIGHT || activeField == Field.SLEEP_DURATION) 1 else 0
                                 Text(
-                                    "Ø ${formatGroupFieldValue(activeField, avgVal)} · ${fmt.number(finiteVals.min(), 0)}–${fmt.number(finiteVals.max(), 0)}",
+                                    "Ø ${formatGroupFieldValue(activeField, avgVal)} · ${fmt.number(finiteVals.min(), rangeDecimals)}–${fmt.number(finiteVals.max(), rangeDecimals)}",
                                     style = MaterialTheme.typography.labelSmall,
                                     fontFamily = JetBrainsMonoFamily,
                                     color = Color(0xFFCBD5E1),
@@ -1517,6 +1549,23 @@ private fun GroupMetricsComparisonSection(
             }
         }
         Spacer(Modifier.height(16.dp))
+    }
+}
+
+/**
+ * Určuje, zda u dané metriky dává smysl řadit členy kruhu do soutěžního žebříčku (#1, #2, …).
+ * Váha a další metriky tělesné kompozice znamenají pro každého člověka něco jiného,
+ * proto se zobrazují jen jako neutrální přehled bez pořadí.
+ */
+internal fun isRankedGroupField(field: Field): Boolean =
+    field.category != app.pulse4.sharing.Category.BODY_COMPOSITION
+
+private fun memberInitials(name: String): String {
+    val parts = name.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
+    return when {
+        parts.isEmpty() -> "?"
+        parts.size == 1 -> parts[0].take(2).uppercase()
+        else -> "${parts[0].first()}${parts[1].first()}".uppercase()
     }
 }
 
@@ -1571,7 +1620,7 @@ private fun GroupSharedActivitiesSection(
                     startUtcMs = p.startUtcMs,
                     localDate = p.localDate,
                     distanceM = p.distanceM,
-                    movingTimeS = p.movingTimeS ?: p.totalTimeS,
+                    movingTimeS = p.movingTimeS?.takeIf { it > 0.0 } ?: p.totalTimeS,
                     ascentM = p.ascentM,
                     avgHeartRate = p.avgHeartRate,
                     maxHeartRate = null
@@ -1592,7 +1641,7 @@ private fun GroupSharedActivitiesSection(
                         startUtcMs = row.startUtcMs,
                         localDate = Instant.ofEpochMilli(row.startUtcMs).atZone(zone).toLocalDate().toString(),
                         distanceM = row.distanceM,
-                        movingTimeS = row.movingTimeS,
+                        movingTimeS = row.effectiveMovingTimeS(),
                         ascentM = row.ascentM,
                         avgHeartRate = row.avgHeartRate,
                         maxHeartRate = row.maxHeartRate,
@@ -1612,7 +1661,7 @@ private fun GroupSharedActivitiesSection(
                         startUtcMs = a.startUtcMs,
                         localDate = Instant.ofEpochMilli(a.startUtcMs).atZone(zone).toLocalDate().toString(),
                         distanceM = a.distanceM,
-                        movingTimeS = a.movingTimeS ?: a.totalTimeS,
+                        movingTimeS = a.movingTimeS?.takeIf { it > 0.0 } ?: a.totalTimeS,
                         ascentM = a.ascentM,
                         avgHeartRate = a.avgHeartRate,
                         maxHeartRate = a.maxHeartRate,

@@ -650,8 +650,13 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
                 else dbl("beginTimestamp")?.toLong()
             }.getOrNull() ?: nowMs
 
-            val dur = dbl("duration") ?: dbl("elapsedDuration") ?: parsed?.totalTimeS ?: 0.0
-            val moving = dbl("movingDuration") ?: parsed?.movingTimeS ?: dur
+            val dur = dbl("duration")?.takeIf { it > 0.0 }
+                ?: dbl("elapsedDuration")?.takeIf { it > 0.0 }
+                ?: parsed?.totalTimeS?.takeIf { it > 0.0 }
+                ?: 0.0
+            val moving = dbl("movingDuration")?.takeIf { it > 0.0 }
+                ?: parsed?.movingTimeS?.takeIf { it > 0.0 }
+                ?: dur
             val dist = dbl("distance") ?: parsed?.distanceM
             val ascent = dbl("elevationGain") ?: parsed?.ascentM
             val descent = dbl("elevationLoss") ?: parsed?.descentM
@@ -914,7 +919,9 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
                         } else {
                             val firstSession = parsed.sessions.first()
                             val totalTimeS = parsed.sessions.sumOf { it.totalTimeS }
-                            val movingTimeS = parsed.sessions.mapNotNull { it.movingTimeS }.takeIf { it.isNotEmpty() }?.sum()
+                            val movingTimeS = parsed.sessions.mapNotNull {
+                                it.movingTimeS?.takeIf { m -> m > 0.0 } ?: it.totalTimeS.takeIf { t -> t > 0.0 }
+                            }.takeIf { it.isNotEmpty() }?.sum()
                             val distanceM = parsed.sessions.mapNotNull { it.distanceM }.takeIf { it.isNotEmpty() }?.sum()
                             val ascentM = parsed.sessions.mapNotNull { it.ascentM }.takeIf { it.isNotEmpty() }?.sum()
                             val descentM = parsed.sessions.mapNotNull { it.descentM }.takeIf { it.isNotEmpty() }?.sum()
@@ -928,7 +935,7 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
                                 startUtcMs = firstSession.startMs,
                                 zoneId = zoneId,
                                 totalTimeS = totalTimeS,
-                                movingTimeS = movingTimeS ?: totalTimeS,
+                                movingTimeS = movingTimeS?.takeIf { it > 0.0 } ?: totalTimeS,
                                 distanceM = distanceM,
                                 ascentM = ascentM,
                                 descentM = descentM,
@@ -1054,7 +1061,9 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
         ): Activity {
             val first = legs.first()
             val totalTimeS = legs.sumOf { it.totalTimeS }
-            val movingTimeS = legs.mapNotNull { it.movingTimeS }.takeIf { it.isNotEmpty() }?.sum() ?: totalTimeS
+            val movingTimeS = legs.mapNotNull {
+                it.movingTimeS?.takeIf { m -> m > 0.0 } ?: it.totalTimeS.takeIf { t -> t > 0.0 }
+            }.takeIf { it.isNotEmpty() }?.sum()?.takeIf { it > 0.0 } ?: totalTimeS
             val distanceM = legs.mapNotNull { it.distanceM }.takeIf { it.isNotEmpty() }?.sum()
             val ascentM = legs.mapNotNull { it.ascentM }.takeIf { it.isNotEmpty() }?.sum()
             val descentM = legs.mapNotNull { it.descentM }.takeIf { it.isNotEmpty() }?.sum()
@@ -2013,7 +2022,7 @@ class ImportService(private val context: Context, private val sl: ServiceLocator
                             id = item.id,
                             title = a.title?.takeIf { it.isNotBlank() } ?: a.sport.czechName(),
                             distanceM = a.distanceM,
-                            movingTimeS = a.movingTimeS ?: a.totalTimeS,
+                            movingTimeS = a.movingTimeS?.takeIf { it > 0.0 } ?: a.totalTimeS,
                             ascentM = a.ascentM,
                             avgHeartRate = a.avgHeartRate,
                             maxHeartRate = a.maxHeartRate,

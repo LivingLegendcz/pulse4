@@ -214,11 +214,14 @@ object FitImporter {
                 }
 
                 val computed = ActivityMath.summarize(scaledPoints)
+                val totalTimeS = s?.totalElapsedTime?.toDouble()?.takeIf { it > 0.0 } ?: computed.totalTimeS
                 return ParsedFit(
                     sport = mappedSport,
                     startMs = start,
-                    totalTimeS = s?.totalElapsedTime?.toDouble() ?: computed.totalTimeS,
-                    movingTimeS = s?.totalTimerTime?.toDouble() ?: computed.movingTimeS.takeIf { scaledPoints.size > 1 },
+                    totalTimeS = totalTimeS,
+                    movingTimeS = s?.totalTimerTime?.toDouble()?.takeIf { it > 0.0 }
+                        ?: computed.movingTimeS.takeIf { it > 0.0 && scaledPoints.size > 1 }
+                        ?: totalTimeS.takeIf { it > 0.0 },
                     distanceM = s?.totalDistance?.toDouble() ?: computed.distanceM.takeIf { it > 0 },
                     ascentM = s?.totalAscent?.toDouble() ?: computed.ascentM.takeIf { scaledPoints.any { p -> p.elevationM != null } },
                     avgHeartRate = s?.avgHeartRate?.toInt() ?: scaledPoints.mapNotNull { it.heartRate }.takeIf { it.isNotEmpty() }?.average()?.toInt(),

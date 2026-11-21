@@ -24,6 +24,36 @@ class AnalyticsTest {
         assertEquals(20.0 / (s.distanceM / 1000.0), pace, 1e-6) // úsek bez vzdálenosti tempo nezkresluje
     }
 
+    @Test fun `indoor cardio without gps or speed counts non-gap active time as moving time`() {
+        val pts = listOf(
+            TrackPoint(0, null, null, heartRate = 128),
+            TrackPoint(10_000, null, null, heartRate = 142),
+            TrackPoint(20_000, null, null, heartRate = 150),
+            TrackPoint(80_000, null, null, heartRate = 115), // 60 s pauza (> 15 s)
+            TrackPoint(90_000, null, null, heartRate = 148),
+        )
+        val s = ActivityMath.summarize(pts)
+        assertEquals(90.0, s.totalTimeS, 1e-9)
+        assertEquals(30.0, s.movingTimeS, 1e-9)
+        assertEquals(0.0, s.distanceM, 1e-9)
+        assertNull(s.avgPaceSPerKm)
+    }
+
+    @Test fun `indoor cardio with constant zero speed and distance still counts active time as moving time`() {
+        val pts = listOf(
+            TrackPoint(0, null, null, heartRate = 132, speedMps = 0.0, distanceM = 0.0),
+            TrackPoint(10_000, null, null, heartRate = 145, speedMps = 0.0, distanceM = 0.0),
+            TrackPoint(20_000, null, null, heartRate = 154, speedMps = 0.0, distanceM = 0.0),
+            TrackPoint(80_000, null, null, heartRate = 120, speedMps = 0.0, distanceM = 0.0), // 60 s pauza
+            TrackPoint(90_000, null, null, heartRate = 151, speedMps = 0.0, distanceM = 0.0),
+        )
+        val s = ActivityMath.summarize(pts)
+        assertEquals(90.0, s.totalTimeS, 1e-9)
+        assertEquals(30.0, s.movingTimeS, 1e-9)
+        assertEquals(0.0, s.distanceM, 1e-9)
+        assertNull(s.avgPaceSPerKm)
+    }
+
     @Test fun `elevation hysteresis ignores sensor noise`() {
         val noisy = listOf(100.0, 100.8, 100.2, 101.0, 100.5, 100.9)
         assertEquals(0.0 to 0.0, ActivityMath.elevationChange(noisy, 3.0))

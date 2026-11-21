@@ -16,6 +16,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -54,6 +55,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -68,6 +70,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -78,10 +81,12 @@ import androidx.compose.ui.unit.sp
 import app.pulse4.android.R
 import app.pulse4.android.data.ActivitySummaryRow
 import app.pulse4.android.data.ContactRow
+import app.pulse4.android.data.effectiveMovingTimeS
 import app.pulse4.android.di.ServiceLocator
 import app.pulse4.domain.MetricObservation
 import app.pulse4.domain.MetricType
 import app.pulse4.domain.Sport
+import app.pulse4.domain.czechName
 import app.pulse4.ui.Fmt
 import app.pulse4.ui.MetricSeries
 import java.time.LocalTime
@@ -95,7 +100,6 @@ import kotlin.math.sin
 enum class OuraPillar(
     val title: String,
     val shortTitle: String,
-    val subtitle: String,
     val primaryColor: Color,
     val secondaryColor: Color,
     val glowColor: Color,
@@ -107,7 +111,6 @@ enum class OuraPillar(
     READINESS(
         title = "Připravenost",
         shortTitle = "Připravenost",
-        subtitle = "Polární záře · Autonomní nervový systém & obnova",
         primaryColor = Color(0xFF2DD4BF),    // Electric Opal / Teal
         secondaryColor = Color(0xFF38BDF8),  // Glacier Cyan
         glowColor = Color(0xFF0D9488),
@@ -119,7 +122,6 @@ enum class OuraPillar(
     SLEEP(
         title = "Spánek",
         shortTitle = "Spánek",
-        subtitle = "Noční kosmos · Cirkadiánní architektura & hypnogram",
         primaryColor = Color(0xFF818CF8),    // Indigo
         secondaryColor = Color(0xFFC084FC),  // Cosmic Violet
         glowColor = Color(0xFF4F46E5),
@@ -131,7 +133,6 @@ enum class OuraPillar(
     ACTIVITY(
         title = "Aktivita",
         shortTitle = "Aktivita",
-        subtitle = "Alpský hřeben · Pohyb, zátěž & tréninkový impuls",
         primaryColor = Color(0xFFF59E0B),    // Solar Amber
         secondaryColor = Color(0xFFFB7185),  // Coral Ember
         glowColor = Color(0xFFD97706),
@@ -143,7 +144,6 @@ enum class OuraPillar(
     BODY(
         title = "Tělo & Cévy",
         shortTitle = "Tělo",
-        subtitle = "Bioluminiscence · Bioimpedance, tepny & EKG",
         primaryColor = Color(0xFF38BDF8),    // Glacier Blue
         secondaryColor = Color(0xFF2DD4BF),  // Jade
         glowColor = Color(0xFF0284C7),
@@ -171,6 +171,16 @@ data class OuraContributor(
     val note: String? = null
 )
 
+data class ActivityProgressBreakdown(
+    /** Body za dnešní kroky: 10 000 kroků = 60 b., nad 10 000 bonus až +10 b. (max 70 b.). */
+    val stepsPoints: Int,
+    /** Body za dnešní aktivity dle fyziologické náročnosti (max 50 b.; dýchání/relax max 0–1 b.). */
+    val activitiesPoints: Int,
+    val stepsCount: Int?,
+    val activityCount: Int,
+    val totalScore: Int,
+)
+
 data class OuraPillarState(
     val pillar: OuraPillar,
     val score: Int?,
@@ -179,7 +189,13 @@ data class OuraPillarState(
     val narrative: String,
     val contributors: List<OuraContributor>,
     /** Real measured value shown in the ring instead of a score when the pillar has no score (e.g. body weight). */
-    val displayValue: String? = null
+    val displayValue: String? = null,
+    /** Optional pill label overriding [OuraRating.label] (e.g. Aktivita uses "Nízká" instead of "Odpočinek"). */
+    val ratingLabel: String? = null,
+    /** Breakdown shown as a visual progress bar under the Aktivita ring. */
+    val activityProgress: ActivityProgressBreakdown? = null,
+    /** Short unobtrusive explanation of how the pillar value is calculated (revealed on tap). */
+    val calculationHint: String? = null,
 )
 
 /**
@@ -187,12 +203,99 @@ data class OuraPillarState(
  */
 object OuraScoreCalculator {
 
+    private val PASSIVE_ACTIVITY_KEYWORDS = listOf(
+        "dých", "dych", "breath", "meditac", "meditat", "relax", "stretching", "protaž", "protaz"
+    )
+
+    /**
+     * Ohodnotí fyziologickou náročnost jedné dnešní aktivity (0..50 bodů).
+     * Dýchací/relaxační aktivity posouvají lištu minimálně (0–1 bod); náročné tréninky přidají až ~45–50 b.
+     */
+    internal fun scoreActivityEffort(act: ActivitySummaryRow): Double {
+        val titleLow = (act.title ?: "").lowercase()
+        val load = act.trainingLoad?.takeIf { it.isFinite() && it > 0.0 }
+        val aero = act.aerobicTe?.takeIf { it.isFinite() && it > 0.0 }
+        val anaero = act.anaerobicTe?.takeIf { it.isFinite() && it > 0.0 }
+        val kcal = act.caloriesKcal?.takeIf { it.isFinite() && it > 0.0 }
+        val mins = (act.effectiveMovingTimeS() ?: 0.0).coerceAtLeast(0.0) / 60.0
+        val hr = act.avgHeartRate
+
+        val isPassiveByTitle = PASSIVE_ACTIVITY_KEYWORDS.any { it in titleLow }
+        val isVeryLightOther = act.sport == Sport.OTHER.name &&
+            (load == null || load <= 5.0) &&
+            (aero == null || aero < 0.6) &&
+            (kcal == null || kcal < 40.0)
+
+        if (isPassiveByTitle && (load == null || load <= 8.0) && (aero == null || aero < 0.8)) {
+            return if (mins >= 5.0) 1.0 else 0.0
+        }
+        if (isVeryLightOther) {
+            return if (mins >= 10.0) 1.0 else 0.0
+        }
+
+        val rawPoints = when {
+            load != null -> (load / 2.5).coerceIn(0.0, 50.0)
+            aero != null || anaero != null -> {
+                val mainTe = maxOf(aero ?: 0.0, anaero ?: 0.0)
+                val secTe = minOf(aero ?: 0.0, anaero ?: 0.0)
+                ((mainTe + 0.35 * secTe) * 11.0).coerceIn(0.0, 48.0)
+            }
+            kcal != null -> (kcal / 14.0).coerceIn(0.0, 45.0)
+            mins > 0.0 -> {
+                val hrFactor = when {
+                    hr == null -> 0.55
+                    hr < 95 -> 0.20
+                    hr < 120 -> 0.50
+                    hr < 145 -> 0.85
+                    else -> 1.15
+                }
+                (mins * 0.55 * hrFactor).coerceIn(0.0, 45.0)
+            }
+            else -> 0.0
+        }
+
+        // Chůze se už z velké části promítá v krocích, takže přidává jen mírnější bonus za delší/svižný pochod.
+        val sportMultiplier = if (act.sport == Sport.WALKING.name) 0.45 else 1.0
+        return (rawPoints * sportMultiplier).coerceIn(0.0, 50.0)
+    }
+
+    /**
+     * Výpočet denního skóre Aktivity (0–100):
+     * - 0 kroků a 0 aktivit = 0 bodů (žádné umělé minimum).
+     * - 10 000 kroků = pevných 60 bodů; nad 10 000 kroků jemný bonus až +10 bodů (max 70 b. jen z kroků).
+     * - Dnešní aktivity přidávají až +50 bodů podle skutečné náročnosti.
+     */
+    internal fun calculateActivityBreakdown(
+        todaySteps: Double?,
+        todayActivities: List<ActivitySummaryRow>,
+    ): ActivityProgressBreakdown? {
+        if (todaySteps == null && todayActivities.isEmpty()) return null
+        val steps = (todaySteps ?: 0.0).coerceAtLeast(0.0)
+        val baseStepsPts = (steps / 10_000.0).coerceAtMost(1.0) * 60.0
+        val extraStepsPts = ((steps - 10_000.0).coerceAtLeast(0.0) / 5_000.0).coerceAtMost(1.0) * 10.0
+        val stepsPts = kotlin.math.round(baseStepsPts + extraStepsPts).toInt().coerceIn(0, 70)
+
+        val actPts = kotlin.math.round(
+            todayActivities.sumOf { scoreActivityEffort(it) }.coerceAtMost(50.0)
+        ).toInt().coerceIn(0, 50)
+
+        val total = (stepsPts + actPts).coerceIn(0, 100)
+        return ActivityProgressBreakdown(
+            stepsPoints = stepsPts,
+            activitiesPoints = actPts,
+            stepsCount = todaySteps?.toInt()?.coerceAtLeast(0),
+            activityCount = todayActivities.size,
+            totalScore = total,
+        )
+    }
+
     fun calculate(
         seriesByType: Map<MetricType, MetricSeries>,
         todaySleepScore: Double?,
         latestWeightObs: MetricObservation?,
         latestEcgObs: MetricObservation?,
-        fmt: Fmt
+        fmt: Fmt,
+        todayActivities: List<ActivitySummaryRow> = emptyList(),
     ): Map<OuraPillar, OuraPillarState> {
         val hrvSeries = seriesByType[MetricType.HRV]
         val sleepSeries = seriesByType[MetricType.SLEEP_DURATION]
@@ -204,12 +307,14 @@ object OuraScoreCalculator {
         val todayHrv = hrvSeries?.values?.lastOrNull()
         val usualHrv = hrvSeries?.usual?.median
         val todaySleepS = sleepSeries?.values?.lastOrNull()
+        val usualSleepS = sleepSeries?.usual?.median
         val todayBb = bbSeries?.values?.lastOrNull()
         val todayRhr = rhrSeries?.values?.lastOrNull()
         val usualRhr = rhrSeries?.usual?.median
         val todaySteps = stepsSeries?.values?.lastOrNull()
+        val todayStress = stressSeries?.values?.lastOrNull()
 
-        // 1. PŘIPRAVENOST (UX-1: žádné vymyšlené defaulty; bez dat zobrazit "—" + CTA)
+        // 1. PŘIPRAVENOST (UX-1: žádné vymyšlené defaulty; počítá se z reálných denních metrik)
         val hasReadinessData = todayHrv != null || todayRhr != null || todayBb != null || todaySleepScore != null
         val hrvDelta = if (todayHrv != null && usualHrv != null) todayHrv - usualHrv else null
         val rhrDelta = if (todayRhr != null && usualRhr != null) usualRhr - todayRhr else null
@@ -220,7 +325,14 @@ object OuraScoreCalculator {
             if (rhrDelta != null) pts += (rhrDelta * 1.2).coerceIn(-10.0, 10.0)
             if (todayBb != null) pts += ((todayBb - 60.0) * 0.15).coerceIn(-10.0, 10.0)
             if (todaySleepScore != null) pts += ((todaySleepScore - 75.0) * 0.15).coerceIn(-10.0, 10.0)
-            pts.toInt().coerceIn(40, 99)
+            if (todayStress != null) {
+                pts += when {
+                    todayStress <= 25.0 -> 3.0
+                    todayStress > 50.0 -> -((todayStress - 50.0) * 0.25).coerceAtMost(8.0)
+                    else -> 0.0
+                }
+            }
+            pts.toInt().coerceIn(25, 99)
         }
         val readinessRating = when {
             readinessScore == null -> OuraRating.NO_DATA
@@ -275,19 +387,32 @@ object OuraScoreCalculator {
         }
 
         val readinessDeltaLabel = when {
-            !hasReadinessData -> "Připojte Garmin nebo Withings"
-            hrvDelta != null -> "${if (hrvDelta >= 0) "+${hrvDelta.toInt()}" else "${hrvDelta.toInt()}"} ms HRV vs medián · Odhad Pulse4"
-            todayHrv != null -> "HRV ${todayHrv.toInt()} ms · Odhad Pulse4"
-            todayRhr != null -> "Klidový tep ${todayRhr.toInt()} bpm · Odhad Pulse4"
-            else -> "Odhad Pulse4"
+            !hasReadinessData -> "Připojte Garmin"
+            todayHrv != null && todayRhr != null -> "HRV ${todayHrv.toInt()} ms · ${todayRhr.toInt()} bpm"
+            todayHrv != null -> "HRV ${todayHrv.toInt()} ms"
+            todayRhr != null -> "Tep ${todayRhr.toInt()} bpm"
+            todayBb != null -> "Body Battery ${todayBb.toInt()}"
+            else -> "Z dnešních metrik"
         }
 
+        val readinessInputs = buildList {
+            if (todayHrv != null) add("HRV ${todayHrv.toInt()} ms")
+            if (todayRhr != null) add("klidový tep ${todayRhr.toInt()} bpm")
+            if (todaySleepScore != null) add("spánek ${todaySleepScore.toInt()}")
+            if (todayBb != null) add("Body Battery ${todayBb.toInt()}")
+            if (todayStress != null) add("stres ${todayStress.toInt()}")
+        }
         val readinessNarrative = when (readinessRating) {
-            OuraRating.NO_DATA -> "Zatím nemáte naměřená data HRV, klidového tepu ani spánku. Připojte Garmin nebo Withings."
-            OuraRating.OPTIMAL -> if (hrvDelta != null) "Noční HRV je ${if (hrvDelta >= 0) "+${hrvDelta.toInt()}" else "${hrvDelta.toInt()}"} ms oproti vašemu mediánu." else "Naměřené hodnoty ukazují vysokou připravenost."
-            OuraRating.GOOD -> "Autonomní nervový systém je v běžném pásmu podle posledních měření."
-            OuraRating.FAIR -> "Zotavení je podle naměřených hodnot částečné. Zvažte lehčí zátěž."
-            OuraRating.ATTENTION -> "Naměřené hodnoty ukazují zvýšenou únavu. Doporučujeme regeneraci."
+            OuraRating.NO_DATA -> "Zatím chybí dnešní data HRV, tepu nebo spánku."
+            OuraRating.OPTIMAL -> "Výborná regenerace pro dnešní den."
+            OuraRating.GOOD -> "Dobrý stav pro běžnou denní zátěž."
+            OuraRating.FAIR -> "Částečné zotavení – zvažte lehčí zátěž."
+            OuraRating.ATTENTION -> "Zvýšená únava – vhodný je odpočinek."
+        }
+        val readinessCalcHint = if (readinessInputs.isNotEmpty()) {
+            "Výpočet z dnešních dat: ${readinessInputs.joinToString(", ")}."
+        } else {
+            "Počítá se z nočního HRV, klidového tepu, spánku, Body Battery a stresu."
         }
 
         // 2. SPÁNEK
@@ -304,40 +429,70 @@ object OuraScoreCalculator {
             else -> OuraRating.ATTENTION
         }
         val sleepDeltaLabel = when {
-            todaySleepS != null && todaySleepScore != null -> fmt.sleep(todaySleepS)
-            todaySleepS != null -> "${fmt.sleep(todaySleepS)} · Odhad Pulse4"
-            todaySleepScore != null -> "Skóre ${todaySleepScore.toInt()}"
+            todaySleepS != null -> fmt.sleep(todaySleepS)
+            todaySleepScore != null -> "Skóre z Garminu"
             else -> "Připojte Garmin"
         }
-        val sleepNarrative = if (sleepScoreVal == null) {
-            "Zatím není k dispozici žádný záznam spánku."
-        } else if (todaySleepS != null) {
-            "Zaznamenaná doba spánku: ${fmt.sleep(todaySleepS)}."
+        val sleepNarrative = when {
+            sleepScoreVal == null -> "Zatím není k dispozici žádný záznam spánku."
+            todaySleepS != null && usualSleepS != null -> {
+                val diffMin = kotlin.math.round((todaySleepS - usualSleepS) / 60.0).toInt()
+                when {
+                    diffMin >= 15 -> "O ${fmt.sleep(diffMin * 60.0)} více než váš běžný spánek."
+                    diffMin <= -15 -> "O ${fmt.sleep((-diffMin) * 60.0)} méně než váš běžný spánek."
+                    else -> "V rámci vaší běžné délky spánku."
+                }
+            }
+            todaySleepScore != null -> "Kvalita poslední zaznamenané noci."
+            else -> "Podle délky posledního spánku."
+        }
+        val sleepCalcHint = if (todaySleepScore != null) {
+            "Používá přímo skóre kvality spánku z hodinek Garmin."
         } else {
-            "Spánkové skóre ze synchronizovaného zařízení."
+            "Pokud hodinky neposílají skóre spánku, odhaduje se z délky spánku."
         }
 
-        // 3. AKTIVITA
-        val activityScore: Int? = todaySteps?.let { steps ->
-            val stepsRatio = (steps / 10000.0).coerceIn(0.0, 1.5)
-            (64.0 + stepsRatio * 28.0).toInt().coerceIn(40, 98)
-        }
+        // 3. AKTIVITA (kroky + dnešní aktivity dle náročnosti; 0 bez umělého základu)
+        val activityBreakdown = calculateActivityBreakdown(todaySteps, todayActivities)
+        val activityScore = activityBreakdown?.totalScore
         val activityRating = when {
             activityScore == null -> OuraRating.NO_DATA
             activityScore >= 85 -> OuraRating.OPTIMAL
-            activityScore >= 70 -> OuraRating.GOOD
-            else -> OuraRating.FAIR
+            activityScore >= 60 -> OuraRating.GOOD
+            activityScore >= 30 -> OuraRating.FAIR
+            else -> OuraRating.ATTENTION
         }
-        val activityDeltaLabel = if (todaySteps != null) {
-            "${fmt.number(todaySteps, 0)} kroků · Odhad Pulse4"
-        } else {
-            "Připojte Garmin"
+        val activityRatingLabel = when {
+            activityScore == null -> OuraRating.NO_DATA.label
+            activityScore >= 85 -> "Skvělé"
+            activityScore >= 60 -> "Dobré"
+            activityScore >= 30 -> "Přijatelné"
+            else -> "Nízká"
         }
-        val activityNarrative = if (todaySteps != null) {
-            "Zaznamenáno ${fmt.number(todaySteps, 0)} kroků."
-        } else {
-            "Zatím nejsou naměřená data o denních krocích."
+        val activityDeltaLabel = when {
+            activityBreakdown == null -> "Připojte Garmin"
+            activityBreakdown.activityCount > 0 -> {
+                val actTxt = if (activityBreakdown.activityCount == 1) "1 aktivita" else "${activityBreakdown.activityCount} aktivity"
+                val stp = activityBreakdown.stepsCount ?: 0
+                "${fmt.number(stp.toDouble(), 0)} kroků · $actTxt"
+            }
+            activityBreakdown.stepsCount != null -> "${fmt.number(activityBreakdown.stepsCount.toDouble(), 0)} kroků"
+            else -> "Dnes bez pohybu"
         }
+        val activityNarrative = when {
+            activityBreakdown == null -> "Zatím bez záznamu kroků a aktivit."
+            todayActivities.isNotEmpty() -> {
+                val actSummary = todayActivities.take(2).joinToString(", ") { act ->
+                    val name = act.title?.takeIf { it.isNotBlank() } ?: runCatching { Sport.valueOf(act.sport).czechName() }.getOrDefault("Aktivita")
+                    val mins = ((act.effectiveMovingTimeS() ?: 0.0) / 60.0).toInt()
+                    if (mins > 0) "$name ($mins min)" else name
+                }
+                "Dnes: $actSummary."
+            }
+            else -> ""
+        }
+        val activityCalcHint =
+            "10 000 kroků = 60 bodů (nad 10 tis. až +10 b.). Další body přidávají dnešní aktivity podle náročnosti – dýchání a relaxace lištu téměř neposouvají."
 
         // 4. TĚLO & CÉVY
         val wKg = latestWeightObs?.value
@@ -364,20 +519,28 @@ object OuraScoreCalculator {
             }
             else -> null
         }
-        val bodyParts = buildList {
-            if (wKg != null) add(fmt.weight(wKg))
+        val bodyDeltaLabel = buildList {
+            if (wKg != null) add(fmt.weightUnit())
             if (bodyFatVal != null) add("tuk ${fmt.number(bodyFatVal, 1)} %")
             if (pwvVal != null) add("PWV ${fmt.number(pwvVal, 1)} m/s")
-        }
+        }.ifEmpty { listOf("Připojte Withings") }.joinToString(" · ")
         // No invented score: the Body ring shows the latest real weight (number only, unit follows the unit setting).
         val bodyDisplayValue: String? = wKg?.takeIf { it.isFinite() && it > 0 }
             ?.let { fmt.weight(it, 1).substringBefore(' ') }
-        val bodyDeltaLabel = if (bodyParts.isNotEmpty()) bodyParts.joinToString(" · ") else "Připojte Withings"
-        val bodyNarrative = if (bodyParts.isNotEmpty()) {
-            "Poslední naměřené hodnoty: ${bodyParts.joinToString(", ")}."
-        } else {
-            "Zatím nejsou naměřená data hmotnosti, tuku ani cév."
+        val bodyNarrative = when {
+            wKg != null -> {
+                val datePart = latestWeightObs.let { "Poslední vážení ${fmt.time(it.startUtcMs)}" }
+                val diffPart = weightUsual?.let { usual ->
+                    val diff = fmt.convertWeight(wKg - usual.median)
+                    val sign = if (diff >= 0) "+" else ""
+                    " · $sign${fmt.number(diff, 1)} ${fmt.weightUnit()} vs běžná"
+                } ?: ""
+                "$datePart$diffPart."
+            }
+            hasBodyData -> "Naměřená data složení těla z váhy Withings."
+            else -> "Zatím nejsou naměřená data hmotnosti, tuku ani cév."
         }
+        val bodyCalcHint = "Zobrazuje přímo poslední naměřenou hmotnost bez dopočítaného skóre."
 
         return mapOf(
             OuraPillar.READINESS to OuraPillarState(
@@ -386,7 +549,8 @@ object OuraScoreCalculator {
                 rating = readinessRating,
                 deltaLabel = readinessDeltaLabel,
                 narrative = readinessNarrative,
-                contributors = readinessContributors
+                contributors = readinessContributors,
+                calculationHint = readinessCalcHint,
             ),
             OuraPillar.SLEEP to OuraPillarState(
                 pillar = OuraPillar.SLEEP,
@@ -394,7 +558,8 @@ object OuraScoreCalculator {
                 rating = sleepRating,
                 deltaLabel = sleepDeltaLabel,
                 narrative = sleepNarrative,
-                contributors = emptyList()
+                contributors = emptyList(),
+                calculationHint = sleepCalcHint,
             ),
             OuraPillar.ACTIVITY to OuraPillarState(
                 pillar = OuraPillar.ACTIVITY,
@@ -402,7 +567,10 @@ object OuraScoreCalculator {
                 rating = activityRating,
                 deltaLabel = activityDeltaLabel,
                 narrative = activityNarrative,
-                contributors = emptyList()
+                contributors = emptyList(),
+                ratingLabel = activityRatingLabel,
+                activityProgress = activityBreakdown,
+                calculationHint = activityCalcHint,
             ),
             OuraPillar.BODY to OuraPillarState(
                 pillar = OuraPillar.BODY,
@@ -411,7 +579,8 @@ object OuraScoreCalculator {
                 deltaLabel = bodyDeltaLabel,
                 narrative = bodyNarrative,
                 contributors = emptyList(),
-                displayValue = bodyDisplayValue
+                displayValue = bodyDisplayValue,
+                calculationHint = bodyCalcHint,
             )
         )
     }
@@ -549,55 +718,139 @@ fun OuraHorizonHeroCard(
 
                 Spacer(Modifier.height(16.dp))
 
-                // Centrální Living Halo prstenec s astronomickým/horologickým ciferníkem na průhledném pozadí
-                OuraHaloGauge(
-                    score = currentPillarState.score,
-                    displayValue = currentPillarState.displayValue,
-                    primaryColor = currentPillarState.pillar.primaryColor,
-                    secondaryColor = currentPillarState.pillar.secondaryColor,
-                    glowColor = currentPillarState.pillar.glowColor,
-                    rating = currentPillarState.rating,
-                    deltaLabel = currentPillarState.deltaLabel,
-                    pillarTitle = currentPillarState.pillar.title,
-                    wavePhase = wavePhase
-                )
-
-                Spacer(Modifier.height(8.dp))
-
-                // Skleněná kapsle s verdiktem dne (frosted glass podklad pro dokonalou čitelnost nad fotkou)
-                Surface(
-                    shape = RoundedCornerShape(18.dp),
-                    color = Color(0x99060C15),
-                    border = BorderStroke(
-                        1.dp,
-                        Brush.horizontalGradient(
-                            listOf(
-                                currentPillarState.pillar.primaryColor.copy(alpha = 0.40f),
-                                Color(0xFF1E2D40).copy(alpha = 0.50f)
+                // Přepínání pilířů potažením prstu doleva/doprava přes velkou hodnotu a verdikt
+                val latestPillar by rememberUpdatedState(selectedPillar)
+                val latestOnSelect by rememberUpdatedState(onSelectPillar)
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .pointerInput(Unit) {
+                            val thresholdPx = 44.dp.toPx()
+                            var dragAccum = 0f
+                            var switched = false
+                            detectHorizontalDragGestures(
+                                onDragStart = {
+                                    dragAccum = 0f
+                                    switched = false
+                                },
+                                onDragEnd = {
+                                    dragAccum = 0f
+                                    switched = false
+                                },
+                                onDragCancel = {
+                                    dragAccum = 0f
+                                    switched = false
+                                },
+                                onHorizontalDrag = { change, dragAmount ->
+                                    if (switched) return@detectHorizontalDragGestures
+                                    dragAccum += dragAmount
+                                    if (kotlin.math.abs(dragAccum) >= thresholdPx) {
+                                        val pillars = OuraPillar.entries
+                                        val curIdx = pillars.indexOf(latestPillar)
+                                        val nextIdx = if (dragAccum < 0f) {
+                                            (curIdx + 1) % pillars.size
+                                        } else {
+                                            (curIdx - 1 + pillars.size) % pillars.size
+                                        }
+                                        latestOnSelect(pillars[nextIdx])
+                                        switched = true
+                                        change.consume()
+                                    }
+                                }
                             )
-                        )
-                    ),
-                    modifier = Modifier.fillMaxWidth()
+                        },
+                    horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Column(
-                        Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
+                    // Centrální Living Halo prstenec s astronomickým/horologickým ciferníkem na průhledném pozadí
+                    OuraHaloGauge(
+                        score = currentPillarState.score,
+                        displayValue = currentPillarState.displayValue,
+                        primaryColor = currentPillarState.pillar.primaryColor,
+                        secondaryColor = currentPillarState.pillar.secondaryColor,
+                        glowColor = currentPillarState.pillar.glowColor,
+                        rating = currentPillarState.rating,
+                        ratingLabel = currentPillarState.ratingLabel,
+                        deltaLabel = currentPillarState.deltaLabel,
+                        pillarTitle = currentPillarState.pillar.title,
+                        wavePhase = wavePhase
+                    )
+
+                    Spacer(Modifier.height(8.dp))
+
+                    // Skleněná kapsle s přehledem dne; klepnutím nenásilně rozbalí/skryje popis výpočtu
+                    var showCalcHint by remember(selectedPillar) { mutableStateOf(false) }
+                    val hasHint = !currentPillarState.calculationHint.isNullOrBlank()
+                    Surface(
+                        shape = RoundedCornerShape(18.dp),
+                        color = Color(0x99060C15),
+                        border = BorderStroke(
+                            1.dp,
+                            Brush.horizontalGradient(
+                                listOf(
+                                    currentPillarState.pillar.primaryColor.copy(alpha = 0.40f),
+                                    Color(0xFF1E2D40).copy(alpha = 0.50f)
+                                )
+                            )
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(18.dp))
+                            .clickable(enabled = hasHint) { showCalcHint = !showCalcHint }
                     ) {
-                        Text(
-                            text = currentPillarState.pillar.subtitle,
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = currentPillarState.pillar.primaryColor,
-                            letterSpacing = 0.6.sp
-                        )
-                        Spacer(Modifier.height(3.dp))
-                        Text(
-                            text = currentPillarState.narrative,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Color(0xFFF1F5F9),
-                            textAlign = TextAlign.Center,
-                            lineHeight = 18.5.sp
-                        )
+                        Column(
+                            Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            currentPillarState.activityProgress?.let { prog ->
+                                ActivityProgressBar(prog)
+                                if (currentPillarState.narrative.isNotBlank()) {
+                                    Spacer(Modifier.height(6.dp))
+                                }
+                            }
+                            if (currentPillarState.narrative.isNotBlank()) {
+                                Row(
+                                    Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.Center
+                                ) {
+                                    Text(
+                                        text = currentPillarState.narrative,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = Color(0xFFF1F5F9),
+                                        textAlign = TextAlign.Center,
+                                        lineHeight = 18.5.sp,
+                                        modifier = Modifier.weight(1f, fill = false)
+                                    )
+                                    if (hasHint) {
+                                        Spacer(Modifier.width(6.dp))
+                                        Text(
+                                            text = if (showCalcHint) "▴" else "▾",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = Color(0xFF64748B)
+                                        )
+                                    }
+                                }
+                            } else if (hasHint) {
+                                // Pokud pod lištou není další text, jen diskrétní šipka pro rozbalení detailu výpočtu
+                                Text(
+                                    text = if (showCalcHint) "▴" else "▾",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFF64748B),
+                                    modifier = Modifier.padding(top = 2.dp)
+                                )
+                            }
+                            val hintText = currentPillarState.calculationHint
+                            if (showCalcHint && !hintText.isNullOrBlank()) {
+                                Spacer(Modifier.height(6.dp))
+                                Text(
+                                    text = hintText,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFF94A3B8),
+                                    textAlign = TextAlign.Center,
+                                    lineHeight = 16.sp
+                                )
+                            }
+                        }
                     }
                 }
 
@@ -944,6 +1197,68 @@ private fun PillarScoreOrb(
     }
 }
 
+@Composable
+private fun ActivityProgressBar(progress: ActivityProgressBreakdown) {
+    val stepsFrac = (progress.stepsPoints / 100f).coerceIn(0f, 1f)
+    val actsFrac = (progress.activitiesPoints / 100f).coerceIn(0f, (1f - stepsFrac).coerceAtLeast(0f))
+    val stepsColor = Color(0xFFF59E0B)
+    val actsColor = Color(0xFFFB7185)
+
+    Column(Modifier.fillMaxWidth()) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(10.dp)
+                .clip(RoundedCornerShape(5.dp))
+                .background(Color(0xFF141C27))
+        ) {
+            Canvas(Modifier.fillMaxSize()) {
+                val stepsW = size.width * stepsFrac
+                val actsW = size.width * actsFrac
+                if (stepsW > 0f) {
+                    drawRect(color = stepsColor, topLeft = Offset.Zero, size = Size(stepsW, size.height))
+                }
+                if (actsW > 0f) {
+                    drawRect(color = actsColor, topLeft = Offset(stepsW, 0f), size = Size(actsW, size.height))
+                }
+                // Ryska 60 b. = splnění 10 000 kroků
+                val markX = size.width * 0.60f
+                drawLine(
+                    color = Color.White.copy(alpha = 0.45f),
+                    start = Offset(markX, 0f),
+                    end = Offset(markX, size.height),
+                    strokeWidth = 1.5.dp.toPx()
+                )
+            }
+        }
+        Spacer(Modifier.height(5.dp))
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                Box(Modifier.size(7.dp).clip(CircleShape).background(stepsColor))
+                Text(
+                    "Kroky +${progress.stepsPoints} b.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFFE2E8F0),
+                    fontSize = 10.sp
+                )
+            }
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                Box(Modifier.size(7.dp).clip(CircleShape).background(actsColor))
+                Text(
+                    "Aktivity +${progress.activitiesPoints} b.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFFE2E8F0),
+                    fontSize = 10.sp
+                )
+            }
+        }
+    }
+}
+
 /**
  * Hlavní světelný prstenec (Living Halo Gauge) s jemným chronografickým ciferníkem
  * a průhledným středem, kterým prosvítá živá fotografická a procedurální scéna.
@@ -959,6 +1274,7 @@ fun OuraHaloGauge(
     deltaLabel: String,
     pillarTitle: String = "",
     wavePhase: Float = 0f,
+    ratingLabel: String? = null,
     modifier: Modifier = Modifier
 ) {
     val animatedProgress = remember { Animatable(0f) }
@@ -1115,7 +1431,7 @@ fun OuraHaloGauge(
                         .padding(horizontal = 9.dp, vertical = 2.5.dp)
                 ) {
                     Text(
-                        text = rating.label.uppercase(),
+                        text = (ratingLabel ?: rating.label).uppercase(),
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.Bold,
                         color = rating.color,
@@ -1529,7 +1845,7 @@ fun OuraFeaturedActivityBanner(
                     )
                     Spacer(Modifier.height(2.dp))
                     val distStr = activity.distanceM?.let { fmt.km(it) } ?: ""
-                    val durStr = activity.movingTimeS?.let { fmt.duration(it) } ?: ""
+                    val durStr = activity.effectiveMovingTimeS()?.takeIf { it > 0.0 }?.let { fmt.duration(it) } ?: ""
                     val hrStr = activity.avgHeartRate?.let { "$it bpm" } ?: ""
                     val summaryLine = listOf(distStr, durStr, hrStr).filter { it.isNotBlank() }.joinToString(" · ")
                     Text(

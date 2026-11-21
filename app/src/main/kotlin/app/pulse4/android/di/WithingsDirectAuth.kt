@@ -168,13 +168,14 @@ private class PersistentCookieJar(
     @Synchronized
     fun getCookieString(): String {
         ensureLoaded()
-        val byKey = LinkedHashMap<Triple<String, String, String>, String>()
+        // Deduplicate by cookie name (latest wins) so stale cookies from another domain/path never shadow fresh ones.
+        val byName = LinkedHashMap<String, String>()
         for (c in store) {
             if (c.value.isNotBlank() && c.value != "deleted") {
-                byKey[Triple(c.domain, c.path, c.name)] = c.value
+                byName[c.name] = c.value
             }
         }
-        return byKey.entries.joinToString("; ") { "${it.key.third}=${it.value}" }
+        return byName.entries.joinToString("; ") { "${it.key}=${it.value}" }
     }
 
     @Synchronized
@@ -335,10 +336,7 @@ class WithingsDirectAuth(
     /**
      * Zjistí, zda HTML obsahuje skutečnou viditelnou chybovou hlášku (nikoli prázdnou šablonu `<div class="alert alert-danger hide"></div>`).
      */
-    private fun hasVisibleAlertError(html: String): Boolean {
-        val visibleAlertRegex = Regex("""<div\s+class=["']alert\s+alert-danger["']\s*>\s*<li>""", RegexOption.IGNORE_CASE)
-        return visibleAlertRegex.containsMatchIn(html)
-    }
+    private fun hasVisibleAlertError(html: String): Boolean = hasVisibleAlert(html)
 
     fun clearPersistedCookies() {
         cookieJar.clear()
@@ -369,7 +367,7 @@ class WithingsDirectAuth(
                 "https://account.withings.com/connection/login?r=https%3A%2F%2Fapp.withings.com%2F"
             )
             var lastStatus = 200
-            for (u in urls) {
+            for ((index, u) in urls.withIndex()) {
                 if (shouldAbort()) {
                     diagnostics?.mark(flow, "aborted:manual_login")
                     return WithingsLoginResult.Error(ABORTED_MESSAGE, WithingsAuthFailureKind.ABORTED)
@@ -379,6 +377,7 @@ class WithingsDirectAuth(
                     .header("User-Agent", ua)
                     .get()
                     .build()
+                var stopFallback = false
                 client.newCall(req).execute().use { res ->
                     lastStatus = res.code
                     trace(flow, "GET sso", res)
@@ -388,7 +387,14 @@ class WithingsDirectAuth(
                         val fin = finishLogin(flow)
                         if (fin is WithingsLoginResult.Ok) return fin
                     }
+                    // If /new_workflow/login already answered HTTP 200 on the login page (or 429/5xx),
+                    // /connection/login only 302-redirects back to the exact same /new_workflow/login page.
+                    if (index == 0 && (res.code == 429 || res.code >= 500 ||
+                            (res.code in 200..299 && finalHttpUrl.encodedPath.contains("new_workflow/login", ignoreCase = true)))) {
+                        stopFallback = true
+                    }
                 }
+                if (stopFallback) break
             }
             when {
                 lastStatus == 429 -> WithingsLoginResult.Error("Withings dočasně omezil požadavky (HTTP 429).", WithingsAuthFailureKind.RATE_LIMITED)
@@ -606,7 +612,25 @@ class WithingsDirectAuth(
                 .header("Referer", loginUrl)
                 .get()
                 .build()
-            val passGetHtml = client.newCall(passGetReq).execute().use { trace(flow, "GET password_check", it); it.body?.string().orEmpty() }
+            val (passGetCode, passGetHtml, passGetUrl) = client.newCall(passGetReq).execute().use { res ->
+                trace(flow, "GET password_check", res)
+                Triple(res.code, res.body?.string().orEmpty(), res.request.url)
+            }
+            if (isLoggedInUrl(passGetUrl)) {
+                return finishLogin(flow)
+            }
+            if (passGetCode == 429 || RATE_LIMIT_PATTERNS.any { passGetHtml.lowercase().contains(it) }) {
+                return WithingsLoginResult.Error(
+                    "Withings dočasně zablokoval přihlášení kvůli příliš mnoha pokusům. Počkejte prosím a přihlaste se později ručně.",
+                    WithingsAuthFailureKind.RATE_LIMITED,
+                )
+            }
+            if (passGetCode >= 500) {
+                return WithingsLoginResult.Error(
+                    "Server Withings je dočasně nedostupný (HTTP $passGetCode).",
+                    WithingsAuthFailureKind.NETWORK,
+                )
+            }
             val hiddenPass = parseHiddenInputs(passGetHtml)
             if (shouldAbort()) return abortedResult(flow, "before_password_post")
 
@@ -698,8 +722,16 @@ class WithingsDirectAuth(
         )
 
         private fun hasVisibleAlert(html: String): Boolean {
-            val visibleAlertRegex = Regex("""<div\s+class=["']alert\s+alert-danger["']\s*>\s*<li>""", RegexOption.IGNORE_CASE)
-            return visibleAlertRegex.containsMatchIn(html)
+            val alertDivRegex = Regex(
+                """<div\b[^>]*class=["']([^"']*alert-danger[^"']*)["'][^>]*>(.*?)</div>""",
+                setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),
+            )
+            return alertDivRegex.findAll(html).any { m ->
+                val classes = m.groupValues[1].lowercase().split(Regex("\\s+"))
+                val hidden = classes.any { it == "hide" || it == "hidden" || it == "d-none" }
+                val text = m.groupValues[2].replace(Regex("<[^>]+>"), " ").trim()
+                !hidden && text.isNotEmpty()
+            }
         }
 
         internal fun classifyPasswordLoginResponse(
@@ -796,15 +828,27 @@ class WithingsDirectAuth(
                 .post(bodyMfaBuilder.build())
                 .build()
 
-            val res = client.newCall(req).execute()
-            trace(flow, "POST code_check", res)
-            val bodyText = res.body?.string().orEmpty()
-            val finalHttpUrl = res.request.url
+            val (mfaStatus, bodyText, finalHttpUrl) = client.newCall(req).execute().use { res ->
+                trace(flow, "POST code_check", res)
+                Triple(res.code, res.body?.string().orEmpty(), res.request.url)
+            }
             val finalUrl = finalHttpUrl.toString()
-            res.close()
 
             if (isLoggedInUrl(finalHttpUrl)) {
                 return finishLogin(flow)
+            }
+
+            if (mfaStatus == 429 || RATE_LIMIT_PATTERNS.any { bodyText.lowercase().contains(it) }) {
+                return WithingsLoginResult.Error(
+                    "Withings dočasně zablokoval přihlášení kvůli příliš mnoha pokusům. Počkejte prosím a přihlaste se později ručně.",
+                    WithingsAuthFailureKind.RATE_LIMITED,
+                )
+            }
+            if (mfaStatus >= 500) {
+                return WithingsLoginResult.Error(
+                    "Server Withings je dočasně nedostupný (HTTP $mfaStatus).",
+                    WithingsAuthFailureKind.NETWORK,
+                )
             }
 
             if (bodyText.contains("Invalid code", ignoreCase = true) || hasVisibleAlertError(bodyText)) {

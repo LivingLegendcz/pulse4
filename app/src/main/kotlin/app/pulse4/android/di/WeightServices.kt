@@ -103,7 +103,9 @@ class WithingsService internal constructor(
     private val vault = SecretTokenVault(sl.secrets, "withings.tokens")
     private val childVault = SecretTokenVault(sl.secrets, "withings.child.tokens")
     private val webClient by lazy {
-        WithingsWebClient(http)
+        WithingsWebClient(http).apply {
+            onExtendTrace = { msg -> authDiagnostics.mark(WithingsAuthDiagnostics.Flow.EXTEND, msg) }
+        }
     }
 
     fun loadWebSession(): WithingsWebSession? =
@@ -694,6 +696,7 @@ class WithingsService internal constructor(
             sl.secrets.putString("withings.ecg_typed_v2", "1")
         }
         val activeUserId = loadWebSession()?.primaryUserId?.toString()
+        var refreshFallbackAttempted = false
         val fetcher = WithingsWebFetcher(
             client = webClient,
             sessionProvider = ::loadWebSession,
@@ -717,7 +720,10 @@ class WithingsService internal constructor(
                     .filter { !it.deleted && it.provider == Provider.WITHINGS_API.name }
                     .associate { (it.startUtcMs / 1000L) to it.value }
             },
-            onRefreshFallback = { if (renewSession(forceExtend = true)) loadWebSession() else null },
+            onRefreshFallback = {
+                refreshFallbackAttempted = true
+                if (renewSession(forceExtend = true)) loadWebSession() else null
+            },
             existingIdsByGrpIds = { _ ->
                 if (activeUserId != null) db.observations().idsInForAccount(Provider.WITHINGS_API.name, activeUserId, 0L, Long.MAX_VALUE).toSet()
                 else emptySet()
@@ -783,14 +789,14 @@ class WithingsService internal constructor(
             }
             is AreaResult.Failed -> {
                 if (result.error is ProviderError.Unauthorized && authGate.generation() == startGen) {
-                    if (allowRetry && !sessionCoordinator.isAutoReloginPaused() && renewSession(forceExtend = true)) {
+                    if (allowRetry && !refreshFallbackAttempted && !sessionCoordinator.isAutoReloginPaused() && renewSession(forceExtend = true)) {
                         return@synchronized runWebImport(nowMs, allowRetry = false)
                     }
                     markNeedsLoginIfHumanRequired()
                 }
             }
             is AreaResult.NeedsUser -> if (authGate.generation() == startGen) {
-                if (allowRetry && !sessionCoordinator.isAutoReloginPaused() && renewSession(forceExtend = true)) {
+                if (allowRetry && !refreshFallbackAttempted && !sessionCoordinator.isAutoReloginPaused() && renewSession(forceExtend = true)) {
                     return@synchronized runWebImport(nowMs, allowRetry = false)
                 }
                 markNeedsLoginIfHumanRequired()

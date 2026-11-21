@@ -172,6 +172,8 @@ class WithingsWebClient(
      * zkusí záložní `/cgi-bin/v2/account` (`action=get`).
      */
     var onDebugLog: ((String) -> Unit)? = null
+    /** Strictly redacted trace of `session?action=extend` (HTTP/status codes & flags only, never tokens/cookies). */
+    var onExtendTrace: ((String) -> Unit)? = null
 
     fun getUsersList(cookies: String, sessionToken: String? = null): List<WithingsUserProfile> {
         val list1 = runCatching { fetchUsersFromEndpoint("account", "getuserslist", cookies, sessionToken) }.getOrDefault(emptyList())
@@ -242,32 +244,52 @@ class WithingsWebClient(
         } catch (e: ProviderError.Unauthorized) {
             // HTTP 401 on the keepalive means the session is dead. It used to be swallowed as "transient", so
             // the renewal ladder (SSO, stored password) never ran and only the network backoff kicked in.
+            onExtendTrace?.invoke("unauth(http=401)")
             return WithingsExtendResult.Unauthorized
         } catch (e: ProviderError.Forbidden) {
+            onExtendTrace?.invoke("unauth(http=403)")
             return WithingsExtendResult.Unauthorized
         } catch (e: ProviderError.RateLimited) {
+            onExtendTrace?.invoke("transient(http=429)")
             return WithingsExtendResult.TransientError("HTTP 429")
         } catch (e: Exception) {
+            onExtendTrace?.invoke("transient(${e::class.java.simpleName})")
             return WithingsExtendResult.TransientError(e.message ?: "Network error")
         }
         if (res.code == 429 || res.code >= 500) {
+            onExtendTrace?.invoke("transient(http=${res.code})")
             return WithingsExtendResult.TransientError("HTTP ${res.code}")
         }
         val env = runCatching { Wire.parse(res.body) }.getOrNull()
-            ?: return WithingsExtendResult.TransientError("Invalid JSON response")
+            ?: run {
+                onExtendTrace?.invoke("transient(bad_json,http=${res.code})")
+                return WithingsExtendResult.TransientError("Invalid JSON response")
+            }
         // 601 is Withings' own rate limit: not a sign of a dead session.
-        if (env.status == 601) return WithingsExtendResult.TransientError("status 601")
-        if (env.status != 0) return WithingsExtendResult.Unauthorized
-        val body = env.body ?: return WithingsExtendResult.Unauthorized
+        if (env.status == 601) {
+            onExtendTrace?.invoke("transient(status=601)")
+            return WithingsExtendResult.TransientError("status 601")
+        }
+        if (env.status != 0) {
+            onExtendTrace?.invoke("unauth(status=${env.status})")
+            return WithingsExtendResult.Unauthorized
+        }
+        val body = env.body ?: run {
+            onExtendTrace?.invoke("unauth(empty_body)")
+            return WithingsExtendResult.Unauthorized
+        }
         val setCookie = res.headers.entries.firstOrNull { it.key.equals("Set-Cookie", ignoreCase = true) }?.value
+        val setCookieSessionKey = extractCookieValue(setCookie.orEmpty(), "session_key")
         val newToken = body["session_token"]?.jsonPrimitive?.contentOrNull
             ?: extractCookieValue(setCookie.orEmpty(), "session_token")
             ?: sessionToken
         var updatedCookies = mergeCookies(cookies, setCookie, newToken)
-        // Nové sessionid z prodloužení = nová hodnota cookie session_key
-        body["sessionid"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }?.let { sid ->
-            updatedCookies = mergeCookies(updatedCookies, "session_key=$sid", null)
+        // Nové sessionid z prodloužení použij jako session_key jen tehdy, pokud server neposlal čerstvé Set-Cookie: session_key.
+        val bodySid = body["sessionid"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+        if (setCookieSessionKey == null && bodySid != null) {
+            updatedCookies = mergeCookies(updatedCookies, "session_key=$bodySid", null)
         }
+        onExtendTrace?.invoke("ok(scKey=${if (setCookieSessionKey != null) 1 else 0},sid=${if (bodySid != null) 1 else 0})")
         return WithingsExtendResult.Success(WithingsExtendedSession(newToken, updatedCookies))
     }
 

@@ -289,8 +289,9 @@ Withings na serveru **není z kódu ani z HAR ověřitelná** (dřívější úd
 - **Žebřík obnovy** (`WithingsSessionCoordinator`): extend → tiché SSO přes dlouhodobé cookies `account.withings.com` →
   jedno přihlášení uloženým e-mailem a heslem.
 - **Limity:** selhání sítě = exponenciální backoff 1 → 30 min; neklasifikované selhání obnovy = cooldown 15 min → 1 h → 3 h →
-  6 h (počítá se jen skutečný pokus, přeskočená volání ne); HTTP 429 / zámek = cooldown 2 h → 6 h → 24 h; přihlášení
-  heslem nejvýše jednou za 10 min i po úspěchu (ochrana proti smyčce). Žádné trvalé „zamčení“ po neklasifikovaných chybách.
+  6 h (počítá se jen skutečný pokus, přeskočená volání ne); HTTP 429 / zámek = cooldown 2 h → 6 h → 24 h (paměť zásahů drží 24 h i přes mezičasový úspěch na pozadí, aby se cyklus `Ok → 429` nezacyklil); přihlášení
+  heslem na pozadí po úspěchu nejvýše jednou za 6 h (`PASSWORD_MIN_SPACING_MS`). Žádné trvalé „zamčení“ po neklasifikovaných chybách.
+- **Diagnostika:** kromě kroků SSO / přihlášení heslem / 2FA zaznamenává také anonymizovaný výsledek `EXTEND` (`ok`, `unauth(status=...)`, `transient(...)`).
 - **Uživatel dostane výzvu jen když je člověk opravdu potřeba:** Withings chce ověřovací kód (2FA / e-mail / SMS),
   odmítl heslo (změněné heslo), třikrát po sobě zamkl přihlášení, nebo není uloženo heslo a tiché SSO nestačí; navíc
   informativně po 6 selháních v řadě (aplikace přitom zkouší dál). Výzva uvádí důvod.

@@ -102,7 +102,7 @@ class WithingsAuthDiagnostics(
         runCatching { persist(encoded) }
     }
 
-    enum class Flow { MANUAL_PASSWORD, MFA_CODE, EMAIL_CODE, SILENT_SSO, BACKGROUND_PASSWORD }
+    enum class Flow { MANUAL_PASSWORD, MFA_CODE, EMAIL_CODE, SILENT_SSO, BACKGROUND_PASSWORD, EXTEND }
 
     companion object {
         const val MAX_ENTRIES = 30

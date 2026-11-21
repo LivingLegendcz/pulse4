@@ -11,8 +11,18 @@ interface WithingsAuthStateStore {
 
 /** Pure numbers of the re-authentication rate limiting; unit tested directly. */
 object WithingsReauthPolicy {
-    /** Minimum gap between two password logins, even after a success (loop guard for a session that keeps dying). */
-    const val PASSWORD_MIN_SPACING_MS = 10 * 60_000L
+    /**
+     * Minimum gap between two background password logins, even after a success.
+     * Withings rate-limits `account.withings.com/new_workflow/password_check` if it is hit every 1–2 hours,
+     * which can lock out the user's web login too ("Too many failed login attempts").
+     */
+    const val PASSWORD_MIN_SPACING_MS = 6 * 60 * 60_000L
+
+    /**
+     * How long a prior rate-limit hit stays remembered across background successes so an alternating
+     * `RATE_LIMITED -> 2h -> Ok -> session dies -> RATE_LIMITED` cycle still escalates to 6h / 24h / pause.
+     */
+    const val RATE_LIMIT_DECAY_MS = 24 * 60 * 60_000L
 
     /** After this many consecutive failed re-auth attempts the UI is told; background retries continue anyway. */
     const val ATTENTION_AFTER_FAILURES = 6
@@ -104,10 +114,16 @@ class WithingsSessionCoordinator(
         isAutoReloginPaused() || reauthFailures() >= WithingsReauthPolicy.ATTENTION_AFTER_FAILURES
 
     fun clearAuthPauseAndBackoff(keepPasswordSpacing: Boolean = false) {
+        val now = nowMs()
         store.delete(KEY_PAUSED_REASON)
         store.delete(KEY_PAUSED_MESSAGE)
         store.delete(KEY_OTHER_AUTH_FAILURES)
-        store.delete(KEY_RATE_LIMIT_HITS)
+        val lastRl = store.getString(KEY_LAST_RATE_LIMIT_MS)?.toLongOrNull() ?: 0L
+        val keepRateLimitMemory = keepPasswordSpacing && lastRl > 0L && (now - lastRl) in 0 until WithingsReauthPolicy.RATE_LIMIT_DECAY_MS
+        if (!keepRateLimitMemory) {
+            store.delete(KEY_RATE_LIMIT_HITS)
+            store.delete(KEY_LAST_RATE_LIMIT_MS)
+        }
         store.delete(KEY_REAUTH_COOLDOWN_UNTIL_MS)
         store.delete(KEY_LAST_PASSWORD_ATTEMPT_MS)
         if (!keepPasswordSpacing) store.delete(KEY_PASSWORD_COOLDOWN_UNTIL_MS)
@@ -163,7 +179,17 @@ class WithingsSessionCoordinator(
                     if (!hasValidSession()) pauseAutoRelogin(REASON_INVALID_CREDENTIALS, res.message)
                 }
                 WithingsAuthFailureKind.RATE_LIMITED -> {
-                    if (!hasValidSession()) pauseAutoRelogin(REASON_RATE_LIMITED, res.message)
+                    if (!hasValidSession()) {
+                        pauseAutoRelogin(REASON_RATE_LIMITED, res.message)
+                    } else {
+                        // Keep existing valid session running (R4-4), but cool down background re-auth so it does not pile on.
+                        val now = nowMs()
+                        store.putString(KEY_LAST_RATE_LIMIT_MS, now.toString())
+                        store.putString(
+                            KEY_REAUTH_COOLDOWN_UNTIL_MS,
+                            (now + WithingsReauthPolicy.rateLimitCooldownMs(1)).toString(),
+                        )
+                    }
                 }
                 WithingsAuthFailureKind.OTHER,
                 WithingsAuthFailureKind.NETWORK,
@@ -203,7 +229,11 @@ class WithingsSessionCoordinator(
                     resetNetworkBackoff()
                     // A working session proves the earlier failures are history: lift the soft prompt too.
                     store.delete(KEY_OTHER_AUTH_FAILURES)
-                    store.delete(KEY_RATE_LIMIT_HITS)
+                    val lastRl = store.getString(KEY_LAST_RATE_LIMIT_MS)?.toLongOrNull() ?: 0L
+                    if (lastRl <= 0L || (now - lastRl) !in 0 until WithingsReauthPolicy.RATE_LIMIT_DECAY_MS) {
+                        store.delete(KEY_RATE_LIMIT_HITS)
+                        store.delete(KEY_LAST_RATE_LIMIT_MS)
+                    }
                     store.delete(KEY_REAUTH_COOLDOWN_UNTIL_MS)
                     saveSession(
                         s.copy(
@@ -342,7 +372,6 @@ class WithingsSessionCoordinator(
             return false
         }
         val previousSpacing = store.getString(KEY_PASSWORD_COOLDOWN_UNTIL_MS)
-        store.putString(KEY_PASSWORD_COOLDOWN_UNTIL_MS, (now + WithingsReauthPolicy.PASSWORD_MIN_SPACING_MS).toString())
         val res = try {
             loginPassword(email, password)
         } catch (e: Exception) {
@@ -358,6 +387,9 @@ class WithingsSessionCoordinator(
         }
         return when (res) {
             is WithingsLoginResult.Ok -> {
+                // Enforce 6h spacing after a successful background password login so a session that keeps dying
+                // every 60-90 min cannot turn into a repeated password-login loop that locks out the account.
+                store.putString(KEY_PASSWORD_COOLDOWN_UNTIL_MS, (now + WithingsReauthPolicy.PASSWORD_MIN_SPACING_MS).toString())
                 clearAuthPauseAndBackoff(keepPasswordSpacing = true)
                 onSilentRefreshOk(res, email)
                 true
@@ -368,6 +400,8 @@ class WithingsSessionCoordinator(
                 false
             }
             is WithingsLoginResult.Error -> {
+                // Failed attempts already carry their own cooldowns (15m..6h for OTHER, 2h/6h/24h for RATE_LIMITED,
+                // 1m..30m for NETWORK); keep a short 10m floor only against accidental tight loops.
                 when (res.kind) {
                     WithingsAuthFailureKind.INVALID_CREDENTIALS -> {
                         store.delete(KEY_PASSWORD)
@@ -404,6 +438,7 @@ class WithingsSessionCoordinator(
     private fun recordRateLimit(now: Long, message: String) {
         val hits = (store.getString(KEY_RATE_LIMIT_HITS)?.toIntOrNull() ?: 0) + 1
         store.putString(KEY_RATE_LIMIT_HITS, hits.toString())
+        store.putString(KEY_LAST_RATE_LIMIT_MS, now.toString())
         if (hits >= WithingsReauthPolicy.RATE_LIMIT_HARD_PAUSE_AFTER) {
             pauseAutoRelogin(REASON_RATE_LIMITED, message)
             return
@@ -426,6 +461,7 @@ class WithingsSessionCoordinator(
         const val KEY_REAUTH_COOLDOWN_UNTIL_MS = "withings.auth.reauth_cooldown_until_ms"
         const val KEY_PASSWORD_COOLDOWN_UNTIL_MS = "withings.auth.password_cooldown_until_ms"
         const val KEY_RATE_LIMIT_HITS = "withings.auth.rate_limit_hits"
+        const val KEY_LAST_RATE_LIMIT_MS = "withings.auth.last_rate_limit_ms"
 
         /** Legacy (6 h throttle of the old design); only deleted now. */
         const val KEY_LAST_PASSWORD_ATTEMPT_MS = "withings.auth.last_password_attempt_ms"

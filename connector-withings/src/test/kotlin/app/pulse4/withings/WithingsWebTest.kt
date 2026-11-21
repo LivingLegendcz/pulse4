@@ -562,4 +562,25 @@ class WithingsWebTest {
         assertEquals(WithingsExtendResult.Unauthorized, extendWith(200, """{"status":250,"error":"credentials do not match"}"""))
         assertEquals(WithingsExtendResult.Unauthorized, extendWith(200, """{"status":2555,"body":{}}"""))
     }
+
+    @Test
+    fun extendPreservesFreshSetCookieSessionKeyOverBodySessionId() {
+        val traces = mutableListOf<String>()
+        val fakeHttp = object : HttpGateway {
+            override fun get(url: String, headers: Map<String, String>): HttpResponse = error("unused")
+            override fun postForm(url: String, form: Map<String, String>, headers: Map<String, String>): HttpResponse =
+                HttpResponse(
+                    200,
+                    mapOf("Set-Cookie" to "session_key=fresh-cookie-key; Path=/; Secure"),
+                    """{"status":0,"body":{"sessionid":"legacy-sid-999"}}""",
+                )
+        }
+        val client = WithingsWebClient(fakeHttp).apply { onExtendTrace = { traces += it } }
+        val res = client.extendSessionDetailed("session_key=old-key; w_uuid=abc", null)
+        assertTrue(res is WithingsExtendResult.Success)
+        val ext = res.session
+        assertTrue(ext.cookies.contains("session_key=fresh-cookie-key"), "Expected Set-Cookie session_key to win, got: ${ext.cookies}")
+        assertFalse(ext.cookies.contains("legacy-sid-999"))
+        assertEquals(listOf("ok(scKey=1,sid=1)"), traces)
+    }
 }

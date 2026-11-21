@@ -246,5 +246,54 @@ class WithingsSilentReauthTest {
         assertEquals(0, h.coord.reauthFailures())
         assertNull(h.store.getString(WithingsSessionCoordinator.KEY_PASSWORD_COOLDOWN_UNTIL_MS))
         assertNull(h.store.getString(WithingsSessionCoordinator.KEY_RATE_LIMIT_HITS))
+        assertNull(h.store.getString(WithingsSessionCoordinator.KEY_LAST_RATE_LIMIT_MS))
+    }
+
+    @Test
+    fun `regression - alternating rate limit and background ok still escalates and enforces 6h spacing`() {
+        // Reproduces the real phone log: 14:07 RATE_LIMITED -> 16:07 Ok -> 17:38 RATE_LIMITED.
+        // Previously PASSWORD_MIN_SPACING_MS was 10 min and background Ok reset KEY_RATE_LIMIT_HITS to 0,
+        // causing an infinite loop every 1-2h that locked out the user's account on app.withings.com.
+        val h = Harness(
+            session = expiredSession(),
+            login = { WithingsLoginResult.Error("Too many attempts", WithingsAuthFailureKind.RATE_LIMITED) },
+        ).withPassword()
+
+        // 14:07: hit #1 -> 2h cooldown
+        assertFalse(h.coord.renewSession())
+        assertEquals(1, h.loginCalls)
+        assertEquals(h.now + 2 * 60 * 60_000L, h.coord.reauthCooldownUntilMs())
+
+        // 16:07 (+2h): background password login succeeds, but rate-limit hit memory is kept for 24h
+        // and next background password login is spaced by 6h.
+        h.now += 2 * 60 * 60_000L + 1_000L
+        h.login = { ok() }
+        assertTrue(h.coord.renewSession())
+        assertEquals(2, h.loginCalls)
+        assertEquals("1", h.store.getString(WithingsSessionCoordinator.KEY_RATE_LIMIT_HITS))
+
+        // 17:37 (+1.5h): session dies again -> password login MUST be skipped because of 6h spacing!
+        h.now += 90 * 60_000L
+        h.login = { WithingsLoginResult.Error("Too many attempts", WithingsAuthFailureKind.RATE_LIMITED) }
+        assertFalse(h.coord.renewSession())
+        assertEquals("spaced by 6h, must not hammer password_check", 2, h.loginCalls)
+
+        // 22:08 (+6h after 16:07): password login allowed, hits RATE_LIMITED -> counted as hit #2 (6h cooldown, not #1!).
+        h.now += 5 * 60 * 60_000L
+        assertFalse(h.coord.renewSession())
+        assertEquals(3, h.loginCalls)
+        assertEquals("2", h.store.getString(WithingsSessionCoordinator.KEY_RATE_LIMIT_HITS))
+        assertEquals(h.now + 6 * 60 * 60_000L, h.coord.reauthCooldownUntilMs())
+    }
+
+    @Test
+    fun `manual rate limit with existing session sets timed cooldown without hard pausing`() {
+        val h = Harness(session = expiredSession(), login = { ok() }).withPassword()
+        h.coord.recordManualAuthResult(WithingsLoginResult.Error("429", WithingsAuthFailureKind.RATE_LIMITED))
+        assertFalse(h.coord.isAutoReloginPaused())
+        assertTrue(h.coord.reauthCooldownUntilMs() > h.now)
+        // Background renewal respects the cooldown instead of piling onto the manual rate limit.
+        assertFalse(h.coord.renewSession())
+        assertEquals(0, h.loginCalls)
     }
 }

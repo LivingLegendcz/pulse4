@@ -24,6 +24,9 @@ object WithingsReauthPolicy {
      */
     const val RATE_LIMIT_DECAY_MS = 24 * 60 * 60_000L
 
+    /** Minimum gap between two failed silent SSO attempts (`Error(OTHER)`) so SSO cannot spam while password login is spaced. */
+    const val SSO_FAIL_COOLDOWN_MS = 15 * 60_000L
+
     /** After this many consecutive failed re-auth attempts the UI is told; background retries continue anyway. */
     const val ATTENTION_AFTER_FAILURES = 6
 
@@ -125,6 +128,7 @@ class WithingsSessionCoordinator(
             store.delete(KEY_LAST_RATE_LIMIT_MS)
         }
         store.delete(KEY_REAUTH_COOLDOWN_UNTIL_MS)
+        store.delete(KEY_SSO_COOLDOWN_UNTIL_MS)
         store.delete(KEY_LAST_PASSWORD_ATTEMPT_MS)
         if (!keepPasswordSpacing) store.delete(KEY_PASSWORD_COOLDOWN_UNTIL_MS)
         resetNetworkBackoff()
@@ -235,6 +239,7 @@ class WithingsSessionCoordinator(
                         store.delete(KEY_LAST_RATE_LIMIT_MS)
                     }
                     store.delete(KEY_REAUTH_COOLDOWN_UNTIL_MS)
+                    store.delete(KEY_SSO_COOLDOWN_UNTIL_MS)
                     saveSession(
                         s.copy(
                             sessionToken = ext.session.sessionToken ?: s.sessionToken,
@@ -293,7 +298,9 @@ class WithingsSessionCoordinator(
         val cookies = hasUsableCookies()
         var ssoFailure: WithingsLoginResult.Error? = null
 
-        if (cookies) {
+        var ssoSkippedByCooldown = false
+        val ssoCooldownUntil = store.getString(KEY_SSO_COOLDOWN_UNTIL_MS)?.toLongOrNull() ?: 0L
+        if (cookies && now >= ssoCooldownUntil) {
             if (shouldAbort()) {
                 onLog("tryAutoReLogin aborted: manual login pending")
                 return false
@@ -332,16 +339,25 @@ class WithingsSessionCoordinator(
                         pauseAutoRelogin(REASON_INVALID_CREDENTIALS, ssoRes.message)
                         return false
                     }
-                    WithingsAuthFailureKind.OTHER -> ssoFailure = ssoRes
+                    WithingsAuthFailureKind.OTHER -> {
+                        store.putString(KEY_SSO_COOLDOWN_UNTIL_MS, (now + WithingsReauthPolicy.SSO_FAIL_COOLDOWN_MS).toString())
+                        ssoFailure = ssoRes
+                    }
                     WithingsAuthFailureKind.ABORTED -> {
                         onLog("tryAutoReLogin: SSO aborted")
                         return false
                     }
                 }
             }
+        } else if (cookies) {
+            ssoSkippedByCooldown = true
+            onLog("tryAutoReLogin: SSO skipped (cooldown ${(ssoCooldownUntil - now) / 60_000L} min left)")
         }
 
         if (password != null && email != null) return tryPasswordLogin(now, email, password)
+
+        // No stored password (or e-mail): if SSO was just skipped by cooldown, do not falsely hard-pause.
+        if (ssoSkippedByCooldown) return false
 
         // No stored password (or e-mail): silent SSO was the only rung and it did not help.
         val evidenceOfConnection = email != null || cookies || runCatching { loadSession() != null }.getOrDefault(false)
@@ -459,6 +475,7 @@ class WithingsSessionCoordinator(
         /** Consecutive failed re-auth attempts (real attempts only). Key name kept for stored-state compatibility. */
         const val KEY_OTHER_AUTH_FAILURES = "withings.auth.other_failures"
         const val KEY_REAUTH_COOLDOWN_UNTIL_MS = "withings.auth.reauth_cooldown_until_ms"
+        const val KEY_SSO_COOLDOWN_UNTIL_MS = "withings.auth.sso_cooldown_until_ms"
         const val KEY_PASSWORD_COOLDOWN_UNTIL_MS = "withings.auth.password_cooldown_until_ms"
         const val KEY_RATE_LIMIT_HITS = "withings.auth.rate_limit_hits"
         const val KEY_LAST_RATE_LIMIT_MS = "withings.auth.last_rate_limit_ms"

@@ -102,7 +102,7 @@ class WithingsAuthDiagnostics(
         runCatching { persist(encoded) }
     }
 
-    enum class Flow { MANUAL_PASSWORD, MFA_CODE, EMAIL_CODE, SILENT_SSO, BACKGROUND_PASSWORD, EXTEND }
+    enum class Flow { MANUAL_PASSWORD, MFA_CODE, EMAIL_CODE, SILENT_SSO, BACKGROUND_PASSWORD, EXTEND, SYNC }
 
     companion object {
         const val MAX_ENTRIES = 30
@@ -118,7 +118,7 @@ class WithingsAuthDiagnostics(
 
         /** Step labels come from code, but keep them short and free of anything e-mail-like anyway. */
         internal fun safeLabel(s: String): String =
-            if (s.contains('@')) "<redacted>" else s.take(48).replace(Regex("[^A-Za-z0-9_:./\\- ]"), "_")
+            if (s.contains('@')) "<redacted>" else s.take(48).replace(Regex("[^A-Za-z0-9_:./=(),\\- ]"), "_")
 
         /** Host + path only; query and fragment dropped; e-mail-like or token-like segments masked. */
         internal fun sanitizeUrl(url: String): String {

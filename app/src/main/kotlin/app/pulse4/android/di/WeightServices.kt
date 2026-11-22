@@ -722,7 +722,8 @@ class WithingsService internal constructor(
             },
             onRefreshFallback = {
                 refreshFallbackAttempted = true
-                if (renewSession(forceExtend = true)) loadWebSession() else null
+                // WithingsWebFetcher už extendSession() zkusil před okamžikem – další extend by byl jen duplicitní POST.
+                if (sessionCoordinator.tryAutoReLogin()) loadWebSession() else null
             },
             existingIdsByGrpIds = { _ ->
                 if (activeUserId != null) db.observations().idsInForAccount(Provider.WITHINGS_API.name, activeUserId, 0L, Long.MAX_VALUE).toSet()
@@ -756,10 +757,15 @@ class WithingsService internal constructor(
         }
 
         PLog.i("Withings") { "runWebImport: running engine.runArea for user ${s.primaryUserId}" }
+        authDiagnostics.mark(WithingsAuthDiagnostics.Flow.SYNC, if (allowRetry) "web_start" else "web_retry")
         val result = engine.runArea(SyncArea.WEIGHT, nowMs)
         PLog.i("Withings") { "runWebImport result: $result" }
         when (result) {
             is AreaResult.Success -> {
+                authDiagnostics.mark(
+                    WithingsAuthDiagnostics.Flow.SYNC,
+                    "web_ok(saved=${result.saved})",
+                )
                 val latestSession = authGate.background {
                     (loadWebSession() ?: s).copy(lastSyncMs = nowMs).also { saveWebSession(it) }
                 }
@@ -789,6 +795,10 @@ class WithingsService internal constructor(
                 }
             }
             is AreaResult.Failed -> {
+                authDiagnostics.mark(
+                    WithingsAuthDiagnostics.Flow.SYNC,
+                    "web_fail(${result.error::class.java.simpleName})",
+                )
                 if (result.error is ProviderError.Unauthorized && authGate.generation() == startGen) {
                     if (allowRetry && !refreshFallbackAttempted && !sessionCoordinator.isAutoReloginPaused() && renewSession(forceExtend = true)) {
                         return@synchronized runWebImport(nowMs, allowRetry = false)
@@ -797,6 +807,7 @@ class WithingsService internal constructor(
                 }
             }
             is AreaResult.NeedsUser -> if (authGate.generation() == startGen) {
+                authDiagnostics.mark(WithingsAuthDiagnostics.Flow.SYNC, "web_needs_user")
                 if (allowRetry && !refreshFallbackAttempted && !sessionCoordinator.isAutoReloginPaused() && renewSession(forceExtend = true)) {
                     return@synchronized runWebImport(nowMs, allowRetry = false)
                 }
@@ -809,7 +820,10 @@ class WithingsService internal constructor(
 
     /** Hlavní import váhy a složení těla: upřednostňuje přímé webové přihlášení, jako zálohu používá OAuth. */
     fun runImport(nowMs: Long): AreaResult? =
-        importGate.tryRun(onBusy = { skippedBusy("runImport") }) { runImportLocked(nowMs) }
+        importGate.tryRun(onBusy = {
+            authDiagnostics.mark(WithingsAuthDiagnostics.Flow.SYNC, "skip(busy)")
+            skippedBusy("runImport")
+        }) { runImportLocked(nowMs) }
 
     private fun runImportLocked(nowMs: Long): AreaResult? = synchronized(importLock) {
         if (!sl.settings.withingsDirectEnabled) return@synchronized null
@@ -817,6 +831,7 @@ class WithingsService internal constructor(
             return@synchronized runWebImport(nowMs)
         }
         if (!session.isConnected()) return@synchronized null
+        authDiagnostics.mark(WithingsAuthDiagnostics.Flow.SYNC, "oauth_start")
         val db = sl.db
         val fetcher = WithingsFetcher(
             config(), WithingsApi(config(), session, http), session, { vault.load()!!.userId }, sl.settings.zoneId,
@@ -830,7 +845,14 @@ class WithingsService internal constructor(
                 if (b.tombstones.isNotEmpty()) db.observations().markDeleted(b.tombstones)
             }
         }, RoomAreaStateStore(db, "withings."))
-        return runCatching { engine.runArea(SyncArea.WEIGHT, nowMs) }.getOrElse { AreaResult.Failed(it as? ProviderError ?: ProviderError.Server(0)) }
+        val res = runCatching { engine.runArea(SyncArea.WEIGHT, nowMs) }.getOrElse { AreaResult.Failed(it as? ProviderError ?: ProviderError.Server(0)) }
+        when (res) {
+            is AreaResult.Success -> authDiagnostics.mark(WithingsAuthDiagnostics.Flow.SYNC, "oauth_ok(saved=${res.saved})")
+            is AreaResult.Failed -> authDiagnostics.mark(WithingsAuthDiagnostics.Flow.SYNC, "oauth_fail(${res.error::class.java.simpleName})")
+            is AreaResult.NeedsUser -> authDiagnostics.mark(WithingsAuthDiagnostics.Flow.SYNC, "oauth_needs_user")
+            else -> Unit
+        }
+        return res
     }
 
     /** Uloží sportovní aktivity z hodinek Withings (`v2/measure?action=getworkouts`) se zachováním ručních poznámek. */

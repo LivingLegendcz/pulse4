@@ -296,4 +296,66 @@ class WithingsSilentReauthTest {
         assertFalse(h.coord.renewSession())
         assertEquals(0, h.loginCalls)
     }
+
+    @Test
+    fun `failed silent SSO sets cooldown so repeated renewSession while password is spaced does not spam SSO`() {
+        val h = Harness(
+            session = expiredSession(),
+            sso = { WithingsLoginResult.Error("login page", WithingsAuthFailureKind.OTHER) },
+            login = { ok() },
+        ).withPassword()
+
+        // First renewal succeeds via password -> sets 6h password spacing.
+        assertTrue(h.coord.renewSession())
+        assertEquals(1, h.ssoCalls)
+        assertEquals(1, h.loginCalls)
+
+        // 30 min later, session dies again: SSO runs once, fails (OTHER), sets 15 min SSO cooldown; password is spaced.
+        h.now += 30 * 60_000L
+        assertFalse(h.coord.renewSession())
+        assertEquals(2, h.ssoCalls)
+        assertEquals(1, h.loginCalls)
+
+        // 10 s and 5 min later: SSO MUST be skipped by cooldown instead of spamming account.withings.com!
+        h.now += 10_000L
+        assertFalse(h.coord.renewSession())
+        h.now += 5 * 60_000L
+        assertFalse(h.coord.renewSession())
+        assertEquals(2, h.ssoCalls)
+        assertEquals(1, h.loginCalls)
+
+        // After 15 min SSO cooldown expires, SSO may run again.
+        h.now += 15 * 60_000L
+        assertFalse(h.coord.renewSession())
+        assertEquals(3, h.ssoCalls)
+    }
+
+    @Test
+    fun `diagnostics preserves readable SYNC and EXTEND parameters and filterEligibleChildContacts hides adults`() {
+        val diag = WithingsAuthDiagnostics(nowMs = { 1_700_000_000_000L })
+        diag.mark(WithingsAuthDiagnostics.Flow.SYNC, "web_start")
+        diag.mark(WithingsAuthDiagnostics.Flow.EXTEND, "ok(sidSent=1,scKey=1,sid=0)")
+        diag.mark(WithingsAuthDiagnostics.Flow.SYNC, "web_ok(saved=4,tomb=0)")
+        val text = diag.export()
+        assertTrue(text.contains("SYNC web_start"))
+        assertTrue(text.contains("EXTEND ok(sidSent=1,scKey=1,sid=0)"))
+        assertTrue(text.contains("SYNC web_ok(saved=4,tomb=0)"))
+
+        val adult = app.pulse4.android.data.ContactRow("id-kajaska", "Kajaska", "pub1", "fp1", 100L)
+        val child = app.pulse4.android.data.ContactRow("id-child", "Matyas", "pub2", "fp2", 100L)
+        val filtered = app.pulse4.android.ui.filterEligibleChildContacts(
+            contacts = listOf(adult, child),
+            verifiedChildIds = setOf("id-child"),
+            boundChildIds = emptySet(),
+        )
+        assertEquals(listOf("id-child"), filtered.map { it.identity })
+
+        // No children at all -> empty list (adult sharing contact is never shown as a child)
+        val noChildren = app.pulse4.android.ui.filterEligibleChildContacts(
+            contacts = listOf(adult),
+            verifiedChildIds = emptySet(),
+            boundChildIds = emptySet(),
+        )
+        assertTrue(noChildren.isEmpty())
+    }
 }

@@ -1478,12 +1478,21 @@ fun WithingsWebLoginDialog(
 @Composable
 fun WithingsDiagnosticsCard(sl: ServiceLocator, refreshKey: Any? = null) {
     val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
     var expanded by rememberSaveable { mutableStateOf(false) }
-    var reload by remember { mutableStateOf(0) }
     var text by remember { mutableStateOf("") }
     var copied by remember { mutableStateOf(false) }
-    LaunchedEffect(expanded, reload, refreshKey) {
-        if (expanded) text = withContext(Dispatchers.IO) { sl.withings.authDiagnosticsText() }
+    var refreshing by remember { mutableStateOf(false) }
+    var refreshedAt by remember { mutableStateOf<String?>(null) }
+
+    fun currentTimeLabel(): String =
+        java.time.LocalTime.now().format(java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss"))
+
+    LaunchedEffect(expanded, refreshKey) {
+        if (expanded) {
+            text = withContext(Dispatchers.IO) { sl.withings.authDiagnosticsText() }
+            refreshedAt = currentTimeLabel()
+        }
     }
     Card(
         shape = RoundedCornerShape(16.dp),
@@ -1499,7 +1508,7 @@ fun WithingsDiagnosticsCard(sl: ServiceLocator, refreshKey: Any? = null) {
                 Column(Modifier.weight(1f)) {
                     Text("Diagnostika Withings", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = Color.White)
                     Text(
-                        "Průběh posledních pokusů o přihlášení a tiché obnovení (bez hesla, cookies a e-mailu).",
+                        "Průběh posledních synchronizací, přihlášení a tichého obnovení (bez hesla, cookies a e-mailu).",
                         style = MaterialTheme.typography.labelSmall,
                         color = Color(0xFF94A3B8)
                     )
@@ -1513,7 +1522,10 @@ fun WithingsDiagnosticsCard(sl: ServiceLocator, refreshKey: Any? = null) {
                     fontFamily = FontFamily.Monospace,
                     color = Color(0xFFCBD5E1)
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
                     OutlinedButton(onClick = {
                         val cm = ctx.getSystemService(ClipboardManager::class.java)
                         copied = cm != null && runCatching {
@@ -1525,7 +1537,25 @@ fun WithingsDiagnosticsCard(sl: ServiceLocator, refreshKey: Any? = null) {
                         Spacer(Modifier.width(6.dp))
                         Text(if (copied) "Zkopírováno" else "Zkopírovat")
                     }
-                    TextButton(onClick = { reload++; copied = false }) { Text("Obnovit") }
+                    TextButton(
+                        enabled = !refreshing,
+                        onClick = {
+                            copied = false
+                            refreshing = true
+                            scope.launch {
+                                text = withContext(Dispatchers.IO) { sl.withings.authDiagnosticsText() }
+                                refreshedAt = currentTimeLabel()
+                                refreshing = false
+                            }
+                        }
+                    ) { Text(if (refreshing) "Obnovuji…" else "Obnovit") }
+                    refreshedAt?.let { ts ->
+                        Text(
+                            "Obnoveno $ts",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFF94A3B8),
+                        )
+                    }
                 }
             }
         }

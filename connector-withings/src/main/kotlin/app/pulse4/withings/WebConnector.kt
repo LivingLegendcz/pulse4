@@ -239,47 +239,96 @@ class WithingsWebClient(
 
     /**
      * Prodloužení přihlášené webové relace (`/cgi-bin/session`, `action=extend`) s rozlišením důvodu selhání.
+     *
+     * Na rozdíl od čtecích endpointů (`/measure`, `/account`) vyžaduje `session?action=extend` ve formuláři
+     * parametr `sessionid` (viz DevLog 14; bez něj server vrací `status=501`). Pokud server odmítne `session_key`
+     * v poli `sessionid` stavem `250`, zkusí se jednou záložně bez `sessionid`.
      */
     fun extendSessionDetailed(cookies: String, sessionToken: String? = null): WithingsExtendResult {
         val form = baseForm("extend", cookies, sessionToken)
+        val cookieSid = extractCookieValue(cookies, "sessionid")
+        val cookieKey = extractCookieValue(cookies, "session_key")
+        var usedKeyAsSid = false
+        if (form["sessionid"].isNullOrBlank()) {
+            val sidCandidate = cookieSid ?: cookieKey
+            if (!sidCandidate.isNullOrBlank()) {
+                form["sessionid"] = sidCandidate
+                usedKeyAsSid = (cookieSid == null && cookieKey != null)
+            }
+        }
+        val first = runExtendAttempt(form, cookies, sessionToken, sidSent = !form["sessionid"].isNullOrBlank())
+        if (first is ExtendAttempt.Status250 && usedKeyAsSid) {
+            val fallbackForm = baseForm("extend", cookies, sessionToken)
+            return when (val second = runExtendAttempt(fallbackForm, cookies, sessionToken, sidSent = false)) {
+                is ExtendAttempt.Done -> second.result
+                is ExtendAttempt.Status250 -> {
+                    onExtendTrace?.invoke("unauth(status=250,sidSent=0)")
+                    WithingsExtendResult.Unauthorized
+                }
+            }
+        }
+        return when (first) {
+            is ExtendAttempt.Done -> first.result
+            is ExtendAttempt.Status250 -> {
+                onExtendTrace?.invoke("unauth(status=250,sidSent=1)")
+                WithingsExtendResult.Unauthorized
+            }
+        }
+    }
+
+    private sealed interface ExtendAttempt {
+        data class Done(val result: WithingsExtendResult) : ExtendAttempt
+        data object Status250 : ExtendAttempt
+    }
+
+    private fun runExtendAttempt(
+        form: Map<String, String>,
+        cookies: String,
+        sessionToken: String?,
+        sidSent: Boolean,
+    ): ExtendAttempt {
+        val sidTag = if (sidSent) "1" else "0"
         val res = try {
             post("session", form, cookies, sessionToken)
         } catch (e: ProviderError.Unauthorized) {
             // HTTP 401 on the keepalive means the session is dead. It used to be swallowed as "transient", so
             // the renewal ladder (SSO, stored password) never ran and only the network backoff kicked in.
-            onExtendTrace?.invoke("unauth(http=401)")
-            return WithingsExtendResult.Unauthorized
+            onExtendTrace?.invoke("unauth(http=401,sidSent=$sidTag)")
+            return ExtendAttempt.Done(WithingsExtendResult.Unauthorized)
         } catch (e: ProviderError.Forbidden) {
-            onExtendTrace?.invoke("unauth(http=403)")
-            return WithingsExtendResult.Unauthorized
+            onExtendTrace?.invoke("unauth(http=403,sidSent=$sidTag)")
+            return ExtendAttempt.Done(WithingsExtendResult.Unauthorized)
         } catch (e: ProviderError.RateLimited) {
-            onExtendTrace?.invoke("transient(http=429)")
-            return WithingsExtendResult.TransientError("HTTP 429")
+            onExtendTrace?.invoke("transient(http=429,sidSent=$sidTag)")
+            return ExtendAttempt.Done(WithingsExtendResult.TransientError("HTTP 429"))
         } catch (e: Exception) {
-            onExtendTrace?.invoke("transient(${e::class.java.simpleName})")
-            return WithingsExtendResult.TransientError(e.message ?: "Network error")
+            onExtendTrace?.invoke("transient(${e::class.java.simpleName},sidSent=$sidTag)")
+            return ExtendAttempt.Done(WithingsExtendResult.TransientError(e.message ?: "Network error"))
         }
         if (res.code == 429 || res.code >= 500) {
-            onExtendTrace?.invoke("transient(http=${res.code})")
-            return WithingsExtendResult.TransientError("HTTP ${res.code}")
+            onExtendTrace?.invoke("transient(http=${res.code},sidSent=$sidTag)")
+            return ExtendAttempt.Done(WithingsExtendResult.TransientError("HTTP ${res.code}"))
         }
         val env = runCatching { Wire.parse(res.body) }.getOrNull()
             ?: run {
-                onExtendTrace?.invoke("transient(bad_json,http=${res.code})")
-                return WithingsExtendResult.TransientError("Invalid JSON response")
+                onExtendTrace?.invoke("transient(bad_json,http=${res.code},sidSent=$sidTag)")
+                return ExtendAttempt.Done(WithingsExtendResult.TransientError("Invalid JSON response"))
             }
         // 601 is Withings' own rate limit: not a sign of a dead session.
         if (env.status == 601) {
-            onExtendTrace?.invoke("transient(status=601)")
-            return WithingsExtendResult.TransientError("status 601")
+            onExtendTrace?.invoke("transient(status=601,sidSent=$sidTag)")
+            return ExtendAttempt.Done(WithingsExtendResult.TransientError("status 601"))
+        }
+        if (env.status == 250) {
+            return ExtendAttempt.Status250
         }
         if (env.status != 0) {
-            onExtendTrace?.invoke("unauth(status=${env.status})")
-            return WithingsExtendResult.Unauthorized
+            onExtendTrace?.invoke("unauth(status=${env.status},sidSent=$sidTag)")
+            return ExtendAttempt.Done(WithingsExtendResult.Unauthorized)
         }
         val body = env.body ?: run {
-            onExtendTrace?.invoke("unauth(empty_body)")
-            return WithingsExtendResult.Unauthorized
+            onExtendTrace?.invoke("unauth(empty_body,sidSent=$sidTag)")
+            return ExtendAttempt.Done(WithingsExtendResult.Unauthorized)
         }
         val setCookie = res.headers.entries.firstOrNull { it.key.equals("Set-Cookie", ignoreCase = true) }?.value
         val setCookieSessionKey = extractCookieValue(setCookie.orEmpty(), "session_key")
@@ -292,8 +341,8 @@ class WithingsWebClient(
         if (setCookieSessionKey == null && bodySid != null) {
             updatedCookies = mergeCookies(updatedCookies, "session_key=$bodySid", null)
         }
-        onExtendTrace?.invoke("ok(scKey=${if (setCookieSessionKey != null) 1 else 0},sid=${if (bodySid != null) 1 else 0})")
-        return WithingsExtendResult.Success(WithingsExtendedSession(newToken, updatedCookies))
+        onExtendTrace?.invoke("ok(sidSent=$sidTag,scKey=${if (setCookieSessionKey != null) 1 else 0},sid=${if (bodySid != null) 1 else 0})")
+        return ExtendAttempt.Done(WithingsExtendResult.Success(WithingsExtendedSession(newToken, updatedCookies)))
     }
 
     /**
@@ -833,6 +882,7 @@ class WithingsWebFetcher(
 ) : AreaFetcher {
     var skippedItems = 0
         private set
+    private var lastExtendFailedAtMs: Long = 0L
 
     override fun fetch(area: SyncArea, sinceMs: Long?): Batch {
         if (area != SyncArea.WEIGHT) return Batch(emptyList(), sinceMs ?: nowMs())
@@ -846,6 +896,7 @@ class WithingsWebFetcher(
         if (now - lastExt > 30 * 60 * 1000L) {
             val extended = runCatching { client.extendSession(s.cookies, s.sessionToken) }.getOrNull()
             if (extended != null) {
+                lastExtendFailedAtMs = 0L
                 val updated = s.copy(
                     sessionToken = extended.sessionToken ?: s.sessionToken,
                     cookies = extended.cookies,
@@ -853,6 +904,8 @@ class WithingsWebFetcher(
                 )
                 onSessionExtended(updated)
                 s = updated
+            } else {
+                lastExtendFailedAtMs = now
             }
         }
 
@@ -956,18 +1009,26 @@ class WithingsWebFetcher(
 
     override fun refreshSession() {
         val s = sessionProvider() ?: throw ProviderError.Unauthorized()
-        val extended = runCatching { client.extendSession(s.cookies, s.sessionToken) }.getOrNull()
+        val now = nowMs()
+        val recentlyFailedExtend = lastExtendFailedAtMs > 0L && (now - lastExtendFailedAtMs) in 0 until 60_000L
+        val extended = if (recentlyFailedExtend) {
+            null
+        } else {
+            runCatching { client.extendSession(s.cookies, s.sessionToken) }.getOrNull()
+        }
         if (extended != null) {
+            lastExtendFailedAtMs = 0L
             val updated = s.copy(
                 sessionToken = extended.sessionToken ?: s.sessionToken,
                 cookies = extended.cookies,
-                lastExtendedMs = nowMs()
+                lastExtendedMs = now
             )
             onSessionExtended(updated)
             return
         }
         val fallbackSession = runCatching { onRefreshFallback?.invoke() }.getOrNull()
         if (fallbackSession != null && fallbackSession.isConnected()) {
+            lastExtendFailedAtMs = 0L
             onSessionExtended(fallbackSession)
             return
         }

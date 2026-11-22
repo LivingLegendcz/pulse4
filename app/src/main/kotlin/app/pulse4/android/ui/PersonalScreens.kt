@@ -3070,7 +3070,9 @@ fun DedicatedMetricDetailScreen(
                 LineChart(
                     values = series.values.map { it?.div(3600.0) },
                     band = series.usual?.let { (it.low / 3600.0)..(it.high / 3600.0) },
-                    color = cfg.color
+                    color = cfg.color,
+                    unit = "h",
+                    xLabels = series.dates.map { it.toString().takeLast(5) }
                 )
 
                 // Graf 2: Skóre spánku (pokud existuje)
@@ -3080,7 +3082,9 @@ fun DedicatedMetricDetailScreen(
                     LineChart(
                         values = scSeries.values,
                         band = scSeries.usual?.let { it.low..it.high },
-                        color = Color(0xFFA855F7)
+                        color = Color(0xFFA855F7),
+                        unit = "b.",
+                        xLabels = scSeries.dates.map { it.toString().takeLast(5) }
                     )
                 }
 
@@ -3201,7 +3205,9 @@ fun DedicatedMetricDetailScreen(
                 LineChart(
                     values = series.values.map { it?.let(fmt::convertWeight) },
                     band = series.usual?.let { fmt.convertWeight(it.low)..fmt.convertWeight(it.high) },
-                    color = cfg.color
+                    color = cfg.color,
+                    unit = fmt.weightUnit(),
+                    xLabels = series.dates.map { it.toString().takeLast(5) }
                 )
 
                 val bfSeries = b.bodyFatSeries
@@ -3210,7 +3216,9 @@ fun DedicatedMetricDetailScreen(
                     LineChart(
                         values = bfSeries.values,
                         band = bfSeries.usual?.let { it.low..it.high },
-                        color = Color(0xFF06B6D4)
+                        color = Color(0xFF06B6D4),
+                        unit = "%",
+                        xLabels = bfSeries.dates.map { it.toString().takeLast(5) }
                     )
                 }
 

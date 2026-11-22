@@ -291,12 +291,17 @@ fun SinglestatCard(
                     val botPad = 6f
                     val usableH = (size.height - topPad - botPad).coerceAtLeast(10f)
 
-                    fun x(i: Int) = size.width * i / (historyValues.size - 1).coerceAtLeast(1)
-                    fun y(v: Double) = topPad + (usableH * (1.0 - (v - lo) / span)).toFloat()
-
                     val pts = mutableListOf<Pair<Int, Double>>()
                     historyValues.forEachIndexed { idx, v -> if (v != null && v.isFinite()) pts.add(idx to v) }
                     if (pts.size >= 2) {
+                        val firstIdx = pts.first().first
+                        val lastIdx = pts.last().first
+                        val idxSpan = (lastIdx - firstIdx).coerceAtLeast(1)
+                        val rightPad = 8.dp.toPx()
+                        val usableW = (size.width - rightPad).coerceAtLeast(10f)
+                        fun x(i: Int) = usableW * (i - firstIdx) / idxSpan
+                        fun y(v: Double) = topPad + (usableH * (1.0 - (v - lo) / span)).toFloat()
+
                         val strokePath = Path()
                         val fillPath = Path()
                         val firstX = x(pts.first().first)
@@ -706,6 +711,74 @@ private fun ChartCardFrame(
 }
 
 /**
+ * Aktivní indexový rozsah [start]..[end] pro vodorovnou osu grafu.
+ * Oříznutím prázdných okrajů (`null` na začátku/konci okna, např. u 7denního pohledu bez dnešního měření)
+ * se křivka i výplň roztáhnou přes celou dostupnou šířku plátna při zachování časových rozestupů uvnitř.
+ */
+internal data class ChartIndexSpan(val start: Int, val end: Int) {
+    val count: Int get() = (end - start + 1).coerceAtLeast(1)
+
+    fun fraction(index: Int): Float =
+        if (end <= start) 0.5f
+        else ((index - start).toFloat() / (end - start).toFloat()).coerceIn(0f, 1f)
+
+    fun indexForFraction(fraction: Float): Int =
+        if (end <= start) start
+        else (start + kotlin.math.round(fraction.coerceIn(0f, 1f) * (end - start)).toInt()).coerceIn(start, end)
+}
+
+internal fun activeFiniteSpan(seriesList: List<List<Double?>>): ChartIndexSpan? {
+    var first = Int.MAX_VALUE
+    var last = -1
+    for (vals in seriesList) {
+        for (i in vals.indices) {
+            val v = vals[i]
+            if (v != null && v.isFinite()) {
+                if (i < first) first = i
+                if (i > last) last = i
+            }
+        }
+    }
+    return if (last >= first) ChartIndexSpan(first, last) else null
+}
+
+@Composable
+private fun ChartXAxisLabels(
+    xLabels: List<String>,
+    span: ChartIndexSpan,
+    startPadding: androidx.compose.ui.unit.Dp = 52.dp,
+    topPadding: androidx.compose.ui.unit.Dp = 2.dp,
+    color: Color = Color(0xFFCBD5E1),
+) {
+    if (xLabels.isEmpty()) return
+    val s = span.start.coerceIn(0, xLabels.lastIndex)
+    val e = span.end.coerceIn(s, xLabels.lastIndex)
+    if (s == e) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(start = startPadding, top = topPadding),
+            horizontalArrangement = Arrangement.Center
+        ) {
+            Text(xLabels[s], style = MaterialTheme.typography.labelSmall, color = color, maxLines = 1, softWrap = false)
+        }
+    } else {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(start = startPadding, top = topPadding),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(xLabels[s], style = MaterialTheme.typography.labelSmall, color = color, maxLines = 1, softWrap = false)
+            if (e - s >= 2) {
+                Text(xLabels[(s + e) / 2], style = MaterialTheme.typography.labelSmall, color = color, maxLines = 1, softWrap = false)
+            }
+            Text(xLabels[e], style = MaterialTheme.typography.labelSmall, color = color, maxLines = 1, softWrap = false)
+        }
+    }
+}
+
+/**
  * Vícenásobný srovnávací graf (Grafana / Oura Biometric Observatory styl) pro Skupinový Dashboard,
  * Korelace metrik i Porovnání aktivit (Compare).
  * Podporuje zapínání/vypínání jednotlivých křivek v legendě, fotografické pozadí a interaktivní odečet.
@@ -727,12 +800,16 @@ fun MultiSeriesLineChart(
 ) {
     var hiddenIds by remember { mutableStateOf(setOf<String>()) }
     val maxPoints = remember(series) { series.maxOfOrNull { it.values.size } ?: 0 }
-    var selectedIdx by remember(maxPoints) { mutableStateOf<Int?>(null) }
     var independentScale by remember(defaultIndependentScale) { mutableStateOf(defaultIndependentScale) }
 
     val visibleSeries = remember(series, hiddenIds) {
         series.filter { it.id !in hiddenIds && it.values.any { v -> v != null } }
     }
+    val xSpan = remember(visibleSeries, maxPoints) {
+        activeFiniteSpan(visibleSeries.map { it.values })
+            ?: ChartIndexSpan(0, (maxPoints - 1).coerceAtLeast(0))
+    }
+    var selectedIdx by remember(xSpan) { mutableStateOf<Int?>(null) }
     // Styles depend on all series (not only visible ones) so toggling the legend never restyles lines.
     val seriesStyles = remember(series) {
         val styles = SeriesColorAllocator.assignStylesOnly(series.map { it.color })
@@ -977,26 +1054,24 @@ fun MultiSeriesLineChart(
                                 .weight(1f)
                                 .height(195.dp)
                                 .padding(vertical = 6.dp)
-                                .pointerInput(maxPoints) {
+                                .pointerInput(xSpan) {
                                     fun idx(xPx: Float): Int {
-                                        if (maxPoints <= 1) return 0
                                         val padX = 12f
                                         val chartW = (size.width - padX * 2).coerceAtLeast(10f)
                                         val frac = ((xPx - padX) / chartW).coerceIn(0f, 1f)
-                                        return kotlin.math.round(frac * (maxPoints - 1)).toInt().coerceIn(0, maxPoints - 1)
+                                        return xSpan.indexForFraction(frac)
                                     }
                                     detectTapGestures { offset ->
                                         val tapped = idx(offset.x)
                                         selectedIdx = if (selectedIdx == tapped) null else tapped
                                     }
                                 }
-                                .pointerInput(maxPoints) {
+                                .pointerInput(xSpan) {
                                     fun idx(xPx: Float): Int {
-                                        if (maxPoints <= 1) return 0
                                         val padX = 12f
                                         val chartW = (size.width - padX * 2).coerceAtLeast(10f)
                                         val frac = ((xPx - padX) / chartW).coerceIn(0f, 1f)
-                                        return kotlin.math.round(frac * (maxPoints - 1)).toInt().coerceIn(0, maxPoints - 1)
+                                        return xSpan.indexForFraction(frac)
                                     }
                                     detectDragGestures(
                                         onDragStart = { o -> selectedIdx = idx(o.x) },
@@ -1009,8 +1084,7 @@ fun MultiSeriesLineChart(
                             val chartW = (size.width - padX * 2).coerceAtLeast(10f)
                             val chartH = (size.height - padY * 2).coerceAtLeast(10f)
 
-                            fun x(i: Int, count: Int) =
-                                if (count <= 1) padX + chartW / 2f else padX + chartW * i / (count - 1)
+                            fun x(i: Int) = padX + chartW * xSpan.fraction(i)
 
                             // Mřížka (5 úrovní zarovnaných s osou Y)
                             for (step in 0..4) {
@@ -1026,11 +1100,10 @@ fun MultiSeriesLineChart(
                                 val pts = mutableListOf<Pair<Int, Double>>()
                                 s.values.forEachIndexed { idx, v -> if (v != null && v.isFinite()) pts.add(idx to v) }
                                 if (pts.isEmpty()) continue
-                                val count = s.values.size.coerceAtLeast(maxPoints)
                                 val style = seriesStyles[s.id]
                                 val marker = style?.marker ?: SeriesMarker.CIRCLE
                                 if (pts.size == 1) {
-                                    val ptCenter = Offset(x(pts[0].first, count), yVal(pts[0].second))
+                                    val ptCenter = Offset(x(pts[0].first), yVal(pts[0].second))
                                     // Jemná vodorovná vodící čára, aby šla hodnota jediného měření snadno odečíst na ose Y
                                     drawLine(
                                         color = s.color.copy(alpha = 0.28f),
@@ -1048,22 +1121,22 @@ fun MultiSeriesLineChart(
 
                                 val strokePath = Path()
                                 val fillPath = Path()
-                                val fx = x(pts[0].first, count)
+                                val fx = x(pts[0].first)
                                 val fy = yVal(pts[0].second)
                                 strokePath.moveTo(fx, fy)
                                 fillPath.moveTo(fx, size.height)
                                 fillPath.lineTo(fx, fy)
 
                                 for (i in 1 until pts.size) {
-                                    val px = x(pts[i - 1].first, count)
+                                    val px = x(pts[i - 1].first)
                                     val py = yVal(pts[i - 1].second)
-                                    val cx = x(pts[i].first, count)
+                                    val cx = x(pts[i].first)
                                     val cy = yVal(pts[i].second)
                                     val midX = px + (cx - px) * 0.5f
                                     strokePath.cubicTo(midX, py, midX, cy, cx, cy)
                                     fillPath.cubicTo(midX, py, midX, cy, cx, cy)
                                 }
-                                val lx = x(pts.last().first, count)
+                                val lx = x(pts.last().first)
                                 fillPath.lineTo(lx, size.height)
                                 fillPath.close()
 
@@ -1098,7 +1171,7 @@ fun MultiSeriesLineChart(
                                     val dotR = if (dense) 3.6f else 4.8f
                                     val coreR = if (dense) 1.3f else 1.9f
                                     for (pt in pts) {
-                                        val ptCenter = Offset(x(pt.first, count), yVal(pt.second))
+                                        val ptCenter = Offset(x(pt.first), yVal(pt.second))
                                         drawCircle(Color(0xFF070C15), radius = ringR, center = ptCenter)
                                         drawSeriesMarker(marker, s.color, ptCenter, dotR)
                                         drawCircle(Color.White.copy(alpha = 0.92f), radius = coreR, center = ptCenter)
@@ -1108,7 +1181,7 @@ fun MultiSeriesLineChart(
 
                             // Kurzor s body pro každou křivku
                             selectedIdx?.let { idx ->
-                                val cx = x(idx, maxPoints)
+                                val cx = x(idx)
                                 drawLine(cursorColor.copy(alpha = 0.75f), Offset(cx, 0f), Offset(cx, size.height), strokeWidth = 2f)
                                 for (s in visibleSeries) {
                                     val scale = seriesScales[s.id] ?: SeriesScale(yTicksLo, yTicksHi, yTicksSpan)
@@ -1122,20 +1195,7 @@ fun MultiSeriesLineChart(
                             }
                         }
                     }
-                    if (xLabels.size >= 2) {
-                        Row(
-                            Modifier
-                                .fillMaxWidth()
-                                .padding(start = 52.dp, top = 2.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(xLabels.first(), style = MaterialTheme.typography.labelSmall, color = Color(0xFFCBD5E1), maxLines = 1, softWrap = false)
-                            if (xLabels.size >= 3) {
-                                Text(xLabels[xLabels.size / 2], style = MaterialTheme.typography.labelSmall, color = Color(0xFFCBD5E1), maxLines = 1, softWrap = false)
-                            }
-                            Text(xLabels.last(), style = MaterialTheme.typography.labelSmall, color = Color(0xFFCBD5E1), maxLines = 1, softWrap = false)
-                        }
-                    }
+                    ChartXAxisLabels(xLabels = xLabels, span = xSpan)
                 }
     }
 }
@@ -1199,7 +1259,13 @@ fun LineChart(
     val cursorColor = Color(0xFFFF5252)
     val gridColor = Color.White.copy(alpha = 0.09f)
     val showMeasuredPoints = showChartPointsState
-    var selectedIndex by remember { mutableStateOf<Int?>(null) }
+    val trimEmptyEdges = (channel == null && cursor == null && range == null && !selectMode)
+    val xSpan = remember(values, secondaryValues, trimEmptyEdges) {
+        val fullSpan = ChartIndexSpan(0, (values.size - 1).coerceAtLeast(0))
+        if (!trimEmptyEdges) fullSpan
+        else activeFiniteSpan(listOfNotNull(values, secondaryValues)) ?: fullSpan
+    }
+    var selectedIndex by remember(values, xSpan) { mutableStateOf<Int?>(null) }
 
     val effectiveArtwork = remember(artworkRes, unit, secondaryLabel) {
         artworkRes ?: inferChartArtworkRes(unit, secondaryLabel)
@@ -1372,7 +1438,7 @@ fun LineChart(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     // Osa Y s jednotkou (5 horizontálních hladin)
-                    if (finite.size >= 2) {
+                    if (finite.isNotEmpty()) {
                         Column(
                             modifier = Modifier
                                 .height(185.dp)
@@ -1394,24 +1460,33 @@ fun LineChart(
                         }
                     }
 
+                    val padX = if (channel == null) 10f else 0f
                     Canvas(
                         modifier = Modifier
                             .weight(1f)
                             .height(185.dp)
                             .padding(vertical = 6.dp)
-                            .pointerInput(values.size, selectMode) {
-                                if (values.size < 2) return@pointerInput
-                                fun idx(x: Float) = ((x / size.width) * (values.size - 1)).toInt().coerceIn(0, values.size - 1)
+                            .pointerInput(values.size, xSpan, selectMode, padX) {
+                                if (values.isEmpty()) return@pointerInput
+                                fun idx(x: Float): Int {
+                                    val chartW = (size.width - padX * 2).coerceAtLeast(10f)
+                                    val frac = ((x - padX) / chartW).coerceIn(0f, 1f)
+                                    return xSpan.indexForFraction(frac).coerceIn(0, values.lastIndex)
+                                }
                                 detectTapGestures { o ->
                                     val i = idx(o.x)
-                                    selectedIndex = i
+                                    selectedIndex = if (selectedIndex == i && !selectMode) null else i
                                     onCursor(i)
                                 }
                             }
-                            .pointerInput(values.size, selectMode) {
+                            .pointerInput(values.size, xSpan, selectMode, padX) {
                                 if (values.size < 2) return@pointerInput
-                                var anchor = 0
-                                fun idx(x: Float) = ((x / size.width) * (values.size - 1)).toInt().coerceIn(0, values.size - 1)
+                                var anchor = xSpan.start
+                                fun idx(x: Float): Int {
+                                    val chartW = (size.width - padX * 2).coerceAtLeast(10f)
+                                    val frac = ((x - padX) / chartW).coerceIn(0f, 1f)
+                                    return xSpan.indexForFraction(frac).coerceIn(0, values.lastIndex)
+                                }
                                 detectHorizontalDragGestures(
                                     onDragStart = { o ->
                                         anchor = idx(o.x)
@@ -1419,9 +1494,8 @@ fun LineChart(
                                         onCursor(anchor)
                                         if (selectMode) onRange(anchor..anchor)
                                     },
-                                    onHorizontalDrag = { _, dragAmount ->
-                                        val curIdx = selectedIndex ?: anchor
-                                        val nextIdx = (curIdx + if (dragAmount > 0) 1 else if (dragAmount < 0) -1 else 0).coerceIn(0, values.size - 1)
+                                    onHorizontalDrag = { change, _ ->
+                                        val nextIdx = idx(change.position.x)
                                         selectedIndex = nextIdx
                                         onCursor(nextIdx)
                                         if (selectMode) onRange(minOf(anchor, nextIdx)..maxOf(anchor, nextIdx))
@@ -1429,14 +1503,15 @@ fun LineChart(
                                 )
                             }
                     ) {
-                        if (finite.size < 2) return@Canvas
+                        if (finite.isEmpty()) return@Canvas
                         val curLo = lo
                         val curHi = hi
                         val paddingY = 10f
+                        val chartW = (size.width - padX * 2).coerceAtLeast(10f)
                         val chartHeight = (size.height - (paddingY * 2)).coerceAtLeast(10f)
                         val span = (curHi - curLo).takeIf { it > 1e-9 } ?: 1.0
 
-                        fun x(i: Int) = size.width * i / (values.size - 1).coerceAtLeast(1)
+                        fun x(i: Int) = padX + chartW * xSpan.fraction(i)
                         fun y(v: Double) = paddingY + (chartHeight * (1 - (v - curLo) / span)).toFloat()
 
                         for (step in 0..4) {
@@ -1513,7 +1588,17 @@ fun LineChart(
                         } else if (ptsCount == 1) {
                             val cx = x(series.indices[0])
                             val cy = y(series.values[0])
-                            drawCircle(color, radius = 6f, center = Offset(cx, cy))
+                            drawLine(
+                                color = color.copy(alpha = 0.28f),
+                                start = Offset(padX, cy),
+                                end = Offset(size.width - padX, cy),
+                                strokeWidth = 2f,
+                                pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 8f), 0f)
+                            )
+                            drawCircle(color.copy(alpha = 0.30f), radius = 14f, center = Offset(cx, cy))
+                            drawCircle(Color(0xFF070C15), radius = 9f, center = Offset(cx, cy))
+                            drawCircle(color, radius = 6.5f, center = Offset(cx, cy))
+                            drawCircle(Color.White.copy(alpha = 0.94f), radius = 2.6f, center = Offset(cx, cy))
                         } else if (ptsCount >= 2) {
                             strokePath.reset()
                             fillPath.reset()
@@ -1640,20 +1725,7 @@ fun LineChart(
                     }
                 }
 
-                if (xLabels.size >= 2) {
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .padding(start = 52.dp, top = 2.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(xLabels.first(), style = MaterialTheme.typography.labelSmall, color = Color(0xFFCBD5E1), maxLines = 1, softWrap = false)
-                        if (xLabels.size >= 3) {
-                            Text(xLabels[xLabels.size / 2], style = MaterialTheme.typography.labelSmall, color = Color(0xFFCBD5E1), maxLines = 1, softWrap = false)
-                        }
-                        Text(xLabels.last(), style = MaterialTheme.typography.labelSmall, color = Color(0xFFCBD5E1), maxLines = 1, softWrap = false)
-                    }
-                }
+                ChartXAxisLabels(xLabels = xLabels, span = xSpan)
 
                 // Garmin barevná stupnice / legenda pro běžeckou dynamiku a Staminu
                 channel?.let { ch ->
@@ -1770,7 +1842,11 @@ fun WeightCompositionStackedAreaChart(
     val bandColor = weightColor.copy(alpha = 0.14f)
     val cursorColor = Color(0xFFFFFFFF)
 
-    var selectedIndex by remember(weightValues) { mutableStateOf<Int?>(null) }
+    val xSpan = remember(weightValues) {
+        activeFiniteSpan(listOf(weightValues.map { it?.takeIf { w -> w > 0.0 } }))
+            ?: ChartIndexSpan(0, (weightValues.size - 1).coerceAtLeast(0))
+    }
+    var selectedIndex by remember(weightValues, xSpan) { mutableStateOf<Int?>(null) }
     var absoluteZeroScale by remember { mutableStateOf(false) }
     val showMeasuredPoints = showChartPointsState
 
@@ -1939,33 +2015,33 @@ fun WeightCompositionStackedAreaChart(
                         .height(210.dp)
                         .clip(RoundedCornerShape(12.dp))
                         .background(MineralBackgroundDark)
-                        .pointerInput(weightValues) {
+                        .pointerInput(weightValues, xSpan) {
                             fun nearestMeasuredIdx(rawIdx: Int): Int =
                                 weightValues.indices
-                                    .filter { weightValues[it]?.isFinite() == true }
+                                    .filter { weightValues[it]?.isFinite() == true && (weightValues[it] ?: 0.0) > 0.0 }
                                     .minByOrNull { kotlin.math.abs(it - rawIdx) }
                                     ?: rawIdx
                             detectTapGestures { offset ->
                                 if (weightValues.isNotEmpty() && size.width > 0) {
-                                    val raw = ((offset.x / size.width) * (weightValues.size - 1)).toInt()
-                                        .coerceIn(0, weightValues.lastIndex)
+                                    val frac = (offset.x / size.width).coerceIn(0f, 1f)
+                                    val raw = xSpan.indexForFraction(frac).coerceIn(0, weightValues.lastIndex)
                                     val idx = nearestMeasuredIdx(raw)
                                     selectedIndex = if (selectedIndex == idx) null else idx
                                 }
                             }
                         }
-                        .pointerInput(weightValues) {
+                        .pointerInput(weightValues, xSpan) {
                             fun nearestMeasuredIdx(rawIdx: Int): Int =
                                 weightValues.indices
-                                    .filter { weightValues[it]?.isFinite() == true }
+                                    .filter { weightValues[it]?.isFinite() == true && (weightValues[it] ?: 0.0) > 0.0 }
                                     .minByOrNull { kotlin.math.abs(it - rawIdx) }
                                     ?: rawIdx
                             detectDragGestures(
                                 onDragEnd = { },
                                 onDrag = { change, _ ->
                                     if (weightValues.isNotEmpty() && size.width > 0) {
-                                        val raw = ((change.position.x / size.width) * (weightValues.size - 1)).toInt()
-                                            .coerceIn(0, weightValues.lastIndex)
+                                        val frac = (change.position.x / size.width).coerceIn(0f, 1f)
+                                        val raw = xSpan.indexForFraction(frac).coerceIn(0, weightValues.lastIndex)
                                         selectedIndex = nearestMeasuredIdx(raw)
                                     }
                                 }
@@ -1978,9 +2054,7 @@ fun WeightCompositionStackedAreaChart(
                     val usableH = (size.height - paddingY * 2f).coerceAtLeast(1f)
                     val bottomY = size.height - 4f
 
-                    fun x(i: Int): Float =
-                        if (weightValues.size <= 1) size.width / 2f
-                        else i.toFloat() / (weightValues.size - 1).coerceAtLeast(1) * size.width
+                    fun x(i: Int): Float = size.width * xSpan.fraction(i)
 
                     fun y(v: Double): Float =
                         paddingY + (1f - ((v - minY) / span).toFloat().coerceIn(0f, 1f)) * usableH
@@ -2190,18 +2264,19 @@ fun WeightCompositionStackedAreaChart(
                             val sDot = if (dense) 3.1f else 3.9f
                             val sCore = if (dense) 1.2f else 1.5f
                             for (pt in pts) {
-                                val wCenter = Offset(pt.xPos, pt.weightY)
+                                val dotX = pt.xPos.coerceIn(wRing, (size.width - wRing).coerceAtLeast(wRing))
+                                val wCenter = Offset(dotX, pt.weightY)
                                 drawCircle(Color(0xFF070C15), radius = wRing, center = wCenter)
                                 drawCircle(weightColor, radius = wDot, center = wCenter)
                                 drawCircle(Color.White.copy(alpha = 0.95f), radius = wCore, center = wCenter)
                                 if (fatValues.getOrNull(pt.idx)?.isFinite() == true) {
-                                    val fCenter = Offset(pt.xPos, pt.fatTopY)
+                                    val fCenter = Offset(dotX, pt.fatTopY)
                                     drawCircle(Color(0xFF070C15), radius = sRing, center = fCenter)
                                     drawCircle(fatColor, radius = sDot, center = fCenter)
                                     drawCircle(Color.White.copy(alpha = 0.90f), radius = sCore, center = fCenter)
                                 }
                                 if (muscleValues.getOrNull(pt.idx)?.isFinite() == true) {
-                                    val mCenter = Offset(pt.xPos, pt.muscleTopY)
+                                    val mCenter = Offset(dotX, pt.muscleTopY)
                                     drawCircle(Color(0xFF070C15), radius = sRing, center = mCenter)
                                     drawCircle(muscleColor, radius = sDot, center = mCenter)
                                     drawCircle(Color.White.copy(alpha = 0.90f), radius = sCore, center = mCenter)
@@ -2212,28 +2287,22 @@ fun WeightCompositionStackedAreaChart(
 
                     activeIdx?.let { selI ->
                         pts.find { it.idx == selI }?.let { pt ->
-                            drawLine(cursorColor.copy(alpha = 0.75f), Offset(pt.xPos, 0f), Offset(pt.xPos, size.height), strokeWidth = 2f)
-                            drawCircle(weightColor, radius = 6.5f, center = Offset(pt.xPos, pt.weightY))
-                            drawCircle(Color.White, radius = 3.0f, center = Offset(pt.xPos, pt.weightY))
+                            val curX = pt.xPos.coerceIn(7f, (size.width - 7f).coerceAtLeast(7f))
+                            drawLine(cursorColor.copy(alpha = 0.75f), Offset(curX, 0f), Offset(curX, size.height), strokeWidth = 2f)
+                            drawCircle(weightColor, radius = 6.5f, center = Offset(curX, pt.weightY))
+                            drawCircle(Color.White, radius = 3.0f, center = Offset(curX, pt.weightY))
                         }
                     }
                 }
             }
 
-            if (xLabels.size >= 2) {
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(start = 54.dp, top = 4.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(xLabels.first(), style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8), maxLines = 1, softWrap = false)
-                    if (xLabels.size >= 3) {
-                        Text(xLabels[xLabels.size / 2], style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8), maxLines = 1, softWrap = false)
-                    }
-                    Text(xLabels.last(), style = MaterialTheme.typography.labelSmall, color = Color(0xFF94A3B8), maxLines = 1, softWrap = false)
-                }
-            }
+            ChartXAxisLabels(
+                xLabels = xLabels,
+                span = xSpan,
+                startPadding = 54.dp,
+                topPadding = 4.dp,
+                color = Color(0xFF94A3B8)
+            )
         }
     }
 }

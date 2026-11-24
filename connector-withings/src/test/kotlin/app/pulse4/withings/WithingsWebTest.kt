@@ -565,27 +565,32 @@ class WithingsWebTest {
 
     @Test
     fun extendPreservesFreshSetCookieSessionKeyOverBodySessionId() {
+        val capturedForms = mutableListOf<Map<String, String>>()
         val traces = mutableListOf<String>()
         val fakeHttp = object : HttpGateway {
             override fun get(url: String, headers: Map<String, String>): HttpResponse = error("unused")
-            override fun postForm(url: String, form: Map<String, String>, headers: Map<String, String>): HttpResponse =
-                HttpResponse(
+            override fun postForm(url: String, form: Map<String, String>, headers: Map<String, String>): HttpResponse {
+                capturedForms += form
+                return HttpResponse(
                     200,
                     mapOf("Set-Cookie" to "session_key=fresh-cookie-key; Path=/; Secure"),
-                    """{"status":0,"body":{"sessionid":"legacy-sid-999"}}""",
+                    """{"status":0,"body":{"sessionid":"legacy-sid-999","ttl":3600}}""",
                 )
+            }
         }
         val client = WithingsWebClient(fakeHttp).apply { onExtendTrace = { traces += it } }
         val res = client.extendSessionDetailed("session_key=old-key; w_uuid=abc", null)
         assertTrue(res is WithingsExtendResult.Success)
         val ext = res.session
+        assertEquals("-1", capturedForms.single()["ttl"])
+        assertEquals(null, capturedForms.single()["sessionid"])
         assertTrue(ext.cookies.contains("session_key=fresh-cookie-key"), "Expected Set-Cookie session_key to win, got: ${ext.cookies}")
         assertFalse(ext.cookies.contains("legacy-sid-999"))
-        assertEquals(listOf("ok(sidSent=1,scKey=1,sid=1)"), traces)
+        assertEquals(listOf("ok(sidSent=0,scKey=1,sid=1,ttl=3600)"), traces)
     }
 
     @Test
-    fun extendSendsSessionIdFromSessionKeyAndFallsBackOnStatus250() {
+    fun extendSendsTtlAutoCookieOnlyFirstAndFallsBackToSessionIdOnlyOn501Missing() {
         val capturedForms = mutableListOf<Map<String, String>>()
         val traces = mutableListOf<String>()
         var attempt = 0
@@ -595,9 +600,9 @@ class WithingsWebTest {
                 capturedForms += form
                 attempt++
                 return if (attempt == 1) {
-                    HttpResponse(200, emptyMap(), """{"status":250,"error":"credentials do not match"}""")
+                    HttpResponse(200, emptyMap(), """{"status":501,"error":"Invalid Session: sessionid missing"}""")
                 } else {
-                    HttpResponse(200, mapOf("Set-Cookie" to "session_key=renewed-key"), """{"status":0,"body":{}}""")
+                    HttpResponse(200, mapOf("Set-Cookie" to "session_key=renewed-key"), """{"status":0,"body":{"ttl":7200}}""")
                 }
             }
         }
@@ -605,8 +610,28 @@ class WithingsWebTest {
         val res = client.extendSessionDetailed("session_key=old-key; w_uuid=abc", null)
         assertTrue(res is WithingsExtendResult.Success)
         assertEquals(2, capturedForms.size)
-        assertEquals("old-key", capturedForms[0]["sessionid"])
-        assertEquals(null, capturedForms[1]["sessionid"])
-        assertEquals(listOf("ok(sidSent=0,scKey=1,sid=0)"), traces)
+        assertEquals("-1", capturedForms[0]["ttl"])
+        assertEquals(null, capturedForms[0]["sessionid"])
+        assertEquals("-1", capturedForms[1]["ttl"])
+        assertEquals("old-key", capturedForms[1]["sessionid"])
+        assertEquals(listOf("ok(sidSent=1,scKey=1,sid=0,ttl=7200)"), traces)
+    }
+
+    @Test
+    fun extendDoesNotRetryWithSessionIdWhen501IsExpiredNotMissing() {
+        val capturedForms = mutableListOf<Map<String, String>>()
+        val traces = mutableListOf<String>()
+        val fakeHttp = object : HttpGateway {
+            override fun get(url: String, headers: Map<String, String>): HttpResponse = error("unused")
+            override fun postForm(url: String, form: Map<String, String>, headers: Map<String, String>): HttpResponse {
+                capturedForms += form
+                return HttpResponse(200, emptyMap(), """{"status":501,"error":"Invalid Session"}""")
+            }
+        }
+        val client = WithingsWebClient(fakeHttp).apply { onExtendTrace = { traces += it } }
+        val res = client.extendSessionDetailed("session_key=old-key; w_uuid=abc", null)
+        assertEquals(WithingsExtendResult.Unauthorized, res)
+        assertEquals(1, capturedForms.size)
+        assertEquals(listOf("unauth(status=501,err=invalid,sidSent=0,hasKey=1)"), traces)
     }
 }

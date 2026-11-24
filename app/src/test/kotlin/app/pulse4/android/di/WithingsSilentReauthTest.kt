@@ -42,6 +42,7 @@ class WithingsSilentReauthTest {
         var cookies: Boolean = true,
     ) {
         val promptReasons = mutableListOf<String>()
+        val diagEvents = mutableListOf<String>()
         var extendCalls = 0
         var ssoCalls = 0
         var loginCalls = 0
@@ -58,6 +59,7 @@ class WithingsSilentReauthTest {
             loginPassword = { _, _ -> loginCalls++; login() },
             onSilentRefreshOk = { _, _ -> silentOk++ },
             onAuthPaused = { reason, _ -> promptReasons += reason },
+            onDiag = { diagEvents += it },
         )
 
         fun withPassword(): Harness {
@@ -298,7 +300,7 @@ class WithingsSilentReauthTest {
     }
 
     @Test
-    fun `failed silent SSO sets cooldown so repeated renewSession while password is spaced does not spam SSO`() {
+    fun `failed silent SSO aligns cooldown with password spacing so keepalive ticks do not spam SSO every 30 min`() {
         val h = Harness(
             session = expiredSession(),
             sso = { WithingsLoginResult.Error("login page", WithingsAuthFailureKind.OTHER) },
@@ -310,24 +312,63 @@ class WithingsSilentReauthTest {
         assertEquals(1, h.ssoCalls)
         assertEquals(1, h.loginCalls)
 
-        // 30 min later, session dies again: SSO runs once, fails (OTHER), sets 15 min SSO cooldown; password is spaced.
+        // 30 min later, session dies again: SSO runs once, fails (OTHER), aligns SSO cooldown to password spacing.
         h.now += 30 * 60_000L
         assertFalse(h.coord.renewSession())
         assertEquals(2, h.ssoCalls)
         assertEquals(1, h.loginCalls)
+        assertTrue(h.diagEvents.any { it.startsWith("skip(pw_spaced=") })
 
-        // 10 s and 5 min later: SSO MUST be skipped by cooldown instead of spamming account.withings.com!
-        h.now += 10_000L
-        assertFalse(h.coord.renewSession())
-        h.now += 5 * 60_000L
-        assertFalse(h.coord.renewSession())
-        assertEquals(2, h.ssoCalls)
+        // Subsequent 30-min keepalive ticks across the remaining 5.5 hours MUST NOT spam account.withings.com!
+        repeat(10) {
+            h.now += 30 * 60_000L
+            assertFalse(h.coord.renewSession())
+        }
+        assertEquals("SSO must stay quiet until password spacing ends", 2, h.ssoCalls)
         assertEquals(1, h.loginCalls)
 
-        // After 15 min SSO cooldown expires, SSO may run again.
-        h.now += 15 * 60_000L
-        assertFalse(h.coord.renewSession())
+        // Once the 6h password spacing ends, both SSO and password login become eligible again.
+        h.now += 31 * 60_000L
+        assertTrue(h.coord.renewSession())
         assertEquals(3, h.ssoCalls)
+        assertEquals(2, h.loginCalls)
+    }
+
+    @Test
+    fun `manual sync trigger can recover expired session with stored password after 10m floor, still obeying rate limit`() {
+        val h = Harness(
+            session = expiredSession(),
+            sso = { WithingsLoginResult.Error("login page", WithingsAuthFailureKind.OTHER) },
+            login = { ok() },
+        ).withPassword()
+
+        // Background password login succeeds -> sets 6h background spacing.
+        assertTrue(h.coord.renewSession())
+        assertEquals(1, h.loginCalls)
+
+        // 3 min later: even manual sync respects the 10-min safety floor.
+        h.now += 3 * 60_000L
+        assertFalse(h.coord.renewSession(manualTriggered = true))
+        assertEquals(1, h.loginCalls)
+
+        // 15 min later (still inside 6h background spacing): manual sync recovers immediately!
+        h.now += 12 * 60_000L
+        assertTrue(h.coord.renewSession(manualTriggered = true))
+        assertEquals(2, h.loginCalls)
+        assertTrue(h.diagEvents.contains("manual_pw_reauth"))
+
+        // If rate-limited, even manual sync MUST respect the 2h rate-limit cooldown.
+        h.now += 15 * 60_000L
+        h.login = { WithingsLoginResult.Error("429", WithingsAuthFailureKind.RATE_LIMITED) }
+        assertFalse(h.coord.renewSession(manualTriggered = true))
+        assertEquals(3, h.loginCalls)
+        h.now += 30 * 60_000L
+        assertFalse(h.coord.renewSession(manualTriggered = true))
+        assertEquals("manual sync must obey rate-limit cooldown", 3, h.loginCalls)
+
+        val summary = h.coord.diagnosticSummary(hasSession = true, hasKeyCookie = true)
+        assertTrue(summary.contains("heslo=ano"))
+        assertTrue(summary.contains("rlHits=1"))
     }
 
     @Test

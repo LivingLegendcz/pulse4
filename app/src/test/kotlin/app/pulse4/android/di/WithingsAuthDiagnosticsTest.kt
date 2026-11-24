@@ -61,21 +61,35 @@ class WithingsAuthDiagnosticsTest {
     }
 
     @Test
-    fun `keeps at most 30 entries and survives reload from the store`() {
+    fun `keeps at most MAX_ENTRIES, exports newest first in local zone with status line, and survives reload`() {
         var persisted: String? = null
-        var t = 0L
-        val diag = WithingsAuthDiagnostics(load = { persisted }, persist = { persisted = it }, nowMs = { t++ })
-        repeat(45) { i -> diag.step(WithingsAuthDiagnostics.Flow.SILENT_SSO, "GET sso $i", "https://account.withings.com/x", 200, false) }
+        var t = 1_700_000_000_000L
+        val prague = java.time.ZoneId.of("Europe/Prague")
+        val diag = WithingsAuthDiagnostics(
+            load = { persisted },
+            persist = { persisted = it },
+            nowMs = { t += 1000L; t },
+            zoneId = { prague },
+        )
+        repeat(75) { i -> diag.step(WithingsAuthDiagnostics.Flow.SILENT_SSO, "GET sso $i", "https://account.withings.com/x", 200, false) }
         assertEquals(WithingsAuthDiagnostics.MAX_ENTRIES, diag.entries().size)
         assertEquals("GET sso 15", diag.entries().first().step)
 
-        val reloaded = WithingsAuthDiagnostics(load = { persisted }, persist = { persisted = it })
-        assertEquals(30, reloaded.entries().size)
-        assertEquals("GET sso 44", reloaded.entries().last().step)
+        val reloaded = WithingsAuthDiagnostics(load = { persisted }, persist = { persisted = it }, nowMs = { t }, zoneId = { prague })
+        assertEquals(WithingsAuthDiagnostics.MAX_ENTRIES, reloaded.entries().size)
+        assertEquals("GET sso 74", reloaded.entries().last().step)
+
+        val exported = reloaded.export(statusLine = "Stav: relace=ano, key=ano, heslo=ano")
+        assertTrue(exported.contains("Europe/Prague +01:00"))
+        assertTrue(exported.contains("nejnovější nahoře"))
+        assertTrue(exported.contains("Stav: relace=ano, key=ano, heslo=ano"))
+        assertTrue(exported.indexOf("GET sso 74") < exported.indexOf("GET sso 15"))
+        assertRedacted(exported)
 
         reloaded.clear()
         assertTrue(reloaded.entries().isEmpty())
         assertEquals("[]", persisted)
+        assertTrue(reloaded.export(statusLine = "Stav: relace=ne").contains("Stav: relace=ne"))
     }
 
     @Test

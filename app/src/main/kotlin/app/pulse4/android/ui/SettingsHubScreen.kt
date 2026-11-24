@@ -2221,14 +2221,20 @@ private fun SourcesSettingsSection(sl: ServiceLocator) {
                                         } else {
                                             scope.launch {
                                                 syncing = true
-                                                val r = withContext(Dispatchers.IO) {
-                                                    sl.withings.renewSession()
-                                                    runCatching { sl.withings.runImport(System.currentTimeMillis()) }.getOrNull()
+                                                val (r, needsUserMsg) = withContext(Dispatchers.IO) {
+                                                    sl.withings.renewSession(manualTriggered = true)
+                                                    val res = runCatching { sl.withings.runImport(System.currentTimeMillis()) }.getOrNull()
+                                                    val msg = if (res is app.pulse4.provider.AreaResult.NeedsUser) {
+                                                        sl.withings.syncNeedsUserMessage()
+                                                    } else null
+                                                    res to msg
                                                 }
                                                 syncing = false
                                                 notice = when (r) {
                                                     is app.pulse4.provider.AreaResult.Success -> "Staženo ${r.saved} měření z Withings."
                                                     is app.pulse4.provider.AreaResult.Failed -> "Chyba synchronizace: ${r.error}"
+                                                    is app.pulse4.provider.AreaResult.NeedsUser -> needsUserMsg ?: "Relace Withings vypršela – přihlaste se prosím znovu."
+                                                    null -> if (sl.withings.importRunning) "Synchronizace Withings už běží." else "Synchronizace nebyla spuštěna."
                                                     else -> "Synchronizace dokončena."
                                                 }
                                                 tick++

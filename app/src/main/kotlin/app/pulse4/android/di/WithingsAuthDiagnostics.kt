@@ -3,6 +3,8 @@ package app.pulse4.android.di
 import app.pulse4.sync.Wire
 import java.net.URI
 import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.ListSerializer
 
@@ -19,6 +21,7 @@ class WithingsAuthDiagnostics(
     private val persist: (String) -> Unit = {},
     private val nowMs: () -> Long = { System.currentTimeMillis() },
     private val maxEntries: Int = MAX_ENTRIES,
+    private val zoneId: () -> ZoneId = { ZoneId.systemDefault() },
 ) {
     @Serializable
     data class Entry(
@@ -74,14 +77,24 @@ class WithingsAuthDiagnostics(
         runCatching { persist("[]") }
     }
 
-    /** Human-readable export for the clipboard. */
-    fun export(): String {
+    /** Human-readable export for the clipboard and settings card (local time, newest first). */
+    fun export(statusLine: String? = null): String {
         val list = entries()
-        if (list.isEmpty()) return "Diagnostika Withings: zatím žádný záznam."
+        val zone = runCatching { zoneId() }.getOrElse { ZoneId.of("UTC") }
+        val offset = zone.rules.getOffset(Instant.ofEpochMilli(nowMs()))
+        val safeStatus = statusLine?.takeIf { it.isNotBlank() && !it.contains('@') }
+        if (list.isEmpty()) {
+            return buildString {
+                appendLine("Diagnostika Withings: zatím žádný záznam.")
+                safeStatus?.let { appendLine(it) }
+            }.trimEnd()
+        }
         return buildString {
-            appendLine("Diagnostika Withings (${list.size} záznamů, UTC)")
-            for (e in list) {
-                append(Instant.ofEpochMilli(e.atMs).toString())
+            appendLine("Diagnostika Withings (${list.size} záznamů, ${zone.id} $offset, nejnovější nahoře)")
+            safeStatus?.let { appendLine(it) }
+            for (e in list.asReversed()) {
+                val ts = Instant.ofEpochMilli(e.atMs).atZone(zone).format(LOCAL_TS_FMT)
+                append(ts)
                 append(' ').append(e.flow).append(' ').append(e.step)
                 e.path?.let { append(' ').append(it) }
                 e.status?.let { append(" HTTP ").append(it) }
@@ -102,11 +115,12 @@ class WithingsAuthDiagnostics(
         runCatching { persist(encoded) }
     }
 
-    enum class Flow { MANUAL_PASSWORD, MFA_CODE, EMAIL_CODE, SILENT_SSO, BACKGROUND_PASSWORD, EXTEND, SYNC }
+    enum class Flow { MANUAL_PASSWORD, MFA_CODE, EMAIL_CODE, SILENT_SSO, BACKGROUND_PASSWORD, EXTEND, REAUTH, SYNC }
 
     companion object {
-        const val MAX_ENTRIES = 30
+        const val MAX_ENTRIES = 60
         const val STORE_KEY = "withings.auth.diag"
+        private val LOCAL_TS_FMT: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS")
 
         private val TOKENISH = Regex("^[A-Za-z0-9_\\-.%=]{24,}$")
 

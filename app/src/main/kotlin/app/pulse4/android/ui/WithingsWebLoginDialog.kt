@@ -10,6 +10,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -1524,18 +1525,21 @@ fun WithingsDiagnosticsCard(sl: ServiceLocator, refreshKey: Any? = null) {
                 )
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    OutlinedButton(onClick = {
-                        val cm = ctx.getSystemService(ClipboardManager::class.java)
-                        copied = cm != null && runCatching {
-                            check(text.isNotBlank())
-                            cm.setPrimaryClip(ClipData.newPlainText("Diagnostika Withings", text))
-                        }.isSuccess
-                    }) {
+                    OutlinedButton(
+                        onClick = {
+                            val cm = ctx.getSystemService(ClipboardManager::class.java)
+                            copied = cm != null && runCatching {
+                                check(text.isNotBlank())
+                                cm.setPrimaryClip(ClipData.newPlainText("Diagnostika Withings", text))
+                            }.isSuccess
+                        },
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                    ) {
                         Icon(Icons.Outlined.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(6.dp))
-                        Text(if (copied) "Zkopírováno" else "Zkopírovat")
+                        Text(if (copied) "Zkopírováno" else "Zkopírovat", maxLines = 1, softWrap = false)
                     }
                     TextButton(
                         enabled = !refreshing,
@@ -1548,14 +1552,29 @@ fun WithingsDiagnosticsCard(sl: ServiceLocator, refreshKey: Any? = null) {
                                 refreshing = false
                             }
                         }
-                    ) { Text(if (refreshing) "Obnovuji…" else "Obnovit") }
-                    refreshedAt?.let { ts ->
-                        Text(
-                            "Obnoveno $ts",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Color(0xFF94A3B8),
-                        )
-                    }
+                    ) { Text(if (refreshing) "Obnovuji…" else "Obnovit", maxLines = 1, softWrap = false) }
+                    TextButton(
+                        enabled = !refreshing,
+                        onClick = {
+                            copied = false
+                            refreshing = true
+                            scope.launch {
+                                text = withContext(Dispatchers.IO) {
+                                    sl.withings.clearAuthDiagnostics()
+                                    sl.withings.authDiagnosticsText()
+                                }
+                                refreshedAt = currentTimeLabel()
+                                refreshing = false
+                            }
+                        }
+                    ) { Text("Vymazat", color = Color(0xFFF87171), maxLines = 1, softWrap = false) }
+                }
+                refreshedAt?.let { ts ->
+                    Text(
+                        "Obnoveno $ts (místní čas)",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xFF94A3B8),
+                    )
                 }
             }
         }

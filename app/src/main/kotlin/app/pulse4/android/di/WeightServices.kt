@@ -236,6 +236,7 @@ class WithingsService internal constructor(
     /** True while a Withings import is in progress (UI shows "sync already running" instead of "not connected"). */
     val importRunning: Boolean get() = importGate.isBusy
     internal val authGate = WithingsAuthGate()
+    @Volatile private var lastExtendFailedAtMs: Long = 0L
     private val authDiagnostics by lazy {
         WithingsAuthDiagnostics(
             load = { sl.secrets.getString(WithingsAuthDiagnostics.STORE_KEY) },
@@ -252,8 +253,33 @@ class WithingsService internal constructor(
     }
 
     /** Redigovaný záznam posledních pokusů o přihlášení / tiché obnovení (bez cookies, hesel, tokenů a e-mailu). */
-    fun authDiagnosticsText(): String = authDiagnostics.export()
+    fun authDiagnosticsText(): String {
+        val ws = runCatching { loadWebSession() }.getOrNull()
+        val hasSession = ws?.isConnected() == true
+        val hasKeyCookie = ws?.cookies?.contains("session_key=") == true
+        val status = runCatching { sessionCoordinator.diagnosticSummary(hasSession, hasKeyCookie) }.getOrNull()
+        return authDiagnostics.export(statusLine = status)
+    }
+
     fun clearAuthDiagnostics() = authDiagnostics.clear()
+
+    /** Čitelný důvod pro UI, když synchronizace skončila stavem `NeedsUser`. */
+    fun syncNeedsUserMessage(): String {
+        val paused = sessionCoordinator.pausedMessage()
+        if (!paused.isNullOrBlank()) return paused
+        val now = System.currentTimeMillis()
+        val cdUntil = sessionCoordinator.reauthCooldownUntilMs()
+        if (now < cdUntil) {
+            val min = ((cdUntil - now) + 59_999L) / 60_000L
+            return "Relace Withings vypršela (ochranná pauza ještě $min min). Můžete se přihlásit ručně."
+        }
+        val pwUntil = sessionCoordinator.passwordCooldownUntilMs()
+        if (now < pwUntil) {
+            val min = ((pwUntil - now) + 59_999L) / 60_000L
+            return "Relace Withings vypršela (automatická obnova za $min min). Zkuste synchronizaci znovu za chvíli nebo se přihlaste ručně."
+        }
+        return "Relace Withings vypršela – přihlaste se prosím znovu."
+    }
 
     /**
      * Spustí ruční (uživatelskou) operaci přihlášení s předností před obnovou na pozadí.
@@ -281,15 +307,23 @@ class WithingsService internal constructor(
             isDirectEnabled = { sl.settings.withingsDirectEnabled },
             loadSession = ::loadWebSession,
             saveSession = ::saveWebSession,
-            extendSession = { cookies, token -> webClient.extendSessionDetailed(cookies, token) },
+            extendSession = { cookies, token ->
+                val res = webClient.extendSessionDetailed(cookies, token)
+                lastExtendFailedAtMs = if (res is app.pulse4.withings.WithingsExtendResult.Success) 0L else System.currentTimeMillis()
+                res
+            },
             hasUsableCookies = { directAuth.hasUsableCookies() },
             trySilentSsoRefresh = { directAuth.trySilentSsoRefresh(shouldAbort = authGate::manualPending) },
             loginPassword = { email, pass ->
                 directAuth.loginPassword(email, pass, background = true, shouldAbort = authGate::manualPending)
             },
-            onSilentRefreshOk = { res, emailFallback -> applySilentRefreshResult(res, emailFallback) },
+            onSilentRefreshOk = { res, emailFallback ->
+                lastExtendFailedAtMs = 0L
+                applySilentRefreshResult(res, emailFallback)
+            },
             onAuthPaused = { _, message -> _state.value = WithingsUiState.Failed(message) },
             onLog = { msg -> PLog.i("Withings") { msg } },
+            onDiag = { msg -> authDiagnostics.mark(WithingsAuthDiagnostics.Flow.REAUTH, msg) },
             shouldAbort = authGate::manualPending,
         )
     }
@@ -475,9 +509,9 @@ class WithingsService internal constructor(
     }
 
     /** Prodlouží existující webovou relaci Withings nebo provede automatické tiché znovupřihlášení. */
-    fun renewSession(forceExtend: Boolean = false): Boolean = authGate.background {
+    fun renewSession(forceExtend: Boolean = false, manualTriggered: Boolean = false): Boolean = authGate.background {
         if (sl.settings.withingsDirectEnabled) {
-            return@background sessionCoordinator.renewSession(forceExtend)
+            return@background sessionCoordinator.renewSession(forceExtend, manualTriggered = manualTriggered)
         }
         if (session.isConnected()) {
             return@background runCatching { session.accessToken(); true }.getOrDefault(false)
@@ -496,6 +530,7 @@ class WithingsService internal constructor(
         email: String? = null,
     ) = authGate.background {
         authGate.bumpGeneration()
+        lastExtendFailedAtMs = 0L
         sessionCoordinator.clearAuthPauseAndBackoff()
         val existing = loadWebSession()
         val profiles = allProfiles.ifEmpty { existing?.allProfiles.orEmpty() }
@@ -730,6 +765,13 @@ class WithingsService internal constructor(
                 else emptySet()
             },
             onWorkouts = { workouts -> saveWithingsWorkouts(db, workouts) },
+            recentlyFailedExtend = {
+                val failedAt = lastExtendFailedAtMs
+                failedAt > 0L && (System.currentTimeMillis() - failedAt) in 0 until 60_000L
+            },
+            onExtendOutcome = { ok, atMs ->
+                lastExtendFailedAtMs = if (ok) 0L else atMs
+            },
         )
         val engine = SyncEngine(
             fetcher = fetcher,

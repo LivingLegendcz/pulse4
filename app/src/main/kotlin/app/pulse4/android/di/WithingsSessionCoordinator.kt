@@ -19,6 +19,13 @@ object WithingsReauthPolicy {
     const val PASSWORD_MIN_SPACING_MS = 6 * 60 * 60_000L
 
     /**
+     * Safety floor when the user explicitly taps "Synchronizovat" in Settings: allows recovering an expired session
+     * with the saved password without waiting 6 h (as long as there is no active rate-limit / failure cooldown or
+     * hard pause), while preventing repeated taps from hammering `password_check`.
+     */
+    const val MANUAL_PASSWORD_MIN_SPACING_MS = 10 * 60_000L
+
+    /**
      * How long a prior rate-limit hit stays remembered across background successes so an alternating
      * `RATE_LIMITED -> 2h -> Ok -> session dies -> RATE_LIMITED` cycle still escalates to 6h / 24h / pause.
      */
@@ -93,6 +100,8 @@ class WithingsSessionCoordinator(
      */
     private val onAuthPaused: (reason: String, message: String) -> Unit = { _, _ -> },
     private val onLog: (String) -> Unit = {},
+    /** Redacted decision trace (never secrets/emails) written to "Diagnostika Withings". */
+    private val onDiag: (String) -> Unit = {},
     /** True when a manual (user) login is waiting; background renewal then stops between HTTP calls. */
     private val shouldAbort: () -> Boolean = { false },
 ) {
@@ -107,7 +116,25 @@ class WithingsSessionCoordinator(
 
     fun reauthCooldownUntilMs(): Long = store.getString(KEY_REAUTH_COOLDOWN_UNTIL_MS)?.toLongOrNull() ?: 0L
 
+    fun passwordCooldownUntilMs(): Long = store.getString(KEY_PASSWORD_COOLDOWN_UNTIL_MS)?.toLongOrNull() ?: 0L
+
+    fun ssoCooldownUntilMs(): Long = store.getString(KEY_SSO_COOLDOWN_UNTIL_MS)?.toLongOrNull() ?: 0L
+
     fun reauthFailures(): Int = store.getString(KEY_OTHER_AUTH_FAILURES)?.toIntOrNull() ?: 0
+
+    /** Compact redacted status line for "Diagnostika Withings" (no emails, cookies, tokens or passwords). */
+    fun diagnosticSummary(hasSession: Boolean, hasKeyCookie: Boolean): String {
+        val now = nowMs()
+        val hasPass = !store.getString(KEY_PASSWORD).isNullOrEmpty()
+        val paused = pausedReason() ?: "ne"
+        val pwMin = ((passwordCooldownUntilMs() - now).coerceAtLeast(0L) + 59_999L) / 60_000L
+        val ssoMin = ((ssoCooldownUntilMs() - now).coerceAtLeast(0L) + 59_999L) / 60_000L
+        val cdMin = ((reauthCooldownUntilMs() - now).coerceAtLeast(0L) + 59_999L) / 60_000L
+        val rlHits = store.getString(KEY_RATE_LIMIT_HITS)?.toIntOrNull() ?: 0
+        return "Stav: relace=${if (hasSession) "ano" else "ne"}, key=${if (hasKeyCookie) "ano" else "ne"}, " +
+            "heslo=${if (hasPass) "ano" else "ne"}, pauza=$paused, " +
+            "pwWait=${pwMin}m, ssoWait=${ssoMin}m, cdWait=${cdMin}m, rlHits=$rlHits"
+    }
 
     /**
      * Whether the UI should prompt the user: a hard pause, or silent renewal failed so many times in a row that
@@ -130,7 +157,10 @@ class WithingsSessionCoordinator(
         store.delete(KEY_REAUTH_COOLDOWN_UNTIL_MS)
         store.delete(KEY_SSO_COOLDOWN_UNTIL_MS)
         store.delete(KEY_LAST_PASSWORD_ATTEMPT_MS)
-        if (!keepPasswordSpacing) store.delete(KEY_PASSWORD_COOLDOWN_UNTIL_MS)
+        if (!keepPasswordSpacing) {
+            store.delete(KEY_PASSWORD_COOLDOWN_UNTIL_MS)
+            store.delete(KEY_LAST_PASSWORD_OK_MS)
+        }
         resetNetworkBackoff()
     }
 
@@ -204,23 +234,28 @@ class WithingsSessionCoordinator(
 
     /**
      * Keepalive + silent renewal entry point (app start, periodic worker, foreground service, import after a 401).
+     * [manualTriggered] = true only when the user explicitly tapped "Synchronizovat" (may bypass the 6h background
+     * password spacing if ≥ [WithingsReauthPolicy.MANUAL_PASSWORD_MIN_SPACING_MS] elapsed and no rate-limit/failure
+     * cooldown or hard pause is active).
      * Returns true when a valid session exists afterwards.
      */
-    fun renewSession(forceExtend: Boolean = false): Boolean {
+    fun renewSession(forceExtend: Boolean = false, manualTriggered: Boolean = false): Boolean {
         if (!isDirectEnabled()) return false
         if (isAutoReloginPaused()) {
             onLog("renewSession skipped: paused (${pausedReason()})")
+            onDiag("skip(paused=${pausedReason()})")
             return false
         }
         val now = nowMs()
         val backoffUntil = netBackoffUntilMs()
-        if (now < backoffUntil) {
+        if (!manualTriggered && now < backoffUntil) {
             onLog("renewSession skipped: network backoff until $backoffUntil")
+            onDiag("skip(net_backoff=${(backoffUntil - now) / 1000L}s)")
             return false
         }
 
         val s = loadSession()
-        onLog("renewSession: hasSession=${s != null}, isConnected=${s?.isConnected() == true}, forceExtend=$forceExtend")
+        onLog("renewSession: hasSession=${s != null}, isConnected=${s?.isConnected() == true}, forceExtend=$forceExtend, manual=$manualTriggered")
         if (s != null && s.isConnected()) {
             val lastExt = s.lastExtendedMs ?: 0L
             if (!forceExtend && lastExt > 0L && (now - lastExt) in 0 until FRESH_EXTEND_WINDOW_MS) {
@@ -256,7 +291,7 @@ class WithingsSessionCoordinator(
                     // than a long outage: after a few failures in a row climb the ladder (it is network-aware).
                     if (networkFailures() < WithingsReauthPolicy.EXTEND_ESCALATE_AFTER_TRANSIENT) return false
                     onLog("renewSession: ${networkFailures()} transient extend failures in a row, trying re-authentication")
-                    return reauth(now, ignoreNetworkBackoff = true)
+                    return reauth(now, ignoreNetworkBackoff = true, manualTriggered = manualTriggered)
                 }
                 is WithingsExtendResult.Unauthorized -> {
                     onLog("renewSession: extendSession unauthorized, falling back to tryAutoReLogin")
@@ -268,28 +303,32 @@ class WithingsSessionCoordinator(
             onLog("renewSession aborted: manual login pending")
             return false
         }
-        return reauth(now, ignoreNetworkBackoff = false)
+        return reauth(now, ignoreNetworkBackoff = manualTriggered, manualTriggered = manualTriggered)
     }
 
     /** Silent re-authentication without prior extend: SSO cookies first, then the remembered password. */
-    fun tryAutoReLogin(): Boolean = reauth(nowMs(), ignoreNetworkBackoff = false)
+    fun tryAutoReLogin(): Boolean = reauth(nowMs(), ignoreNetworkBackoff = false, manualTriggered = false)
 
-    private fun reauth(now: Long, ignoreNetworkBackoff: Boolean): Boolean {
+    private fun reauth(now: Long, ignoreNetworkBackoff: Boolean, manualTriggered: Boolean): Boolean {
         if (isAutoReloginPaused()) {
             onLog("tryAutoReLogin skipped: paused (${pausedReason()})")
+            onDiag("skip(paused=${pausedReason()})")
             return false
         }
         if (!ignoreNetworkBackoff) {
             val backoffUntil = netBackoffUntilMs()
             if (now < backoffUntil) {
                 onLog("tryAutoReLogin skipped: network backoff until $backoffUntil")
+                onDiag("skip(net_backoff=${(backoffUntil - now) / 1000L}s)")
                 return false
             }
         }
         val cooldownUntil = reauthCooldownUntilMs()
         if (now < cooldownUntil) {
             // A cooldown skip is NOT a failure: it must never count towards escalation.
-            onLog("tryAutoReLogin skipped: cooldown for another ${(cooldownUntil - now) / 60_000L} min")
+            val remMin = ((cooldownUntil - now) + 59_999L) / 60_000L
+            onLog("tryAutoReLogin skipped: cooldown for another $remMin min")
+            onDiag("skip(reauth_cd=${remMin}m)")
             return false
         }
 
@@ -299,7 +338,7 @@ class WithingsSessionCoordinator(
         var ssoFailure: WithingsLoginResult.Error? = null
 
         var ssoSkippedByCooldown = false
-        val ssoCooldownUntil = store.getString(KEY_SSO_COOLDOWN_UNTIL_MS)?.toLongOrNull() ?: 0L
+        val ssoCooldownUntil = ssoCooldownUntilMs()
         if (cookies && now >= ssoCooldownUntil) {
             if (shouldAbort()) {
                 onLog("tryAutoReLogin aborted: manual login pending")
@@ -340,7 +379,12 @@ class WithingsSessionCoordinator(
                         return false
                     }
                     WithingsAuthFailureKind.OTHER -> {
-                        store.putString(KEY_SSO_COOLDOWN_UNTIL_MS, (now + WithingsReauthPolicy.SSO_FAIL_COOLDOWN_MS).toString())
+                        // When a stored password is already spaced, no new SSO cookie can appear before the next
+                        // password login — align SSO cooldown with password spacing so keepalive ticks every 30 min
+                        // do not keep hitting account.withings.com/new_workflow/login and flooding diagnostics.
+                        val pwSpacing = if (password != null && email != null) passwordCooldownUntilMs() else 0L
+                        val nextSsoAt = maxOf(now + WithingsReauthPolicy.SSO_FAIL_COOLDOWN_MS, pwSpacing)
+                        store.putString(KEY_SSO_COOLDOWN_UNTIL_MS, nextSsoAt.toString())
                         ssoFailure = ssoRes
                     }
                     WithingsAuthFailureKind.ABORTED -> {
@@ -351,19 +395,24 @@ class WithingsSessionCoordinator(
             }
         } else if (cookies) {
             ssoSkippedByCooldown = true
-            onLog("tryAutoReLogin: SSO skipped (cooldown ${(ssoCooldownUntil - now) / 60_000L} min left)")
+            val remMin = ((ssoCooldownUntil - now) + 59_999L) / 60_000L
+            onLog("tryAutoReLogin: SSO skipped (cooldown $remMin min left)")
         }
 
-        if (password != null && email != null) return tryPasswordLogin(now, email, password)
+        if (password != null && email != null) return tryPasswordLogin(now, email, password, manualTriggered)
 
         // No stored password (or e-mail): if SSO was just skipped by cooldown, do not falsely hard-pause.
-        if (ssoSkippedByCooldown) return false
+        if (ssoSkippedByCooldown) {
+            onDiag("skip(sso_cd,no_password)")
+            return false
+        }
 
         // No stored password (or e-mail): silent SSO was the only rung and it did not help.
         val evidenceOfConnection = email != null || cookies || runCatching { loadSession() != null }.getOrDefault(false)
         if (!evidenceOfConnection) return false
         if (ssoFailure == null) {
             // Not even SSO cookies and nothing to log in with: automation is impossible, a human must log in.
+            onDiag("pause(no_password)")
             pauseAutoRelogin(REASON_AUTH_ERROR, MSG_NO_PASSWORD)
             return false
         }
@@ -376,12 +425,20 @@ class WithingsSessionCoordinator(
     }
 
     /** One login with the remembered password. Spaced by [WithingsReauthPolicy.PASSWORD_MIN_SPACING_MS]. */
-    private fun tryPasswordLogin(now: Long, email: String, password: String): Boolean {
-        val spacingUntil = store.getString(KEY_PASSWORD_COOLDOWN_UNTIL_MS)?.toLongOrNull() ?: 0L
+    private fun tryPasswordLogin(now: Long, email: String, password: String, manualTriggered: Boolean): Boolean {
+        val spacingUntil = passwordCooldownUntilMs()
         if (now < spacingUntil) {
-            // Skipped, not failed: the session just kept dying right after a login, wait for the spacing to pass.
-            onLog("password login skipped: spaced (${(spacingUntil - now) / 60_000L} min left)")
-            return false
+            val lastOk = store.getString(KEY_LAST_PASSWORD_OK_MS)?.toLongOrNull()
+                ?: (spacingUntil - WithingsReauthPolicy.PASSWORD_MIN_SPACING_MS)
+            val manualAllowed = manualTriggered && (now - lastOk) >= WithingsReauthPolicy.MANUAL_PASSWORD_MIN_SPACING_MS
+            if (!manualAllowed) {
+                // Skipped, not failed: the session just kept dying right after a login, wait for the spacing to pass.
+                val remMin = ((spacingUntil - now) + 59_999L) / 60_000L
+                onLog("password login skipped: spaced ($remMin min left, manual=$manualTriggered)")
+                onDiag("skip(pw_spaced=${remMin}m)")
+                return false
+            }
+            onDiag("manual_pw_reauth")
         }
         if (shouldAbort()) {
             onLog("password login skipped: manual login pending")
@@ -405,6 +462,7 @@ class WithingsSessionCoordinator(
             is WithingsLoginResult.Ok -> {
                 // Enforce 6h spacing after a successful background password login so a session that keeps dying
                 // every 60-90 min cannot turn into a repeated password-login loop that locks out the account.
+                store.putString(KEY_LAST_PASSWORD_OK_MS, now.toString())
                 store.putString(KEY_PASSWORD_COOLDOWN_UNTIL_MS, (now + WithingsReauthPolicy.PASSWORD_MIN_SPACING_MS).toString())
                 clearAuthPauseAndBackoff(keepPasswordSpacing = true)
                 onSilentRefreshOk(res, email)
@@ -477,6 +535,7 @@ class WithingsSessionCoordinator(
         const val KEY_REAUTH_COOLDOWN_UNTIL_MS = "withings.auth.reauth_cooldown_until_ms"
         const val KEY_SSO_COOLDOWN_UNTIL_MS = "withings.auth.sso_cooldown_until_ms"
         const val KEY_PASSWORD_COOLDOWN_UNTIL_MS = "withings.auth.password_cooldown_until_ms"
+        const val KEY_LAST_PASSWORD_OK_MS = "withings.auth.last_password_ok_ms"
         const val KEY_RATE_LIMIT_HITS = "withings.auth.rate_limit_hits"
         const val KEY_LAST_RATE_LIMIT_MS = "withings.auth.last_rate_limit_ms"
 

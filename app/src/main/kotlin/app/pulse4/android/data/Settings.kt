@@ -317,6 +317,10 @@ class Settings(private val dbProvider: () -> AppDatabase) {
     var withingsClientId: String get() = get("withingsClientId", ""); set(v) = put("withingsClientId", v.trim())
     /** Pojmenování aktivního profilu ve Withings (např. "Hlavní profil (Já)" nebo "Dětský profil – Honzík"). */
     var withingsProfileLabel: String get() = get("withingsProfileLabel", "Hlavní profil (Já)"); set(v) = put("withingsProfileLabel", v.trim())
+    /** Ruční přepis siluety 3D postavy: `null` = automaticky z profilu Withings, `0` = muž, `1` = žena. */
+    var body3dGenderOverride: Int?
+        get() = getRaw("body3dGenderOverride")?.toIntOrNull()?.takeIf { it == 0 || it == 1 }
+        set(v) = put("body3dGenderOverride", v?.toString().orEmpty())
     /** Ochranný filtr váhy proti nechtěnému započítání vážení dítěte nebo jiného člena domácnosti na společné váze. */
     var weightFilterEnabled: Boolean get() = get("weightFilterEnabled", "true").toBoolean(); set(v) = put("weightFilterEnabled", v.toString())
     var weightFilterMinKg: Double get() = get("weightFilterMinKg", "45.0").toDoubleOrNull() ?: 45.0; set(v) = put("weightFilterMinKg", v.toString())

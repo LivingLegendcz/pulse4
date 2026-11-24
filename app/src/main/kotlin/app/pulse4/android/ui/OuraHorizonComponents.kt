@@ -603,7 +603,8 @@ fun OuraHorizonHeroCard(
     var showCircadianBar by remember { mutableStateOf(false) }
 
     val infiniteTransition = rememberInfiniteTransition(label = "atmosphere_phase")
-    val wavePhase by infiniteTransition.animateFloat(
+    // Keep as State<Float> (not `by`) so reads stay deferred inside Canvas draw scope — zero 120Hz recompositions!
+    val wavePhaseState = infiniteTransition.animateFloat(
         initialValue = 0f,
         targetValue = (2f * PI).toFloat(),
         animationSpec = infiniteRepeatable(
@@ -612,7 +613,7 @@ fun OuraHorizonHeroCard(
         ),
         label = "wavePhase"
     )
-    val pulseGlow by infiniteTransition.animateFloat(
+    val pulseGlowState = infiniteTransition.animateFloat(
         initialValue = 0.75f,
         targetValue = 1.0f,
         animationSpec = infiniteRepeatable(
@@ -685,8 +686,8 @@ fun OuraHorizonHeroCard(
                     primary = currentPillarState.pillar.primaryColor,
                     secondary = currentPillarState.pillar.secondaryColor,
                     glow = currentPillarState.pillar.glowColor,
-                    phase = wavePhase,
-                    pulse = pulseGlow
+                    phase = wavePhaseState.value,
+                    pulse = pulseGlowState.value
                 )
             }
 
@@ -771,8 +772,7 @@ fun OuraHorizonHeroCard(
                         rating = currentPillarState.rating,
                         ratingLabel = currentPillarState.ratingLabel,
                         deltaLabel = currentPillarState.deltaLabel,
-                        pillarTitle = currentPillarState.pillar.title,
-                        wavePhase = wavePhase
+                        pillarTitle = currentPillarState.pillar.title
                     )
 
                     Spacer(Modifier.height(8.dp))

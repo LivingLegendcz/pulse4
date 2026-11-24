@@ -933,424 +933,426 @@ fun TodayScreen(
     val seriesByType = loaded.seriesByType
     val sleepScore = loaded.todaySleepScore
 
-    Column(
-        Modifier
+    val wState by sl.withings.state.collectAsState()
+    // StrictMode (L5): loadWebSession čte a dešifruje soubor – nikdy v kompozici na hlavním vlákně.
+    val webSession = io(wState) { sl.withings.loadWebSession() }.value
+    val wNeedsLogin = wState is app.pulse4.android.di.WithingsUiState.Failed ||
+        (sl.settings.withingsDirectEnabled && webSession != null && !webSession.isConnected())
+    var showWithingsLoginDialogOnToday by remember { mutableStateOf(false) }
+
+    if (showWithingsLoginDialogOnToday) {
+        WithingsWebLoginDialog(
+            sl = sl,
+            mode = WithingsDialogMode.Reconnect,
+            onDismiss = { showWithingsLoginDialogOnToday = false },
+            onSuccess = { profile ->
+                showWithingsLoginDialogOnToday = false
+                syncMessage = "Withings spojení obnoveno (${profile.displayName})."
+                app.pulse4.android.work.Scheduler.importNow(ctx)
+            }
+        )
+    }
+
+    if (showReorderDialog) {
+        WidgetOrderReorderDialog(
+            initialOrder = currentWidgetOrder,
+            initialShowAll = showAllWidgets,
+            onSave = { newOrder, newShowAll ->
+                scope.launch(Dispatchers.IO) {
+                    sl.settings.todayWidgetOrder = newOrder
+                    sl.settings.showAllTodayWidgets = newShowAll
+                }
+                currentWidgetOrder = newOrder
+            },
+            onDismiss = { showReorderDialog = false }
+        )
+    }
+
+    val todayActivities = remember(recentActs, today, sl.settings.zoneId) {
+        val z = runCatching { ZoneId.of(sl.settings.zoneId) }.getOrDefault(ZoneId.systemDefault())
+        filterTopLevelActivities(recentActs).filter { act ->
+            java.time.Instant.ofEpochMilli(act.startUtcMs).atZone(z).toLocalDate() == today
+        }
+    }
+
+    val ouraPillarStates = remember(seriesByType, sleepScore, loaded.latestWeightObs, loaded.latestEcgObs, todayActivities) {
+        OuraScoreCalculator.calculate(
+            seriesByType = seriesByType,
+            todaySleepScore = sleepScore,
+            latestWeightObs = loaded.latestWeightObs,
+            latestEcgObs = loaded.latestEcgObs,
+            fmt = fmt,
+            todayActivities = todayActivities
+        )
+    }
+
+    val latestAct = remember(recentActs) { pickLatestTopLevelActivity(recentActs) }
+    val normalizedOrder = remember(currentWidgetOrder) { normalizeTodayWidgetOrder(currentWidgetOrder) }
+    val allVisibleKeys = remember(normalizedOrder, loaded.latestByType, loaded.latestEcgObs) {
+        normalizedOrder.filter { key ->
+            key in CORE_TODAY_WIDGET_KEYS ||
+                (EXTENDED_BODY_WIDGET_TYPES[key]?.let { it in loaded.latestByType } == true)
+        }
+    }
+    val pillarVisibleKeys = remember(selectedPillar, allVisibleKeys) {
+        val pillarSet = selectedPillar.widgetKeys.toSet()
+        allVisibleKeys.filter { it in pillarSet }.ifEmpty { selectedPillar.widgetKeys.filter { it in CORE_TODAY_WIDGET_KEYS } }
+    }
+    val displayedKeys = if (showAllWidgets) allVisibleKeys else pillarVisibleKeys
+
+    // Helper: každá karta ukazuje dnešní hodnotu nebo poslední naměřenou hodnotu + čas posledního syncu
+    fun formatMetricValue(type: MetricType, value: Double): String = when (type) {
+        MetricType.SLEEP_DURATION -> fmt.sleep(value)
+        MetricType.BODY_BATTERY -> fmt.number(value, 0)
+        MetricType.HRV -> "${fmt.number(value, 0)} ms"
+        MetricType.RESTING_HEART_RATE -> "${fmt.number(value, 0)} bpm"
+        MetricType.STRESS -> fmt.number(value, 0)
+        MetricType.STEPS -> fmt.number(value, 0)
+        MetricType.SPO2 -> "${fmt.number(value, 0)} %"
+        MetricType.RESPIRATION -> "${fmt.number(value, 1)} d/min"
+        MetricType.WEIGHT -> fmt.weight(value)
+        MetricType.BODY_FAT, MetricType.BODY_WATER -> "${fmt.number(value, 1)} %"
+        MetricType.MUSCLE_MASS, MetricType.BONE_MASS, MetricType.FAT_FREE_MASS -> fmt.weight(value, 1)
+        MetricType.VISCERAL_FAT -> fmt.number(value, 0)
+        MetricType.PULSE_WAVE_VELOCITY -> "${fmt.number(value, 1)} m/s"
+        MetricType.VASCULAR_AGE, MetricType.METABOLIC_AGE -> "${fmt.number(value, 0)} let"
+        MetricType.BMR -> "${fmt.number(value, 0)} kcal"
+        else -> fmt.number(value, 1)
+    }
+
+    fun syncTimeFor(type: MetricType): Long? = when (type) {
+        MetricType.SLEEP_DURATION, MetricType.RESPIRATION -> loaded.syncByArea[SyncArea.SLEEP] ?: loaded.garminLastSyncMs ?: loaded.withingsLastSyncMs
+        MetricType.BODY_BATTERY -> loaded.syncByArea[SyncArea.BODY_BATTERY] ?: loaded.garminLastSyncMs
+        MetricType.HRV -> loaded.syncByArea[SyncArea.HRV] ?: loaded.garminLastSyncMs
+        MetricType.RESTING_HEART_RATE, MetricType.SPO2 -> loaded.syncByArea[SyncArea.HEART_RATE] ?: loaded.garminLastSyncMs ?: loaded.withingsLastSyncMs
+        MetricType.STRESS -> loaded.syncByArea[SyncArea.STEPS_STRESS] ?: loaded.garminLastSyncMs
+        MetricType.STEPS -> loaded.syncByArea[SyncArea.STEPS_STRESS] ?: loaded.garminLastSyncMs ?: loaded.withingsLastSyncMs
+        MetricType.WEIGHT,
+        MetricType.BODY_FAT,
+        MetricType.MUSCLE_MASS,
+        MetricType.BODY_WATER,
+        MetricType.BONE_MASS,
+        MetricType.VISCERAL_FAT,
+        MetricType.PULSE_WAVE_VELOCITY,
+        MetricType.VASCULAR_AGE,
+        MetricType.BMR,
+        MetricType.METABOLIC_AGE,
+        MetricType.ECG -> loaded.withingsLastSyncMs ?: loaded.syncByArea[SyncArea.WEIGHT]
+        else -> loaded.garminLastSyncMs
+    }
+
+    fun atmosphereFor(type: MetricType) = when (type) {
+        MetricType.SLEEP_DURATION -> MetricAtmosphereCatalog.Sleep
+        MetricType.BODY_BATTERY -> MetricAtmosphereCatalog.BodyBattery
+        MetricType.HRV -> MetricAtmosphereCatalog.Hrv
+        MetricType.RESTING_HEART_RATE -> MetricAtmosphereCatalog.RestingHr
+        MetricType.STRESS -> MetricAtmosphereCatalog.Stress
+        MetricType.STEPS -> MetricAtmosphereCatalog.Steps
+        MetricType.SPO2, MetricType.RESPIRATION -> MetricAtmosphereCatalog.Sleep
+        MetricType.WEIGHT, MetricType.VISCERAL_FAT, MetricType.BMR, MetricType.METABOLIC_AGE -> MetricAtmosphereCatalog.Weight
+        MetricType.BODY_FAT -> MetricAtmosphereCatalog.BodyFat
+        MetricType.MUSCLE_MASS -> MetricAtmosphereCatalog.Weight
+        MetricType.BODY_WATER -> MetricAtmosphereCatalog.BodyWater
+        MetricType.BONE_MASS -> MetricAtmosphereCatalog.BoneMass
+        MetricType.PULSE_WAVE_VELOCITY, MetricType.VASCULAR_AGE -> MetricAtmosphereCatalog.RestingHr
+        MetricType.ECG -> MetricAtmosphereCatalog.Ecg
+        else -> MetricAtmosphereCatalog.Hrv
+    }
+
+    LazyColumn(
+        modifier = Modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 14.dp, vertical = 10.dp)
+            .background(MaterialTheme.colorScheme.background),
+        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
     ) {
-        // Vzdušná minimalistická hlavička s kulatými skleněnými akcemi (sjednocená napříč záložkami)
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(Modifier.weight(1f)) {
+        item(key = "today_header") {
+            // Vzdušná minimalistická hlavička s kulatými skleněnými akcemi (sjednocená napříč záložkami)
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Box(
+                            Modifier
+                                .size(7.dp)
+                                .background(Color(0xFF2DD4BF), CircleShape)
+                        )
+                        Text(
+                            "SOVEREIGN BIOMETRICS · HORIZONT",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color(0xFF2DD4BF),
+                            letterSpacing = 1.4.sp,
+                            fontSize = 9.5.sp
+                        )
+                    }
+                    Text(
+                        "Dnešní Horizont",
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Color.White
+                    )
+                }
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    // Kulaté skleněné tlačítko pro nahrání Demo dat (jen vývojářská verze – nikdy nemíchat do reálných dat)
+                    if (app.pulse4.android.BuildConfig.DEBUG) Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF0C1523))
+                            .border(BorderStroke(1.dp, Color(0xFF2DD4BF).copy(alpha = 0.35f)), CircleShape)
+                            .clickable {
+                                ctx.sendBroadcast(android.content.Intent("app.pulse4.debug.SEED_DEMO").setPackage(ctx.packageName))
+                                syncMessage = "Požadavek na ukázková data odeslán."
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.PlayArrow,
+                            contentDescription = "Nahrát demo data",
+                            tint = Color(0xFF2DD4BF),
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+
+                    // Kulaté skleněné tlačítko pro úpravu pořadí karet
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF0C1523))
+                            .border(BorderStroke(1.dp, Color(0xFF38BDF8).copy(alpha = 0.35f)), CircleShape)
+                            .clickable { showReorderDialog = true },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Tune,
+                            contentDescription = "Pořadí widgetů",
+                            tint = Color(0xFF38BDF8),
+                            modifier = Modifier.size(17.dp)
+                        )
+                    }
+
+                    // Kompaktní skleněné pilulkové tlačítko Sync
+                    Box(
+                        modifier = Modifier
+                            .height(36.dp)
+                            .clip(RoundedCornerShape(18.dp))
+                            .background(Color(0xFF0E1B2C))
+                            .border(BorderStroke(1.dp, Color(0xFF2DD4BF).copy(alpha = 0.45f)), RoundedCornerShape(18.dp))
+                            .clickable(enabled = !syncing && !isWorkRunning) {
+                                syncing = true
+                                syncTriggeredAtMs = System.currentTimeMillis()
+                                syncMessage = null
+                                app.pulse4.android.work.Scheduler.importNow(ctx)
+                            }
+                            .padding(horizontal = 12.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Outlined.Sync,
+                                contentDescription = "Synchronizovat",
+                                tint = Color(0xFF2DD4BF),
+                                modifier = Modifier.size(15.dp)
+                            )
+                            Spacer(Modifier.width(5.dp))
+                            Text(
+                                if (syncing || isWorkRunning) "…" else "Sync",
+                                style = MaterialTheme.typography.labelMedium.copy(
+                                    fontFamily = app.pulse4.android.ui.theme.JetBrainsMonoFamily
+                                ),
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (wNeedsLogin) {
+                Card(
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF450A0A)),
+                    border = BorderStroke(1.dp, Color(0xFFEF4444).copy(alpha = 0.8f)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 10.dp)
+                        .clickable { showWithingsLoginDialogOnToday = true }
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Outlined.Warning,
+                            contentDescription = null,
+                            tint = Color(0xFFEF4444),
+                            modifier = Modifier.size(22.dp)
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                "Withings vyžaduje přihlášení",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                            val failReason = (wState as? app.pulse4.android.di.WithingsUiState.Failed)?.message?.takeIf { it.isNotBlank() }
+                            Text(
+                                failReason?.let { "$it Klepněte pro přihlášení." } ?: "Klepněte pro přihlášení heslem / obnovení relace",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color(0xFFFCA5A5),
+                                maxLines = 4
+                            )
+                        }
+                    }
+                }
+            }
+
+            syncMessage?.let {
+                Row(
+                    modifier = Modifier.padding(top = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Outlined.CheckCircle,
+                        contentDescription = null,
+                        tint = Color(0xFF10B981),
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = Color(0xFF10B981))
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+        }
+
+        // 1. Hlavní atmosférická karta (4 pilíře + Living Halo prstenec) — v LazyColumn se po odscrollování automaticky pozastaví animace
+        item(key = "today_hero") {
+            OuraHorizonHeroCard(
+                sl = sl,
+                pillarStates = ouraPillarStates,
+                selectedPillar = selectedPillar,
+                onSelectPillar = { selectedPillar = it },
+                onOpenMetric = onOpenMetric
+            )
+            Spacer(Modifier.height(12.dp))
+        }
+
+        // 2. Kompaktní P2P Kruh Důvěry (Reticulum Mesh)
+        item(key = "today_circles") {
+            OuraCirclesMeshSection(
+                sl = sl,
+                onOpenGroups = onOpenGroups,
+                onInvite = onOpenGroups
+            )
+        }
+
+        // 3. Poslední sportovní aktivita (Garmin FIT), pokud je k dispozici
+        if (latestAct != null) {
+            item(key = "today_latest_act") {
+                Spacer(Modifier.height(12.dp))
+                OuraFeaturedActivityBanner(
+                    activity = latestAct,
+                    fmt = fmt,
+                    onClick = { onOpenActivity(latestAct.id) }
+                )
+            }
+        }
+
+        // 4. Hlavička sekce biometrických karet
+        item(key = "today_cards_header") {
+            Spacer(Modifier.height(16.dp))
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f).padding(end = 8.dp)) {
+                    Text(
+                        if (showAllWidgets) "VŠECHNY BIOMETRICKÉ KARTY"
+                        else "FAKTORY PILÍŘE: ${selectedPillar.title.uppercase()}",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = selectedPillar.primaryColor,
+                        letterSpacing = 1.1.sp
+                    )
+                    val syncParts = buildList {
+                        loaded.garminLastSyncMs?.let { add("Garmin ${fmt.time(it)}") }
+                        loaded.withingsLastSyncMs?.let { add("Withings ${fmt.time(it)}") }
+                    }
+                    Text(
+                        if (syncParts.isNotEmpty()) "Sync: ${syncParts.joinToString(" · ")}"
+                        else "Klepnutím na kartu otevřete detailní analýzu",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xFF94A3B8),
+                        fontSize = 10.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Box(
-                        Modifier
-                            .size(7.dp)
-                            .background(Color(0xFF2DD4BF), CircleShape)
-                    )
-                    Text(
-                        "SOVEREIGN BIOMETRICS · HORIZONT",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = Color(0xFF2DD4BF),
-                        letterSpacing = 1.4.sp,
-                        fontSize = 9.5.sp
-                    )
-                }
-                Text(
-                    "Dnešní Horizont",
-                    style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = FontWeight.ExtraBold,
-                    color = Color.White
-                )
-            }
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                // Kulaté skleněné tlačítko pro nahrání Demo dat (jen vývojářská verze – nikdy nemíchat do reálných dat)
-                if (app.pulse4.android.BuildConfig.DEBUG) Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(CircleShape)
-                        .background(Color(0xFF0C1523))
-                        .border(BorderStroke(1.dp, Color(0xFF2DD4BF).copy(alpha = 0.35f)), CircleShape)
-                        .clickable {
-                            ctx.sendBroadcast(android.content.Intent("app.pulse4.debug.SEED_DEMO").setPackage(ctx.packageName))
-                            syncMessage = "Požadavek na ukázková data odeslán."
-                        },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Outlined.PlayArrow,
-                        contentDescription = "Nahrát demo data",
-                        tint = Color(0xFF2DD4BF),
-                        modifier = Modifier.size(18.dp)
-                    )
-                }
-
-                // Kulaté skleněné tlačítko pro úpravu pořadí karet
-                Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(CircleShape)
-                        .background(Color(0xFF0C1523))
-                        .border(BorderStroke(1.dp, Color(0xFF38BDF8).copy(alpha = 0.35f)), CircleShape)
-                        .clickable { showReorderDialog = true },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Outlined.Tune,
-                        contentDescription = "Pořadí widgetů",
-                        tint = Color(0xFF38BDF8),
-                        modifier = Modifier.size(17.dp)
-                    )
-                }
-
-                // Kompaktní skleněné pilulkové tlačítko Sync
-                Box(
-                    modifier = Modifier
-                        .height(36.dp)
-                        .clip(RoundedCornerShape(18.dp))
-                        .background(Color(0xFF0E1B2C))
-                        .border(BorderStroke(1.dp, Color(0xFF2DD4BF).copy(alpha = 0.45f)), RoundedCornerShape(18.dp))
-                        .clickable(enabled = !syncing && !isWorkRunning) {
-                            syncing = true
-                            syncTriggeredAtMs = System.currentTimeMillis()
-                            syncMessage = null
-                            app.pulse4.android.work.Scheduler.importNow(ctx)
-                        }
-                        .padding(horizontal = 12.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Outlined.Sync,
-                            contentDescription = "Synchronizovat",
-                            tint = Color(0xFF2DD4BF),
-                            modifier = Modifier.size(15.dp)
-                        )
-                        Spacer(Modifier.width(5.dp))
-                        Text(
-                            if (syncing || isWorkRunning) "…" else "Sync",
-                            style = MaterialTheme.typography.labelMedium.copy(
-                                fontFamily = app.pulse4.android.ui.theme.JetBrainsMonoFamily
-                            ),
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White
-                        )
-                    }
-                }
-            }
-        }
-
-        val wState by sl.withings.state.collectAsState()
-        // StrictMode (L5): loadWebSession čte a dešifruje soubor – nikdy v kompozici na hlavním vlákně.
-        val webSession = io(wState) { sl.withings.loadWebSession() }.value
-        val wNeedsLogin = wState is app.pulse4.android.di.WithingsUiState.Failed ||
-            (sl.settings.withingsDirectEnabled && webSession != null && !webSession.isConnected())
-        var showWithingsLoginDialogOnToday by remember { mutableStateOf(false) }
-
-        if (showWithingsLoginDialogOnToday) {
-            WithingsWebLoginDialog(
-                sl = sl,
-                mode = WithingsDialogMode.Reconnect,
-                onDismiss = { showWithingsLoginDialogOnToday = false },
-                onSuccess = { profile ->
-                    showWithingsLoginDialogOnToday = false
-                    syncMessage = "Withings spojení obnoveno (${profile.displayName})."
-                    app.pulse4.android.work.Scheduler.importNow(ctx)
-                }
-            )
-        }
-
-        if (wNeedsLogin) {
-            Card(
-                shape = RoundedCornerShape(12.dp),
-                colors = CardDefaults.cardColors(containerColor = Color(0xFF450A0A)),
-                border = BorderStroke(1.dp, Color(0xFFEF4444).copy(alpha = 0.8f)),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 10.dp)
-                    .clickable { showWithingsLoginDialogOnToday = true }
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        Icons.Outlined.Warning,
-                        contentDescription = null,
-                        tint = Color(0xFFEF4444),
-                        modifier = Modifier.size(22.dp)
-                    )
-                    Spacer(Modifier.width(10.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            "Withings vyžaduje přihlášení",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White
-                        )
-                        // Say WHY a human is needed (code, changed password, locked account, no stored password…).
-                        val failReason = (wState as? app.pulse4.android.di.WithingsUiState.Failed)?.message?.takeIf { it.isNotBlank() }
-                        Text(
-                            failReason?.let { "$it Klepněte pro přihlášení." } ?: "Klepněte pro přihlášení heslem / obnovení relace",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Color(0xFFFCA5A5),
-                            maxLines = 4
-                        )
-                    }
-                }
-            }
-        }
-
-        if (showReorderDialog) {
-            WidgetOrderReorderDialog(
-                initialOrder = currentWidgetOrder,
-                initialShowAll = showAllWidgets,
-                onSave = { newOrder, newShowAll ->
-                    scope.launch(Dispatchers.IO) {
-                        sl.settings.todayWidgetOrder = newOrder
-                        sl.settings.showAllTodayWidgets = newShowAll
-                    }
-                    currentWidgetOrder = newOrder
-                },
-                onDismiss = { showReorderDialog = false }
-            )
-        }
-
-        syncMessage?.let {
-            Row(
-                modifier = Modifier.padding(top = 6.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(
-                    Icons.Outlined.CheckCircle,
-                    contentDescription = null,
-                    tint = Color(0xFF10B981),
-                    modifier = Modifier.size(14.dp)
-                )
-                Spacer(Modifier.width(4.dp))
-                Text(it, style = MaterialTheme.typography.bodySmall, color = Color(0xFF10B981))
-            }
-        }
-
-        val todayActivities = remember(recentActs, today, sl.settings.zoneId) {
-            val z = runCatching { ZoneId.of(sl.settings.zoneId) }.getOrDefault(ZoneId.systemDefault())
-            filterTopLevelActivities(recentActs).filter { act ->
-                java.time.Instant.ofEpochMilli(act.startUtcMs).atZone(z).toLocalDate() == today
-            }
-        }
-
-        val ouraPillarStates = remember(seriesByType, sleepScore, loaded.latestWeightObs, loaded.latestEcgObs, todayActivities) {
-            OuraScoreCalculator.calculate(
-                seriesByType = seriesByType,
-                todaySleepScore = sleepScore,
-                latestWeightObs = loaded.latestWeightObs,
-                latestEcgObs = loaded.latestEcgObs,
-                fmt = fmt,
-                todayActivities = todayActivities
-            )
-        }
-
-        Spacer(Modifier.height(10.dp))
-
-        // 1. Hlavní atmosférická karta (4 pilíře + Living Halo prstenec)
-        OuraHorizonHeroCard(
-            sl = sl,
-            pillarStates = ouraPillarStates,
-            selectedPillar = selectedPillar,
-            onSelectPillar = { selectedPillar = it },
-            onOpenMetric = onOpenMetric
-        )
-
-        Spacer(Modifier.height(12.dp))
-
-        // 2. Kompaktní P2P Kruh Důvěry (Reticulum Mesh)
-        OuraCirclesMeshSection(
-            sl = sl,
-            onOpenGroups = onOpenGroups,
-            onInvite = onOpenGroups
-        )
-
-        // 3. Poslední sportovní aktivita (Garmin FIT), pokud je k dispozici (bez podřízených úseků multisportu)
-        val latestAct = pickLatestTopLevelActivity(recentActs)
-        if (latestAct != null) {
-            Spacer(Modifier.height(12.dp))
-            OuraFeaturedActivityBanner(
-                activity = latestAct,
-                fmt = fmt,
-                onClick = { onOpenActivity(latestAct.id) }
-            )
-        }
-
-        Spacer(Modifier.height(16.dp))
-
-        // 4. Karty metrik: všechny základní + všechny další, které mají data (nikdy nevynechává chybějící/nové klíče)
-        val normalizedOrder = remember(currentWidgetOrder) { normalizeTodayWidgetOrder(currentWidgetOrder) }
-        val allVisibleKeys = remember(normalizedOrder, loaded.latestByType, loaded.latestEcgObs) {
-            normalizedOrder.filter { key ->
-                key in CORE_TODAY_WIDGET_KEYS ||
-                    (EXTENDED_BODY_WIDGET_TYPES[key]?.let { it in loaded.latestByType } == true)
-            }
-        }
-        val pillarVisibleKeys = remember(selectedPillar, allVisibleKeys) {
-            val pillarSet = selectedPillar.widgetKeys.toSet()
-            allVisibleKeys.filter { it in pillarSet }.ifEmpty { selectedPillar.widgetKeys.filter { it in CORE_TODAY_WIDGET_KEYS } }
-        }
-        val displayedKeys = if (showAllWidgets) allVisibleKeys else pillarVisibleKeys
-
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .padding(vertical = 4.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(Modifier.weight(1f).padding(end = 8.dp)) {
-                Text(
-                    if (showAllWidgets) "VŠECHNY BIOMETRICKÉ KARTY"
-                    else "FAKTORY PILÍŘE: ${selectedPillar.title.uppercase()}",
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = selectedPillar.primaryColor,
-                    letterSpacing = 1.1.sp
-                )
-                val syncParts = buildList {
-                    loaded.garminLastSyncMs?.let { add("Garmin ${fmt.time(it)}") }
-                    loaded.withingsLastSyncMs?.let { add("Withings ${fmt.time(it)}") }
-                }
-                Text(
-                    if (syncParts.isNotEmpty()) "Sync: ${syncParts.joinToString(" · ")}"
-                    else "Klepnutím na kartu otevřete detailní analýzu",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Color(0xFF94A3B8),
-                    fontSize = 10.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                // Rychlý přepínač časového okna křivek (7d / 14d / 30d / 90d)
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(Color(0xFF101A28))
-                        .clickable {
-                            bgWindowDays = when (bgWindowDays) {
-                                7 -> 14
-                                14 -> 30
-                                30 -> 90
-                                else -> 7
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color(0xFF101A28))
+                            .clickable {
+                                bgWindowDays = when (bgWindowDays) {
+                                    7 -> 14
+                                    14 -> 30
+                                    30 -> 90
+                                    else -> 7
+                                }
                             }
-                        }
-                        .padding(horizontal = 9.dp, vertical = 5.dp)
-                ) {
-                    Text(
-                        "Graf ${bgWindowDays}d ↻",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        color = Color(0xFF94A3B8)
-                    )
-                }
+                            .padding(horizontal = 9.dp, vertical = 5.dp)
+                    ) {
+                        Text(
+                            "Graf ${bgWindowDays}d ↻",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color(0xFF94A3B8)
+                        )
+                    }
 
-                // Přepínač: Jen aktivní pilíř vs Všechny dostupné karty
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(if (showAllWidgets) selectedPillar.primaryColor.copy(alpha = 0.20f) else Color(0xFF101A28))
-                        .clickable {
-                            val next = !showAllWidgets
-                            scope.launch(Dispatchers.IO) { sl.settings.showAllTodayWidgets = next }
-                        }
-                        .padding(horizontal = 10.dp, vertical = 5.dp)
-                ) {
-                    Text(
-                        if (showAllWidgets) "Dle pilíře (${pillarVisibleKeys.size})" else "Vše (${allVisibleKeys.size})",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = if (showAllWidgets) selectedPillar.primaryColor else Color(0xFF38BDF8)
-                    )
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(if (showAllWidgets) selectedPillar.primaryColor.copy(alpha = 0.20f) else Color(0xFF101A28))
+                            .clickable {
+                                val next = !showAllWidgets
+                                scope.launch(Dispatchers.IO) { sl.settings.showAllTodayWidgets = next }
+                            }
+                            .padding(horizontal = 10.dp, vertical = 5.dp)
+                    ) {
+                        Text(
+                            if (showAllWidgets) "Dle pilíře (${pillarVisibleKeys.size})" else "Vše (${allVisibleKeys.size})",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = if (showAllWidgets) selectedPillar.primaryColor else Color(0xFF38BDF8)
+                        )
+                    }
                 }
             }
+            Spacer(Modifier.height(6.dp))
         }
 
-        Spacer(Modifier.height(6.dp))
-
-        // Helper: každá karta ukazuje dnešní hodnotu nebo poslední naměřenou hodnotu + čas posledního syncu
-        fun formatMetricValue(type: MetricType, value: Double): String = when (type) {
-            MetricType.SLEEP_DURATION -> fmt.sleep(value)
-            MetricType.BODY_BATTERY -> fmt.number(value, 0)
-            MetricType.HRV -> "${fmt.number(value, 0)} ms"
-            MetricType.RESTING_HEART_RATE -> "${fmt.number(value, 0)} bpm"
-            MetricType.STRESS -> fmt.number(value, 0)
-            MetricType.STEPS -> fmt.number(value, 0)
-            MetricType.SPO2 -> "${fmt.number(value, 0)} %"
-            MetricType.RESPIRATION -> "${fmt.number(value, 1)} d/min"
-            MetricType.WEIGHT -> fmt.weight(value)
-            MetricType.BODY_FAT, MetricType.BODY_WATER -> "${fmt.number(value, 1)} %"
-            MetricType.MUSCLE_MASS, MetricType.BONE_MASS, MetricType.FAT_FREE_MASS -> fmt.weight(value, 1)
-            MetricType.VISCERAL_FAT -> fmt.number(value, 0)
-            MetricType.PULSE_WAVE_VELOCITY -> "${fmt.number(value, 1)} m/s"
-            MetricType.VASCULAR_AGE, MetricType.METABOLIC_AGE -> "${fmt.number(value, 0)} let"
-            MetricType.BMR -> "${fmt.number(value, 0)} kcal"
-            else -> fmt.number(value, 1)
-        }
-
-        fun syncTimeFor(type: MetricType): Long? = when (type) {
-            MetricType.SLEEP_DURATION, MetricType.RESPIRATION -> loaded.syncByArea[SyncArea.SLEEP] ?: loaded.garminLastSyncMs ?: loaded.withingsLastSyncMs
-            MetricType.BODY_BATTERY -> loaded.syncByArea[SyncArea.BODY_BATTERY] ?: loaded.garminLastSyncMs
-            MetricType.HRV -> loaded.syncByArea[SyncArea.HRV] ?: loaded.garminLastSyncMs
-            MetricType.RESTING_HEART_RATE, MetricType.SPO2 -> loaded.syncByArea[SyncArea.HEART_RATE] ?: loaded.garminLastSyncMs ?: loaded.withingsLastSyncMs
-            MetricType.STRESS -> loaded.syncByArea[SyncArea.STEPS_STRESS] ?: loaded.garminLastSyncMs
-            MetricType.STEPS -> loaded.syncByArea[SyncArea.STEPS_STRESS] ?: loaded.garminLastSyncMs ?: loaded.withingsLastSyncMs
-            MetricType.WEIGHT,
-            MetricType.BODY_FAT,
-            MetricType.MUSCLE_MASS,
-            MetricType.BODY_WATER,
-            MetricType.BONE_MASS,
-            MetricType.VISCERAL_FAT,
-            MetricType.PULSE_WAVE_VELOCITY,
-            MetricType.VASCULAR_AGE,
-            MetricType.BMR,
-            MetricType.METABOLIC_AGE,
-            MetricType.ECG -> loaded.withingsLastSyncMs ?: loaded.syncByArea[SyncArea.WEIGHT]
-            else -> loaded.garminLastSyncMs
-        }
-
-        fun atmosphereFor(type: MetricType) = when (type) {
-            MetricType.SLEEP_DURATION -> MetricAtmosphereCatalog.Sleep
-            MetricType.BODY_BATTERY -> MetricAtmosphereCatalog.BodyBattery
-            MetricType.HRV -> MetricAtmosphereCatalog.Hrv
-            MetricType.RESTING_HEART_RATE -> MetricAtmosphereCatalog.RestingHr
-            MetricType.STRESS -> MetricAtmosphereCatalog.Stress
-            MetricType.STEPS -> MetricAtmosphereCatalog.Steps
-            MetricType.SPO2, MetricType.RESPIRATION -> MetricAtmosphereCatalog.Sleep
-            MetricType.WEIGHT, MetricType.VISCERAL_FAT, MetricType.BMR, MetricType.METABOLIC_AGE -> MetricAtmosphereCatalog.Weight
-            MetricType.BODY_FAT -> MetricAtmosphereCatalog.BodyFat
-            MetricType.MUSCLE_MASS -> MetricAtmosphereCatalog.Weight
-            MetricType.BODY_WATER -> MetricAtmosphereCatalog.BodyWater
-            MetricType.BONE_MASS -> MetricAtmosphereCatalog.BoneMass
-            MetricType.PULSE_WAVE_VELOCITY, MetricType.VASCULAR_AGE -> MetricAtmosphereCatalog.RestingHr
-            MetricType.ECG -> MetricAtmosphereCatalog.Ecg
-            else -> MetricAtmosphereCatalog.Hrv
-        }
-
-        // Vykreslení vyfiltrovaných atmosférických karet
-        displayedKeys.forEach { key ->
+        // 5. Biometrické karty — skládají se postupně až při scrollu (LazyColumn)
+        items(items = displayedKeys, key = { "today_card_$it" }) { key ->
             when (key) {
                 "ecg" -> {
                     val ecgCfg = getMetricUiConfig(MetricType.ECG)
@@ -1513,19 +1515,21 @@ fun TodayScreen(
             }
         }
 
-        Spacer(Modifier.height(16.dp))
-        Row(
-            Modifier.fillMaxWidth().padding(bottom = 16.dp),
-            horizontalArrangement = Arrangement.Center,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                "Pulse4 v${app.pulse4.android.BuildConfig.VERSION_NAME} (${app.pulse4.android.BuildConfig.VERSION_CODE})",
-                style = MaterialTheme.typography.labelSmall,
-                color = Color(0xFF64748B).copy(alpha = 0.6f),
-                fontFamily = app.pulse4.android.ui.theme.JetBrainsMonoFamily,
-                fontSize = 10.sp
-            )
+        item(key = "today_footer") {
+            Spacer(Modifier.height(16.dp))
+            Row(
+                Modifier.fillMaxWidth().padding(bottom = 16.dp),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "Pulse4 v${app.pulse4.android.BuildConfig.VERSION_NAME} (${app.pulse4.android.BuildConfig.VERSION_CODE})",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFF64748B).copy(alpha = 0.6f),
+                    fontFamily = app.pulse4.android.ui.theme.JetBrainsMonoFamily,
+                    fontSize = 10.sp
+                )
+            }
         }
     }
 }
@@ -1831,9 +1835,9 @@ internal val BODY_SEGMENT_DEFS = listOf(
     Triple(11, "Levá noha", Color(0xFFFCD34D)),
 )
 
-private val HealthGreen = Color(0xFF10B981)
-private val HealthAmber = Color(0xFFF59E0B)
-private val HealthRed = Color(0xFFEF4444)
+internal val HealthGreen = Color(0xFF10B981)
+internal val HealthAmber = Color(0xFFF59E0B)
+internal val HealthRed = Color(0xFFEF4444)
 
 private fun parseSegmentalSnapshots(observations: List<app.pulse4.domain.MetricObservation>): List<SegmentalBodySnapshot> {
     fun parseMap(tag: String, origin: String): Map<Int, Double> {
@@ -2045,7 +2049,10 @@ fun SegmentalBodyCompositionSection(
     externalUnitMode: BodyUnitMode? = null,
     onUnitModeChange: ((BodyUnitMode) -> Unit)? = null,
 ) {
-    var showFatMode by remember(initialModeFat) { mutableStateOf(initialModeFat) }
+    var viewMode by remember(initialModeFat) {
+        mutableStateOf(if (initialModeFat) Body3DViewMode.FAT else Body3DViewMode.MUSCLE)
+    }
+    val showFatMode = viewMode == Body3DViewMode.FAT
     var internalUnitMode by remember { mutableStateOf(BodyUnitMode.KG) }
     val activeUnitMode = externalUnitMode ?: internalUnitMode
     val setUnitMode: (BodyUnitMode) -> Unit = { m ->
@@ -2054,18 +2061,168 @@ fun SegmentalBodyCompositionSection(
     }
     var selectedSegmentPos by remember { mutableStateOf<Int?>(null) }
 
-    val snapshots by io(daysCount) {
-        val rows = runCatching { sl.withings.trend(MetricType.MUSCLE_MASS, maxOf(daysCount, 730)) }.getOrDefault(emptyList()) +
-            runCatching { sl.withings.trend(MetricType.BODY_FAT, maxOf(daysCount, 730)) }.getOrDefault(emptyList()) +
-            runCatching { sl.withings.trend(MetricType.WEIGHT, maxOf(daysCount, 730)) }.getOrDefault(emptyList())
-        parseSegmentalSnapshots(rows)
+    data class SegmentalUiBundle(
+        val snapshots: List<SegmentalBodySnapshot>,
+        val wholeBodySnapshots: List<WholeBody3DSnapshot>,
+        val gender: Int,
+        val weightByDate: Map<String, Double>,
+        val visceralByDate: Map<String, Double>,
+        val latestWeightKg: Double?,
+        val latestVisceralFat: Double?,
+    )
+
+    val segBundle by io(daysCount) {
+        val windowDays = maxOf(daysCount, 730)
+        val muscleRows = runCatching { sl.withings.trend(MetricType.MUSCLE_MASS, windowDays) }.getOrDefault(emptyList())
+        val fatRows = runCatching { sl.withings.trend(MetricType.BODY_FAT, windowDays) }.getOrDefault(emptyList())
+        val weightRows = runCatching { sl.withings.trend(MetricType.WEIGHT, windowDays) }.getOrDefault(emptyList())
+        val visceralRows = runCatching { sl.withings.trend(MetricType.VISCERAL_FAT, windowDays) }.getOrDefault(emptyList())
+        val waterRows = runCatching { sl.withings.trend(MetricType.BODY_WATER, windowDays) }.getOrDefault(emptyList())
+        val boneRows = runCatching { sl.withings.trend(MetricType.BONE_MASS, windowDays) }.getOrDefault(emptyList())
+        val ws = runCatching { sl.withings.loadWebSession() }.getOrNull()
+        val primaryGender = ws?.allProfiles?.firstOrNull { it.id == ws.primaryUserId }?.gender ?: 0
+        val wMap = weightRows.mapNotNull { r -> r.localDate?.let { it to r.value } }.toMap()
+        val vMap = visceralRows.mapNotNull { r -> r.localDate?.let { it to r.value } }.toMap()
+        val fatMap = fatRows.mapNotNull { r -> r.localDate?.let { it to r.value } }.toMap()
+        val muscleMap = muscleRows.mapNotNull { r -> r.localDate?.let { it to r.value } }.toMap()
+        val waterMap = waterRows.mapNotNull { r -> r.localDate?.let { it to r.value } }.toMap()
+        val boneMap = boneRows.mapNotNull { r -> r.localDate?.let { it to r.value } }.toMap()
+        val segSnaps = parseSegmentalSnapshots(muscleRows + fatRows + weightRows)
+
+        // Whole-body daily timeline for standard scales (Withings Body+/Smart/Comp, Garmin Index, Health Connect, manual)
+        val latestFatFallback = fatRows.lastOrNull()?.value
+        val latestMuscleFallback = muscleRows.lastOrNull()?.value
+        val latestWaterFallback = waterRows.lastOrNull()?.value
+        val latestBoneFallback = boneRows.lastOrNull()?.value
+        val latestVfFallback = visceralRows.lastOrNull()?.value
+        val wholeSnaps = if (segSnaps.isEmpty()) {
+            weightRows
+                .filter { it.localDate != null && it.value in 25.0..260.0 }
+                .groupBy { it.localDate!! }
+                .toSortedMap()
+                .entries
+                .map { (date, rows) ->
+                    val wKg = rows.last().value
+                    WholeBody3DSnapshot(
+                        dateLabel = date,
+                        weightKg = wKg,
+                        fatPct = fatMap[date] ?: latestFatFallback,
+                        muscleKg = muscleMap[date] ?: latestMuscleFallback,
+                        waterKg = waterMap[date] ?: latestWaterFallback,
+                        boneKg = boneMap[date] ?: latestBoneFallback,
+                        visceralFat = vMap[date] ?: latestVfFallback,
+                    )
+                }
+                .takeLast(90)
+        } else {
+            emptyList()
+        }
+
+        SegmentalUiBundle(
+            snapshots = segSnaps,
+            wholeBodySnapshots = wholeSnaps,
+            gender = primaryGender,
+            weightByDate = wMap,
+            visceralByDate = vMap,
+            latestWeightKg = weightRows.lastOrNull()?.value,
+            latestVisceralFat = latestVfFallback,
+        )
     }
 
-    val list = snapshots.orEmpty()
-    if (list.isEmpty()) return
+    val list = segBundle?.snapshots.orEmpty()
+    val wholeList = segBundle?.wholeBodySnapshots.orEmpty()
+    if (list.isEmpty() && wholeList.isEmpty()) return
 
-    val latest = list.last()
-    val prev = if (list.size >= 2) list[list.size - 2] else null
+    // Fallback: whole-body 3D composition figure for users with standard scales (without 5-segment Body Scan)
+    if (list.isEmpty()) {
+        var wholeSnapIdx by remember(wholeList.size) { mutableStateOf(wholeList.lastIndex) }
+        val safeWholeIdx = wholeSnapIdx.coerceIn(0, wholeList.lastIndex)
+        val activeWhole = wholeList[safeWholeIdx]
+        var genderOverride by remember { mutableStateOf(sl.settings.body3dGenderOverride) }
+        val effectiveGender = genderOverride ?: (segBundle?.gender ?: 0)
+
+        Card(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+            shape = RoundedCornerShape(22.dp),
+            border = BorderStroke(
+                1.dp,
+                when (viewMode) {
+                    Body3DViewMode.FAT -> MetricPalette.Fat.copy(alpha = 0.45f)
+                    Body3DViewMode.COMPOSITE -> Color(0xFF38BDF8).copy(alpha = 0.45f)
+                    Body3DViewMode.MUSCLE -> MetricPalette.Muscle.copy(alpha = 0.45f)
+                },
+            ),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF0D1520))
+        ) {
+            Box(Modifier.fillMaxWidth()) {
+                Canvas(Modifier.matchParentSize()) {
+                    val aura = when (viewMode) {
+                        Body3DViewMode.FAT -> MetricPalette.Fat
+                        Body3DViewMode.COMPOSITE -> Color(0xFF38BDF8)
+                        Body3DViewMode.MUSCLE -> MetricPalette.Muscle
+                    }
+                    drawRect(
+                        brush = Brush.verticalGradient(
+                            listOf(
+                                aura.copy(alpha = 0.08f),
+                                Color(0xFF0D1520),
+                                Color(0xFF060A10)
+                            )
+                        )
+                    )
+                }
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                "3D POSTAVA · VÁHA A SLOŽENÍ TĚLA",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = when (viewMode) {
+                                    Body3DViewMode.FAT -> MetricPalette.Fat
+                                    Body3DViewMode.COMPOSITE -> Color(0xFF38BDF8)
+                                    Body3DViewMode.MUSCLE -> MetricPalette.Muscle
+                                },
+                                letterSpacing = 1.0.sp
+                            )
+                            Text(
+                                "Celotělový 3D model (${activeWhole.dateLabel}) · " +
+                                    if (effectiveGender == 1) "ženská silueta (boky & stehna)"
+                                    else "mužská silueta (trup & břicho)",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFFCBD5E1)
+                            )
+                        }
+                        ChartInfoAction(remember { ChartInfoTexts.build(ChartKey.SEGMENTAL_TABLE) })
+                    }
+
+                    InteractiveWholeBody3DFigure(
+                        snapshots = wholeList,
+                        activeIndex = safeWholeIdx,
+                        onActiveIndexChange = { wholeSnapIdx = it },
+                        viewMode = viewMode,
+                        onViewModeChange = { viewMode = it },
+                        unitMode = activeUnitMode,
+                        gender = effectiveGender,
+                        onGenderChange = { g ->
+                            genderOverride = g
+                            sl.settings.body3dGenderOverride = g
+                        },
+                    )
+                }
+            }
+        }
+        return
+    }
+
+    var activeSnapIdx by remember(list.size) { mutableStateOf(list.lastIndex) }
+    val safeSnapIdx = activeSnapIdx.coerceIn(0, list.lastIndex)
+    val latest = list[safeSnapIdx]
+    val prev = if (safeSnapIdx >= 1) list[safeSnapIdx - 1] else null
 
     val currentMap = if (showFatMode) latest.fatByPos else latest.muscleByPos
     val prevMap = if (showFatMode) prev?.fatByPos else prev?.muscleByPos
@@ -2092,27 +2249,29 @@ fun SegmentalBodyCompositionSection(
     Card(
         modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
         shape = RoundedCornerShape(22.dp),
-        border = BorderStroke(1.dp, if (showFatMode) MetricPalette.Fat.copy(alpha = 0.55f) else MetricPalette.Muscle.copy(alpha = 0.55f)),
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF070C15))
+        border = BorderStroke(
+            1.dp,
+            when (viewMode) {
+                Body3DViewMode.FAT -> MetricPalette.Fat.copy(alpha = 0.45f)
+                Body3DViewMode.COMPOSITE -> Color(0xFF38BDF8).copy(alpha = 0.45f)
+                Body3DViewMode.MUSCLE -> MetricPalette.Muscle.copy(alpha = 0.45f)
+            },
+        ),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF0D1520))
     ) {
         Box(Modifier.fillMaxWidth()) {
-            Image(
-                painter = painterResource(
-                    id = if (showFatMode) R.drawable.img_motif_body_fat else R.drawable.img_motif_body_silhouette
-                ),
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier
-                    .matchParentSize()
-                    .alpha(0.68f)
-            )
             Canvas(Modifier.matchParentSize()) {
+                val aura = when (viewMode) {
+                    Body3DViewMode.FAT -> MetricPalette.Fat
+                    Body3DViewMode.COMPOSITE -> Color(0xFF38BDF8)
+                    Body3DViewMode.MUSCLE -> MetricPalette.Muscle
+                }
                 drawRect(
                     brush = Brush.verticalGradient(
                         listOf(
-                            Color(0xCC060B14),
-                            Color(0xB3060B14),
-                            Color(0xE6050911)
+                            aura.copy(alpha = 0.08f),
+                            Color(0xFF0D1520),
+                            Color(0xFF060A10)
                         )
                     )
                 )
@@ -2125,17 +2284,24 @@ fun SegmentalBodyCompositionSection(
                 ) {
                     Column(Modifier.weight(1f)) {
                         Text(
-                            if (showFatMode) "SEGMENTÁLNÍ ROZLOŽENÍ TUKU (RUCE, TRUP, NOHY)"
-                            else "SEGMENTÁLNÍ ROZLOŽENÍ SVALŮ (RUCE, TRUP, NOHY)",
+                            when (viewMode) {
+                                Body3DViewMode.FAT -> "3D SEGMENTÁLNÍ ROZLOŽENÍ TUKU"
+                                Body3DViewMode.COMPOSITE -> "3D POSTAVA · SVALY A TUK"
+                                Body3DViewMode.MUSCLE -> "3D SEGMENTÁLNÍ ROZLOŽENÍ SVALŮ"
+                            },
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.Bold,
-                            color = if (showFatMode) MetricPalette.Fat else MetricPalette.Muscle,
+                            color = when (viewMode) {
+                                Body3DViewMode.FAT -> MetricPalette.Fat
+                                Body3DViewMode.COMPOSITE -> Color(0xFF38BDF8)
+                                Body3DViewMode.MUSCLE -> MetricPalette.Muscle
+                            },
                             letterSpacing = 1.0.sp
                         )
                         Text(
                             "Withings Body Scan (${latest.dateLabel}) · " +
-                                if (activeUnitMode == BodyUnitMode.KG) "zobrazeno v kilogramech (${fmt.weightUnit()})"
-                                else "zobrazeno v procentech dané části těla (%)",
+                                if (activeUnitMode == BodyUnitMode.KG) "hodnoty v ${fmt.weightUnit()}"
+                                else "podíl v % dané části těla",
                             style = MaterialTheme.typography.labelSmall,
                             color = Color(0xFFCBD5E1)
                         )
@@ -2143,23 +2309,28 @@ fun SegmentalBodyCompositionSection(
                     ChartInfoAction(remember { ChartInfoTexts.build(ChartKey.SEGMENTAL_TABLE) })
                 }
 
-            // Přepínač Svaly vs Tuk
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(
-                    selected = !showFatMode,
-                    onClick = { showFatMode = false },
-                    leadingIcon = { Icon(PulseIcons.Muscle, contentDescription = null, modifier = Modifier.size(16.dp)) },
-                    label = { Text("Svalová hmota", maxLines = 1) },
-                    modifier = Modifier.weight(1f)
-                )
-                FilterChip(
-                    selected = showFatMode,
-                    onClick = { showFatMode = true },
-                    leadingIcon = { Icon(PulseIcons.BodyFat, contentDescription = null, modifier = Modifier.size(16.dp)) },
-                    label = { Text("Tuková tkáň", maxLines = 1) },
-                    modifier = Modifier.weight(1f)
-                )
-            }
+            // Interaktivní 3D postava tvarovaná přímo podle naměřených dat
+            var genderOverride by remember { mutableStateOf(sl.settings.body3dGenderOverride) }
+            val effectiveGender = genderOverride ?: (segBundle?.gender ?: 0)
+            InteractiveBody3DFigure(
+                snapshots = list,
+                activeIndex = safeSnapIdx,
+                onActiveIndexChange = { activeSnapIdx = it },
+                viewMode = viewMode,
+                onViewModeChange = { viewMode = it },
+                unitMode = activeUnitMode,
+                selectedSegmentPos = selectedSegmentPos,
+                onSelectSegment = { selectedSegmentPos = it },
+                gender = effectiveGender,
+                onGenderChange = { g ->
+                    genderOverride = g
+                    sl.settings.body3dGenderOverride = g
+                },
+                weightByDate = segBundle?.weightByDate.orEmpty(),
+                visceralByDate = segBundle?.visceralByDate.orEmpty(),
+                fallbackWeightKg = segBundle?.latestWeightKg,
+                fallbackVisceralFat = segBundle?.latestVisceralFat,
+            )
 
             // Přepínač jednotky: Kilogramy (kg) vs Procenta (%)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {

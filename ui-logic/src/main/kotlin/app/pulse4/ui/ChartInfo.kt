@@ -79,8 +79,8 @@ object ChartInfoTexts {
         )
         ChartKey.SEGMENTAL_TABLE -> ChartInfo(
             key = key,
-            title = "Složení podle částí těla",
-            intro = "Ukazuje, kolik svalů nebo tuku máte v rukou, trupu a nohou, jestli jsou levá a pravá strana vyvážené i jak se hodnoty vyvíjí v čase.",
+            title = "3D složení podle částí těla",
+            intro = "3D postava se tvaruje podle naměřených svalů, tuku a viscerálního tuku v rukou, trupu a nohou. Tažením ji otočíte o 360°, klepnutím vyberete konkrétní část a posuvníkem si přehrajete proměnu v čase.",
         )
         ChartKey.SLEEP_STAGES_BAR -> ChartInfo(
             key = key,
